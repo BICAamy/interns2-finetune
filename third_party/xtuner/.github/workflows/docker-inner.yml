@@ -1,0 +1,68 @@
+name: publish-docker-inner
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        required: true
+        description: 'Set docker image tag. Default is "latest", you can also set "auto" to generate a formated tag, or input a manual tag'
+        type: string
+        default: auto
+      torch_version:
+        required: true
+        description: 'Set docker torch version. Default is "2.9.1"'
+        type: string
+        default: '2.9.1'
+      image_repo_short:
+        required: true
+        description: 'Set target repository for pushing the docker image. Default is "xtuner"'
+        type: choice
+        options:
+          - xtuner
+          - xtuner_tmp
+        default: 'xtuner'
+      build_only:
+        required: false
+        description: 'Only build the docker image, do not triggle pushing.'
+        type: boolean
+        default: false
+  schedule:
+    - cron:  '00 14 * * 0-4'
+
+jobs:
+  publish_docker_image:
+    runs-on: [docker-inner]
+    env:
+      IMAGE_NAME: ailab-llmrazor/${{ inputs.image_repo_short || 'xtuner' }}
+      IMAGE_TAG: ${{ inputs.image_tag || 'auto' }}
+      TORCH_VERSION: ${{ inputs.torch_version || '2.9.1' }}
+      SCHEDULE_TAG: 'pt29_latest'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Parse tag
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == 'schedule' ]]; then
+            IMAGE_TAG="${SCHEDULE_TAG}"
+            echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+          elif [[ "${IMAGE_TAG}" == 'auto' ]]; then
+            DATE_TODAY="$(date +'%Y%m%d')"
+            COMMIT_SHA="$(git rev-parse --short HEAD)"
+            IMAGE_TAG="pt$(echo ${TORCH_VERSION} | awk -F. '{print $1$2}')_${DATE_TODAY}_${COMMIT_SHA}"
+            echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+          fi
+          echo "DOCKER_TAG=${{ secrets.CI_GPU_IMAGE_REGISTRY }}/${IMAGE_NAME}:${IMAGE_TAG}" >> $GITHUB_ENV
+          echo "SHORT_DOCKER_TAG=${IMAGE_NAME}:${IMAGE_TAG}" >> $GITHUB_ENV
+      - name: Build image
+        run: |
+          cat ${{vars.EXTRA_DOCKERFILE}} >> ${{ github.workspace }}/Dockerfile
+          echo "IMAGE_NAME: ${IMAGE_NAME}, IMAGE_TAG: ${IMAGE_TAG}"
+          export IMAGE_NAME=${{ secrets.CI_GPU_IMAGE_REGISTRY }}/${IMAGE_NAME}
+          bash ${{ github.workspace }}/image_build.sh
+          echo "Built image with tag: ${SHORT_DOCKER_TAG}"
+      - name: Push to cluster
+        if: ${{ !inputs.build_only }}
+        run: |
+          echo "pushing $SHORT_DOCKER_TAG ..."
+          docker login ${{ secrets.CI_GPU_IMAGE_REGISTRY }} -p ${{ secrets.CLUSTER_DOCKERHUB_TOKEN }} -u ${{ secrets.CLUSTER_DOCKERHUB_USERNAME }}
+          docker push $DOCKER_TAG

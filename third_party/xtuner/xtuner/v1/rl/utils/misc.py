@@ -1,0 +1,334 @@
+import importlib
+import json
+import random
+import socket
+import time
+import typing
+import urllib.error
+import urllib.request
+import uuid
+from abc import ABC
+from pathlib import Path
+from typing import Any, List, Literal, Union
+
+import requests
+import torch.nn.functional as F
+
+from xtuner.v1.data_proto.rl_data import RolloutState
+from xtuner.v1.data_proto.utils import calculate_seq_staleness as calculate_seq_staleness
+from xtuner.v1.utils.logger import get_logger
+
+
+logger = get_logger()
+ScalarOperator = Literal["$eq", "$ne", "$gt", "$gte", "$lt", "$lte"]
+SetOperator = Literal["$in", "$not_in"]
+BetweenOperator = Literal["$between"]
+Operators = Union[ScalarOperator, SetOperator, BetweenOperator]
+LogicOperator = Literal["$and", "$or"]
+
+
+class QueryNode(ABC):
+    """查询语法树的基类，仅作数据结构标记."""
+
+    pass
+
+
+class ConditionNode(QueryNode):
+    """代表一个具体的查询条件."""
+
+    field: str
+
+
+class ScalarNode(ConditionNode):
+    def __init__(self, field: str, op: ScalarOperator, value: Any):
+        self.field = field
+        self.op = op
+        self.value = value
+
+
+class SetNode(ConditionNode):
+    def __init__(self, field: str, op: SetOperator, value: list[Any] | tuple[Any]):
+        self.field = field
+        self.op = op
+        self.value = value
+
+
+class BetweenNode(ConditionNode):
+    def __init__(self, field: str, lower: Any, upper: Any):
+        if lower > upper:
+            raise ValueError("lower bound must be less than or equal to upper bound")
+        self.field = field
+        self.op = "$between"
+        self.lower = lower
+        self.upper = upper
+
+
+class LogicNode(QueryNode):
+    """复合逻辑组."""
+
+    def __init__(self, relation: LogicOperator, conditions: List[QueryNode]):
+        self.relation = relation
+        self.conditions = conditions
+
+
+def parse_query(expr: Union[dict, QueryNode]) -> QueryNode:
+    """将基于字典的 DSL 解析为纯粹的 AST 节点树 (ConditionNode, LogicNode)"""
+    if isinstance(expr, QueryNode):
+        return expr
+
+    if isinstance(expr, dict):
+        conditions: list[QueryNode] = []
+        for key, value in expr.items():
+            if key in ("$and", "$or"):
+                if isinstance(value, list):
+                    sub_asts = [parse_query(sub_expr) for sub_expr in value]
+                    conditions.append(LogicNode(key, sub_asts))  # type: ignore
+                else:
+                    raise ValueError(f"逻辑操作符 {key} 的值必须是一个列表")
+            else:
+                if isinstance(value, dict):
+                    # 例如: {"staleness": {"$lt": 5, "$gt": 0}}
+                    for op, op_val in value.items():
+                        if op in typing.get_args(ScalarOperator):
+                            conditions.append(ScalarNode(field=key, op=op, value=op_val))
+                        elif op in typing.get_args(SetOperator):
+                            if not isinstance(op_val, (list, tuple)):
+                                raise ValueError(f"操作符 '{op}' 需要传入一个列表或元组")
+                            conditions.append(SetNode(field=key, op=op, value=op_val))
+                        elif op == "$between":
+                            if not isinstance(op_val, (list, tuple)) or len(op_val) != 2:
+                                raise ValueError("操作符 '$between' 需要传入包含2个元素的列表或元组")
+                            conditions.append(BetweenNode(field=key, lower=op_val[0], upper=op_val[1]))
+                        else:
+                            raise ValueError(f"不支持的操作符: {op}")
+                else:
+                    # 隐式等值，例如: {"task_name": "math"} -> "$eq"
+                    conditions.append(ScalarNode(field=key, op="$eq", value=value))
+
+        if len(conditions) > 1:
+            # 默认多个条件之间是 AND 关系，例如: {"uid": "123", "status": {"$in": ["pending", "running]}}}
+            return LogicNode("$and", conditions)  # type: ignore
+        return conditions[0] if conditions else LogicNode("$and", [])
+
+    raise ValueError(f"不支持的查询表达式格式: {expr}")
+
+
+def gather_logprobs(logits, shifted_labels):
+    logprobs = F.log_softmax(logits, dim=-1)
+    logprobs = logprobs.gather(dim=-1, index=shifted_labels.clip(min=0).unsqueeze(-1)).squeeze(-1)
+    return logprobs
+
+
+def sort_rollout_state_for_deterministic(data_groups: list[list[RolloutState]]) -> list[list[RolloutState]]:
+    def sort_key(sample: RolloutState) -> tuple[int, int]:
+        return (sample.group_id or 0, sample.rollout_id or 0)
+
+    sorted_groups = [sorted(group, key=sort_key) for group in data_groups]
+    sorted_groups.sort(key=lambda group: min((sort_key(item) for item in group), default=(-1, -1)))
+    return sorted_groups
+
+
+def load_function(path):
+    """Load a function from a module.
+
+    :param path: The path to the function, e.g. "module.submodule.function".
+    :return: The function object.
+    """
+    module_path, _, attr = path.rpartition(".")
+    module = importlib.import_module(module_path)
+    return getattr(module, attr)
+
+
+def find_free_ports(
+    *,
+    nums: int = 1,
+    host: str = "127.0.0.1",
+    start_port: int | None = None,
+    end_port: int | None = None,
+    contiguous: bool = False,
+) -> list[int]:
+    """Return available TCP ports on the given host.
+
+    The candidate sockets are kept open until all requested ports are found so
+    one call cannot return duplicate ports. Set ``contiguous=True`` to require
+    the returned ports to be a continuous range.
+    """
+    if nums < 1:
+        raise ValueError("nums must be greater than 0.")
+    if start_port is not None:
+        if end_port is None:
+            raise ValueError("end_port must be set when start_port is set.")
+        if end_port - start_port < nums:
+            raise ValueError("The port range must contain at least nums ports.")
+
+    def try_bind_ports(candidate_ports: list[int]) -> list[int] | None:
+        ports: list[int] = []
+        sockets: list[socket.socket] = []
+        try:
+            for candidate_port in candidate_ports:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    sock.bind((host, candidate_port))
+                    sock.listen(1)
+                except OSError:
+                    sock.close()
+                    return None
+
+                sockets.append(sock)
+                ports.append(int(sock.getsockname()[1]))
+            return ports
+        finally:
+            for sock in sockets:
+                sock.close()
+
+    if contiguous:
+        if start_port is None:
+            for _ in range(100):
+                candidate = random.randint(20000, 60000 - nums)
+                bound_ports = try_bind_ports(list(range(candidate, candidate + nums)))
+                if bound_ports is not None:
+                    return bound_ports
+        else:
+            assert end_port is not None
+            for candidate in range(start_port, end_port - nums + 1):
+                bound_ports = try_bind_ports(list(range(candidate, candidate + nums)))
+                if bound_ports is not None:
+                    return bound_ports
+    else:
+        available_ports: list[int] = []
+        sockets: list[socket.socket] = []
+        try:
+            if start_port is None:
+                candidates: range | list[int] = [0] * nums
+            else:
+                assert end_port is not None
+                candidates = range(start_port, end_port)
+
+            for candidate_port in candidates:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    sock.bind((host, candidate_port))
+                    sock.listen(1)
+                except OSError:
+                    sock.close()
+                    continue
+
+                sockets.append(sock)
+                available_ports.append(int(sock.getsockname()[1]))
+                if len(available_ports) >= nums:
+                    return available_ports
+        finally:
+            for sock in sockets:
+                sock.close()
+
+    if start_port is None:
+        raise RuntimeError(f"Could not find {nums} available ports.")
+    raise RuntimeError(f"Could not find {nums} available ports from {start_port} to {end_port}.")
+
+
+def get_eos_token(model_path: str) -> int | List[int]:
+    generation_config_path = Path(model_path) / "generation_config.json"
+    if not generation_config_path.exists():
+        logger.warning(
+            f"Config {generation_config_path} does not exist and thus cannot get eos_token. You must provide eos_token manually."
+        )
+        return []
+    with open(generation_config_path) as f:
+        generation_config = json.load(f)
+    eos_token_id = generation_config.get("eos_token_id")
+    if eos_token_id is None:
+        raise ValueError(
+            f"eos_token_id is not found in {generation_config_path}. You must provide eos_token manually."
+        )
+    return eos_token_id
+
+
+def register_to_routedapiproxy(admin_url: str, model_name: str, api_server_url: str) -> dict:
+    url = f"{admin_url.rstrip('/')}/v1/models/new"
+    payload = {
+        "model_name": model_name,
+        "api_key": "sk-admin",
+        "api_base": api_server_url,
+    }
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def delete_from_routedapiproxy(admin_url: str, model_name: str, api_server_url: str | None = None) -> None:
+    url = f"{admin_url.rstrip('/')}/v1/models/delete"
+    payload = {
+        "model_name": model_name,
+    }
+    if api_server_url is not None:
+        payload["api_base"] = api_server_url
+    headers = {
+        "accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=30)
+    resp.raise_for_status()
+
+
+TIMEOUT = 120
+API_KEY = "sk-admin"
+
+HEADERS = {
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {API_KEY}",
+}
+
+
+def _post(url: str, payload: dict) -> dict:
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers=HEADERS, method="POST")
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        return json.loads(resp.read())
+
+
+def check_chat_completions(base_url: str, model: str) -> bool:
+    normalized_base_url = base_url.rstrip("/")
+    if normalized_base_url.endswith("/v1"):
+        url = f"{normalized_base_url}/chat/completions"
+    else:
+        url = f"{normalized_base_url}/v1/chat/completions"
+    payload = {
+        "model": model,
+        "session_id": str(uuid.uuid4()),
+        "messages": [{"role": "user", "content": "Reply with exactly: pong"}],
+        "max_tokens": 16,
+        "temperature": 0.0,
+        "extra_body": {"spaces_between_special_tokens": False},
+    }
+    print(f"[RoutedProxyCheck] START url={url} model={model}", flush=True)
+    t0 = time.time()
+    try:
+        result = _post(url, payload)
+        elapsed = time.time() - t0
+        content = result["choices"][0]["message"]["content"]
+        usage = result.get("usage", {})
+        print(
+            f"[RoutedProxyCheck] OK url={url} model={model} elapsed={elapsed:.2f}s response={content!r} usage={usage}",
+            flush=True,
+        )
+        return True
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        print(
+            f"[RoutedProxyCheck] FAILED url={url} model={model} elapsed={time.time() - t0:.2f}s "
+            f"HTTP {e.code} {e.reason}: {body[:2000]}",
+            flush=True,
+        )
+        return False
+    except Exception as e:
+        print(
+            f"[RoutedProxyCheck] FAILED url={url} model={model} elapsed={time.time() - t0:.2f}s error={e}",
+            flush=True,
+        )
+        return False

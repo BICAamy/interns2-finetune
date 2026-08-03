@@ -1,48 +1,88 @@
-models/**/*.safetensors
-models/**/*.bin
-models/**/*.pt
-models/**/*.pth
-models/**/*.ckpt
-models/**/*.npy
-models/**/*.gguf
-models/**/*.onnx
+# ============================================================
+# Model weights
+# 保留 config.json、README、Tokenizer、Python代码等文本文件
+# ============================================================
+/models/**/*.safetensors
+/models/**/*.bin
+/models/**/*.pt
+/models/**/*.pth
+/models/**/*.ckpt
+/models/**/*.npy
+/models/**/*.gguf
+/models/**/*.onnx
+/models/**/.cache/
 
 
+# ============================================================
+# Python
+# ============================================================
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.egg-info/
-.venv/
-venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .ipynb_checkpoints/
 
 
+# ============================================================
+# Python virtual environments
+# ============================================================
+.venv/
+venv/
+.venv-xtuner/
+
+
+# ============================================================
+# IDE / editor
+# ============================================================
 .vscode/
 .idea/
 *.swp
 *.swo
 
 
+# ============================================================
+# Operating system
+# ============================================================
 .DS_Store
 Thumbs.db
 
-logs/
+
+# ============================================================
+# Runtime logs and temporary files
+# ============================================================
+/logs/
 *.log
-output/
-results/
-checkpoints/
-wandb/
+/ray_tmp/
+/git_review.txt
 
 
-data/
-dataset/
+# ============================================================
+# Training outputs
+# ============================================================
+/output/
+/outputs/
+/results/
+/checkpoints/
+/work_dirs/
+/wandb/
+/runs/
+/tensorboard/
 
-# Python virtual environments
-.venv-xtuner/
 
-# Third-party repositories
-# Python cache
-__pycache__/
-*.py[cod]
+# ============================================================
+# Local datasets
+# 根据项目实际目录名称调整
+# ============================================================
+/data/
+/dataset/
+/datasets/
 
-ray_tmp/
+
+# ============================================================
+# Local environment and secrets
+# ============================================================
+.env
+.env.*
+!.env.example

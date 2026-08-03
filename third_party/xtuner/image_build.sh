@@ -1,0 +1,56 @@
+export HTTPS_PROXY=$HTTPS_PROXY
+
+export BASE_IMAGE=nvcr.io/nvidia/pytorch:25.03-py3
+export XTUNER_COMMIT=$(git rev-parse HEAD)
+export XTUNER_URL=https://github.com/InternLM/xtuner@${XTUNER_COMMIT}
+export FLASH_ATTN_URL=https://github.com/Dao-AILab/flash-attention@060c9188beec3a8b62b33a3bfa6d5d2d44975fab
+export ADAPTIVE_GEMM_URL=https://github.com/InternLM/AdaptiveGEMM@10411e08b182e853d0f3ecec4c68bf90c90e309f # fix fp8 dw k_grouped_gemm bug
+export GROUPED_GEMM_URL=https://github.com/InternLM/GroupedGEMM@aa5ffb21cb626d6cd61d99fc42958127b0b99be7
+export DEEP_EP_URL=https://github.com/deepseek-ai/DeepEP@9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee # v1.2.1
+export DEEP_GEMM_URL=https://github.com/deepseek-ai/DeepGEMM@c9f8b34dcdacc20aa746b786f983492c51072870 # v2.1.1.post3
+export CAUSAL_CONV1D_URL=https://github.com/Dao-AILab/causal-conv1d@da6dbaa9fd5a919967f14d3fd031da1288ad5025 # v1.6.0
+export FLA_URL="${FLA_URL-https://github.com/HAOCHENYE/flash-linear-attention@tmp-tensor-cache}"
+
+export TORCH_VERSION=${TORCH_VERSION:-"2.9.1"}
+# export LMDEPLOY_VERSION="0.13.0dev"
+export LMDEPLOY_URL=https://github.com/InternLM/lmdeploy@efe3b88607756a7ad9411b89627b5ac6ebaa540e
+export PPA_SOURCE="https://mirrors.aliyun.com"
+export DEFAULT_PYPI_URL=${DEFAULT_PYPI_URL:-"https://mirrors.aliyun.com/pypi/simple"}
+# mirror https://download.pytorch.org/whl
+export PYTORCH_WHEELS_URL=${PYTORCH_WHEELS_URL:-"https://download.pytorch.org/whl"}
+
+image_name=${IMAGE_NAME:-"xtuner"}
+image_tag=${IMAGE_TAG:-"pt$(echo ${TORCH_VERSION} | awk -F. '{print $1$2}')_$(date +%Y%m%d)_${XTUNER_COMMIT:0:7}"}
+
+docker build . \
+  -t "$image_name:$image_tag" \
+  --secret id=HTTPS_PROXY \
+  --secret id=NO_PROXY \
+  --build-arg TORCH_VERSION=$TORCH_VERSION\
+  --build-arg BASE_IMAGE=$BASE_IMAGE \
+  --build-arg PPA_SOURCE="$PPA_SOURCE" \
+  --build-arg DEFAULT_PYPI_URL="$DEFAULT_PYPI_URL" \
+  --build-arg PYTORCH_WHEELS_URL="$PYTORCH_WHEELS_URL" \
+  --build-arg ADAPTIVE_GEMM_URL="$ADAPTIVE_GEMM_URL" \
+  --build-arg FLASH_ATTN_URL=$FLASH_ATTN_URL \
+  --build-arg GROUPED_GEMM_URL=$GROUPED_GEMM_URL \
+  --build-arg CAUSAL_CONV1D_URL=$CAUSAL_CONV1D_URL \
+  --build-arg FLA_URL="$FLA_URL" \
+  --build-arg DEEP_EP_URL=$DEEP_EP_URL \
+  --build-arg DEEP_GEMM_URL=$DEEP_GEMM_URL \
+  --build-arg XTUNER_URL=$XTUNER_URL \
+  --build-arg XTUNER_COMMIT=$XTUNER_COMMIT \
+  --build-arg LMDEPLOY_URL=$LMDEPLOY_URL \
+  --progress=plain \
+  --label "BASE_IMAGE=$BASE_IMAGE" \
+  --label "XTUNER_URL=${XTUNER_URL/@/\/tree\/}" \
+  --label "XTUNER_COMMIT=$XTUNER_COMMIT" \
+  --label "ADAPTIVE_GEMM_URL=${ADAPTIVE_GEMM_URL/@/\/tree\/}" \
+  --label "FLASH_ATTN_URL=${FLASH_ATTN_URL/@/\/tree\/}" \
+  --label "GROUPED_GEMM_URL=${GROUPED_GEMM_URL/@/\/tree\/}" \
+  --label "CAUSAL_CONV1D_URL=${CAUSAL_CONV1D_URL/@/\/tree\/}" \
+  --label "FLA_URL=${FLA_URL/@/\/tree\/}" \
+  --label "DEEP_EP_URL=${DEEP_EP_URL/@/\/tree\/}" \
+  --label "DEEP_GEMM_URL=${DEEP_GEMM_URL/@/\/tree\/}" \
+  --label "LMDEPLOY_URL=${LMDEPLOY_URL/@/\/tree\/}"
+  # --label "LMDEPLOY_VERSION=$LMDEPLOY_VERSION"

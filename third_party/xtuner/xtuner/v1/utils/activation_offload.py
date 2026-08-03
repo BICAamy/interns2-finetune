@@ -1,0 +1,414 @@
+"""
+This file is adapted from: https://gitee.com/ascend/MindSpeed-MM/blob/master/mindspeed_mm/utils/async_offload.py
+Original Author: liyx616
+Original License: MIT
+Modifications: To enable compatibility on both GPU and NPU, replace all torch.npu with torch.cuda, and then use the transfer_to_npu interface
+"""
+
+import torch
+from torch.autograd.graph import saved_tensors_hooks
+
+from xtuner.v1.utils.device import get_device
+
+
+if get_device() == "npu":
+    from torch_npu.contrib import transfer_to_npu  # noqa
+
+
+def base_check_fn(tensor):
+    if isinstance(tensor._base, torch.nn.parameter.Parameter) or isinstance(tensor, torch.nn.parameter.Parameter):
+        return False
+    if tensor.untyped_storage().size() <= 0:
+        return False
+    return True
+
+
+class GetCnt:
+    def __init__(self):
+        self._block_idx = -1
+        self._block_tensor_nums = {}  # offload tensors per block
+
+    def get_cnt(self, block_idx):
+        prev_block_idx = None if self._block_idx == -1 else self._block_idx
+        after_block = False
+
+        if block_idx > self._block_idx:
+            self._block_tensor_nums[block_idx] = 1
+            if block_idx != 0:
+                after_block = True
+            self._block_idx = block_idx
+        elif block_idx == self._block_idx:
+            self._block_tensor_nums[block_idx] += 1
+        else:
+            # one step end
+            self._block_idx = block_idx
+            self._block_tensor_nums = {block_idx: 1}
+
+        offload_tensor_key = f"{self._block_idx}_{self._block_tensor_nums[self._block_idx] - 1}"
+        return offload_tensor_key, after_block, prev_block_idx
+
+    def get_prefetch_keys(self, block_idx, tensor_idx):
+        prefetch_block_idx = max((idx for idx in self._block_tensor_nums.keys() if idx < block_idx), default=None)
+
+        if prefetch_block_idx is None:
+            return []
+
+        prefetch_block_tensor_nums = self._block_tensor_nums[prefetch_block_idx]
+        block_tensor_nums = self._block_tensor_nums[block_idx]
+        start = tensor_idx * prefetch_block_tensor_nums // block_tensor_nums
+        end = (tensor_idx + 1) * prefetch_block_tensor_nums // block_tensor_nums
+        prefetch_idxs = list(range(start, end))
+        return [f"{block_idx - 1}_{prefetch_idx}" for prefetch_idx in prefetch_idxs]
+
+
+class SwapTensor:
+    def __init__(self, tensor, key, tensor_cpu=None):
+        self.tensor = tensor
+        self.size = tensor.size()
+        self.storage_size = tensor.storage().size()
+        # Reuse a caller-provided pinned CPU buffer when available; otherwise allocate a fresh one.
+        # Reuse is keyed externally (see OffloadManager.get_or_create_pin_memory) so the buffer
+        # survives across iterations and avoids repeated pin_memory allocations.
+        if tensor_cpu is not None:
+            self.tensor_cpu = tensor_cpu
+        else:
+            self.tensor_cpu = torch.empty(tensor.shape, dtype=tensor.dtype, pin_memory=True, device="cpu")
+
+        self.is_slice_tensor = tensor.storage().size() != tensor.numel()
+        self.stat = "device"
+        self.key = key
+
+        self.h2d_event = torch.cuda.Event()
+
+    # device to host
+    def launch_d2h(self, stream):
+        if self.stat != "device":
+            return
+
+        forward_event = torch.cuda.Event()
+        forward_event.record()
+        with torch.no_grad():
+            with torch.cuda.stream(stream):
+                stream.wait_event(forward_event)
+                if self.is_slice_tensor:
+                    self.tensor_cpu.copy_(self.tensor, non_blocking=True)
+                else:
+                    self.tensor_cpu.storage().copy_(self.tensor.storage(), non_blocking=True)
+                self.stat = "host"
+
+    # synchronize d2h and resize 0
+    def wait_d2h_finished(self, stream, flag):
+        if self.stat != "host":
+            return
+        if flag:
+            torch.cuda.current_stream().wait_stream(stream)
+            torch.cuda.default_stream().wait_stream(stream)
+        self.tensor.storage().resize_(0)
+        self.stat = "host"
+
+    # resize storage_size and host to device
+    def launch_h2d(self, h2d_stream: torch.cuda.Stream, flag, working_stream):
+        if self.stat != "host":
+            # waiting for `non-blocking` storage copy of `prefetch_launch_h2d`
+            working_stream.wait_event(self.h2d_event)
+            # working_stream.wait_stream(h2d_stream)
+            return
+        if flag:
+            self.tensor.storage().resize_(self.storage_size)
+        with torch.no_grad():
+            # if self.tensor_cpu.isnan().any():
+            #     raise RuntimeError("d2h error")
+            if self.is_slice_tensor:
+                self.tensor.copy_(self.tensor_cpu)
+            else:
+                self.tensor.storage().copy_(self.tensor_cpu.storage())
+            self.stat = "device"
+
+    def load(self):
+        self.tensor.storage().resize_(self.storage_size)
+        with torch.no_grad():
+            # if self.tensor_cpu.isnan().any():
+            #     raise RuntimeError("d2h error")
+            if self.is_slice_tensor:
+                self.tensor.copy_(self.tensor_cpu)
+            else:
+                self.tensor.storage().copy_(self.tensor_cpu.storage())
+            self.stat = "device"
+
+    # resize storage_size and host to device
+    def prefetch_launch_h2d(self, h2dstream, flag):
+        if self.stat != "host":
+            return
+        backward_event = torch.cuda.Event()
+        backward_event.record()
+        if flag:
+            self.tensor.storage().resize_(self.storage_size)
+        with torch.no_grad():
+            with torch.cuda.stream(h2dstream):
+                # if self.tensor_cpu.isnan().any():
+                #     raise RuntimeError("d2h error")
+                h2dstream.wait_event(backward_event)
+                if self.is_slice_tensor:
+                    self.tensor.copy_(self.tensor_cpu, non_blocking=True)
+                else:
+                    self.tensor.storage().copy_(self.tensor_cpu.storage(), non_blocking=True)
+                self.h2d_event.record()
+                self.tensor.record_stream(h2dstream)
+                self.stat = "device"
+
+    # synchronize h2d
+    def wait_h2d_finished(self):
+        if self.stat != "device":
+            return
+        if self.h2d_event:
+            torch.cuda.current_stream().wait_event(self.h2d_event)
+            torch.cuda.default_stream().wait_event(self.h2d_event)
+        self.stat = "device"
+
+
+class SingletonMeta(type):
+    """Single meta class."""
+
+    _instances = {}  # type: ignore
+
+    def __call__(cls, *args, **kwargs):
+        if cls not in cls._instances:
+            instance = super().__call__(*args, **kwargs)
+            cls._instances[cls] = instance
+
+        return cls._instances[cls]
+
+
+class OffloadItem:
+    """Class for offload item."""
+
+    def __init__(self, act=None, ref_cnt=0, event=None):
+        self.act = act
+        self.ref_cnt = ref_cnt
+        self.event = event
+
+    def get_event(self):
+        return self.event
+
+    def has_event(self):
+        return self.event is not None
+
+
+class OffloadManager(metaclass=SingletonMeta):
+    """Class for offload manager."""
+
+    def __init__(self, check=False):
+        self.items = {}
+        self.check = check
+        self.device_item = []
+        self.getcnt = {}
+        self.may_npu_tensors = {}
+        # Cache of reusable pinned CPU buffers keyed by full_key ("{group}_{block}_{tensor_idx}").
+        # Populated only when async_save_on_cpu is constructed with reserve_pin_memory=True;
+        # buffer is reused across iterations as long as shape and dtype still match.
+        self.pin_memory_cache: dict = {}
+
+    def get_cnt(self, block_idx, group="default"):
+        if group not in self.getcnt:
+            self.getcnt[group] = GetCnt()
+        return self.getcnt[group].get_cnt(block_idx)
+
+    def get_or_create_pin_memory(self, key, shape, dtype):
+        cached = self.pin_memory_cache.get(key)
+        # Shape or dtype drift (e.g. variable seqlen) invalidates the cached buffer; reallocate.
+        if cached is not None and cached.shape == shape and cached.dtype == dtype:
+            return cached
+        new_tensor = torch.empty(shape, dtype=dtype, pin_memory=True, device="cpu")
+        self.pin_memory_cache[key] = new_tensor
+        return new_tensor
+
+    def assert_exist(self, key):
+        if key not in self.items:
+            raise RuntimeError(f"Key {key} does not exist in items")
+
+    def exist(self, key):
+        return key in self.items
+
+    def has_runtime_key(self, key):
+        """Return whether an offload key still owns a live runtime entry."""
+        return key in self.items or key in self.may_npu_tensors
+
+    def assert_not_exist(self, key):
+        if key not in self.items:
+            raise RuntimeError(f"Key {key} already exist in items")
+
+    def put(self, key, act, event=None):
+        if key in self.items:
+            self.items[key].act = act
+            self.items[key].ref_cnt += 1
+            self.items[key].event = event
+        else:
+            self.items[key] = OffloadItem(act, 1, event)
+
+    def put_npu_tensor(self, act):
+        self.device_item.append(act)
+
+    def del_npu_tensor(self, profile_key, d2h_stream):
+        for key in self.items.keys():
+            if key.startswith(profile_key):
+                self.items[key].act.wait_d2h_finished(d2h_stream, True)
+
+    def del_may_npu_tensor(self, profile_keys, h2d_stream):
+        may_npu_tensor_keys = list(self.may_npu_tensors.keys())
+        for key in may_npu_tensor_keys:
+            if key.startswith(profile_keys):
+                with torch.cuda.stream(h2d_stream):
+                    h2d_stream.wait_event(self.may_npu_tensors[key].act.h2d_event)
+                    del self.may_npu_tensors[key]
+
+    def get(self, key):
+        self.assert_exist(key)
+        item = self.items[key]
+
+        act = item.act
+        if item.has_event():
+            item.get_event().wait()
+
+        item.ref_cnt -= 1
+        if item.ref_cnt == 0:
+            # self.clear(key)
+            self.assert_exist(key)
+            self.may_npu_tensors.update({key: self.items.pop(key)})
+        return act
+
+    def prefetch_get(self, block_idx, tensor_idx, h2d_stream, d2h_stream, group="default"):
+        if group not in self.getcnt:
+            return
+        prefetch_keys = self.getcnt[group].get_prefetch_keys(block_idx, tensor_idx)
+        for prefetch_key in prefetch_keys:
+            full_key = f"{group}_{prefetch_key}"
+            if self.exist(full_key):
+                prefetch_swap_tensor = self.get(full_key)
+                h2d_stream.wait_stream(d2h_stream)
+                prefetch_swap_tensor.prefetch_launch_h2d(h2d_stream, True)
+                # prefetch_swap_tensor.tensor.record_stream(h2d_stream)
+
+    def empty(self):
+        return len(self.items) == 0
+
+    def clear(self, key=None, group=None, clear_pin_memory_cache: bool = False):
+        """Clear runtime offload state.
+
+        ``pin_memory_cache`` is kept by default because it is a reusable CPU
+        pinned-memory cache, not a live GPU activation reference.
+        """
+        if key is not None and group is not None:
+            raise ValueError("Only one of key or group can be specified")
+
+        if key is not None:
+            self.items.pop(key, None)
+            self.may_npu_tensors.pop(key, None)
+            if clear_pin_memory_cache:
+                self.pin_memory_cache.pop(key, None)
+            return
+
+        if group is not None:
+            prefix = f"{group}_"
+            for item_key in list(self.items.keys()):
+                if item_key.startswith(prefix):
+                    self.items.pop(item_key, None)
+            for item_key in list(self.may_npu_tensors.keys()):
+                if item_key.startswith(prefix):
+                    self.may_npu_tensors.pop(item_key, None)
+            self.getcnt.pop(group, None)
+            if clear_pin_memory_cache:
+                for item_key in list(self.pin_memory_cache.keys()):
+                    if item_key.startswith(prefix):
+                        self.pin_memory_cache.pop(item_key, None)
+            return
+
+        self.items.clear()
+        self.may_npu_tensors.clear()
+        self.getcnt.clear()
+        if clear_pin_memory_cache:
+            self.pin_memory_cache.clear()
+
+    # event interface #
+
+    def get_event(self, key):
+        self.assert_exist(key)
+        item = self.items[key]
+        event = item.get_event()
+        return event
+
+    def has_event(self, key):
+        if not self.exist(key):
+            return False
+        item = self.items[key]
+        return item.has_event()
+
+
+class async_save_on_cpu(saved_tensors_hooks):
+    def __init__(
+        self,
+        h2d_stream: torch.cuda.Stream,
+        d2h_stream: torch.cuda.Stream,
+        block_idx: int,
+        depth: int | None = None,
+        group: str = "default",
+        custom_check_fn=None,
+        prefetch=True,
+        reserve_pin_memory: bool = False,
+    ) -> None:
+        def _pack_to_cpu(tensor):
+            if not base_check_fn(tensor):
+                return tensor
+
+            if (custom_check_fn is not None) and (not custom_check_fn(tensor)):
+                return tensor
+
+            key, after_block, prev_block_idx = OffloadManager().get_cnt(block_idx, group=group)
+
+            if after_block and (prev_block_idx is not None):
+                OffloadManager().del_npu_tensor(f"{group}_{prev_block_idx}_", d2h_stream)
+
+            full_key = f"{group}_{key}"
+            # When reserve_pin_memory is enabled, reuse the pinned CPU buffer that was
+            # allocated for the same (group, block, tensor_idx) in a previous iteration.
+            cached_cpu = (
+                OffloadManager().get_or_create_pin_memory(full_key, tensor.shape, tensor.dtype)
+                if reserve_pin_memory
+                else None
+            )
+            swap_tensor = SwapTensor(tensor, key, tensor_cpu=cached_cpu)
+
+            should_offload = depth is None or block_idx <= depth - 1
+            if should_offload:
+                working_stream = torch.cuda.current_stream()
+                d2h_stream.wait_stream(working_stream)
+                swap_tensor.launch_d2h(d2h_stream)
+
+            OffloadManager().put(full_key, swap_tensor)
+            return swap_tensor
+
+        def _unpack_from_cpu(swap_tensor) -> torch.Tensor:
+            if isinstance(swap_tensor, torch.Tensor):
+                return swap_tensor
+
+            working_stream = torch.cuda.current_stream()
+
+            # working_stream.wait_stream(d2h_stream)  # make sure all d2h copy is done before into backward
+            h2d_stream.wait_stream(working_stream)
+
+            block_idx, tensor_idx = swap_tensor.key.split("_")
+
+            OffloadManager().del_may_npu_tensor(f"{group}_{int(block_idx) + 1}_", h2d_stream)
+            swap_tensor.launch_h2d(h2d_stream, True, working_stream)
+            # if block_idx in ["0", "2", "3"]:
+            # if block_idx in ["0"]:
+            #     torch.cuda.synchronize()
+
+            if prefetch and block_idx != 0:
+                OffloadManager().prefetch_get(int(block_idx), int(tensor_idx), h2d_stream, d2h_stream, group=group)
+
+            # if block_idx in ["0"] and tensor_idx == "1":
+            #     swap_tensor.load()
+            # torch.cuda.synchronize()
+            return swap_tensor.tensor
+
+        super().__init__(_pack_to_cpu, _unpack_from_cpu)

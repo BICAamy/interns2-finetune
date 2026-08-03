@@ -1,0 +1,120 @@
+import inspect
+from types import UnionType
+from typing import Any, Callable, Union, get_args, get_origin
+
+import torch
+import torch.nn as nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper as ptd_checkpoint_wrapper,
+)
+from torch.utils._pytree import tree_flatten, tree_unflatten
+from torch.utils.checkpoint import checkpoint
+
+from xtuner.v1.utils import copy_signature
+
+
+# TODO: Currently xtuner uses the internal, outdated `torch.distributed.algorithms._checkpoint.checkpoint_wrapper` interface
+# We should look for opportunities to use the public, updated interface in the future
+
+# NOTE:
+# PyTorch's `torch.distributed.algorithms._checkpoint.checkpoint_wrapper` has some limitations. Modules decorated with `checkpoint_wrapper`
+# must have forward interfaces that conform to the specifications of `torch.autograd.function.Function`.
+# Specifically, for input parameters, the `forward` interface must explicitly accept parameters of type `torch.Tensor` to ensure proper gradient backpropagation.
+# For return values, the `forward` interface must return either `torch.Tensor` or tuple[torch.Tensor, ...].
+# For example If the forward interface is declared as:
+# def forward(self, x: tuple[torch.Tensor], y: list[torch.Tensor]) -> torch.Tensor | tuple[torch.Tensor, ...]:
+# This interface will break the gradient graph because the inputs don't meet the requirements. For instance, x and y are not of type `torch.Tensor`
+# `_check_signature_of_forward` will check (not exhaustively) whether the signature of the `forward` interface meets the requirements to identify issues early.
+
+
+def _check_signature_of_forward(module: nn.Module):
+    def _is_tensor_or_tuple_tensor(arg_type: type):
+        if arg_type is torch.Tensor:
+            return True
+
+        origin_type = get_origin(arg_type)
+
+        if not origin_type or origin_type not in (tuple, UnionType, Union):
+            return False
+
+        if origin_type in [UnionType, Union]:
+            type_list = get_args(arg_type)
+            return any(_is_tensor_or_tuple_tensor(t) for t in type_list)
+
+        else:
+            type_list = get_args(arg_type)
+            return any(t is torch.Tensor for t in type_list)
+
+    def _has_missing_type(arg_type: type):
+        if arg_type is inspect._empty:
+            return True
+        origin_arg = get_origin(arg_type)
+        return any(_has_missing_type(t) for t in get_args(origin_arg))
+
+    input_type = inspect.signature(module.forward).parameters
+    ret_type = inspect.signature(module.forward).return_annotation
+
+    for name, arg_type in input_type.items():
+        if _has_missing_type(arg_type.annotation):
+            raise TypeError(
+                f"The type of argument '{name}' of {module.__class__.__name__}.forward must be annotated, but got "
+                f"{name} unannotated."
+            )
+
+    if _has_missing_type(ret_type):
+        raise TypeError(
+            f"The return type of {module.__class__.__name__}.forward must be annotated, but got {ret_type}"
+        )
+
+    for arg_type in input_type.values():
+        origin_arg = get_origin(arg_type.annotation)
+        # Union[Tensor, None] or Optional[Tensor] is legal
+        if origin_arg:
+            if torch.Tensor in origin_arg:
+                break
+        else:
+            if arg_type.annotation is torch.Tensor:
+                break
+    else:
+        raise TypeError(
+            f"The type of all arguments of the {module.__class__.__name__}.forward must be torch.Tensor, but got "
+            f"{input_type}"
+        )
+
+    if not _is_tensor_or_tuple_tensor(ret_type):
+        raise TypeError(
+            f"The return type of {module.__class__.__name__}.forward must be torch.Tensor or tuple of torch.Tensor, "
+            f"but got {ret_type}"
+        )
+
+
+@copy_signature(ptd_checkpoint_wrapper)
+def checkpoint_wrapper(module: nn.Module, *args, **kwargs):
+    _check_signature_of_forward(module)
+    return ptd_checkpoint_wrapper(module, *args, **kwargs)
+
+
+def pytree_reentrant_checkpoint(
+    function: Callable[..., torch.Tensor | tuple[torch.Tensor, ...]],
+    *args: Any,
+    **kwargs: Any,
+) -> torch.Tensor | tuple[torch.Tensor, ...]:
+    """让嵌套 Tensor 也成为 reentrant checkpoint 的 autograd 输入。"""
+    # CheckpointWrapper 只打包一层。例如：
+    #   future_embeddings=[embedding_0, embedding_1]
+    # 对原生 CheckpointFunction 来说只是“一个 list 参数”，它看不到 list 里的
+    # 两个 Tensor，也就不会 detach 它们。这可能会造成反向传播的错误，因为这两个
+    # Tensor 的梯度应该交由 CheckpointFunction.backward 的返回值交回原始 Tensor，
+    # 而不是由他们自己来传递梯度。
+    # tree_flatten 会把输入变成近似：
+    #   hidden, embedding_0, embedding_1
+    # 这样 checkpoint 能逐个 detach；tree_unflatten 再在 replay 前把 list 还原。
+    flat_inputs, input_spec = tree_flatten((args, kwargs))
+
+    def run_function(*replayed_flat_inputs: Any) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        # 这里只还原参数结构，不会把 detached Tensor 重新连接到旧 graph；梯度由
+        # CheckpointFunction.backward 的返回值交回原始 Tensor。
+        replayed_args, replayed_kwargs = tree_unflatten(list(replayed_flat_inputs), input_spec)
+        return function(*replayed_args, **replayed_kwargs)
+
+    return checkpoint(run_function, *flat_inputs, use_reentrant=True)

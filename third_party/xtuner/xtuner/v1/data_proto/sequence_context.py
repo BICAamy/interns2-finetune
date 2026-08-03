@@ -1,0 +1,643 @@
+# Copyright (c) OpenMMLab. All rights reserved.
+from typing import cast
+
+import torch
+from torch.distributed.device_mesh import DeviceMesh
+from typing_extensions import Self
+
+from .utils import gather_for_sequence_parallel, pad_to_multiple_of, split_for_sequence_parallel
+
+
+class DSATopKCacheState:
+    """Mutable DSA cross-layer top-k cache, scoped to one microbatch.
+
+    For example, if source layer 2 provides top-k indices to layers 2, 3, and 4,
+    its original forward stores ``indices[2]``. After layer 4's no-grad
+    checkpoint forward, ``checkpoint_active`` becomes true and top-k offload may
+    replace that entry with ``offloaded[2]``. Backward then replays layers 4, 3,
+    and 2; layer 2 removes the cache and adds 2 to ``released_sources``. If one
+    physical MTP source is reused at two logical depths, both MTP counters start
+    at 2 so the cache is transferred and released only after the second use in
+    each phase.
+    """
+
+    indices: dict[int, torch.Tensor]  # GPU-resident top-k, keyed by source layer.
+    offloaded: dict[int, str]  # OffloadManager key for each CPU-resident source.
+    released_sources: set[int]  # Sources whose backward replay lifetime has ended.
+    checkpoint_active: bool  # Whether checkpoint forward retained this cache for replay.
+    offload_slot: int  # Stable offload slot among concurrently active microbatches.
+    mtp_forward_uses_remaining: dict[int, int]  # Original-forward MTP uses left per shared source.
+    mtp_replays_remaining: dict[int, int]  # Backward MTP replays left per shared source.
+
+    def __init__(
+        self,
+        *,
+        indices: dict[int, torch.Tensor] | None = None,
+        offloaded: dict[int, str] | None = None,
+        released_sources: set[int] | None = None,
+        checkpoint_active: bool = False,
+        offload_slot: int = 0,
+        mtp_forward_uses_remaining: dict[int, int] | None = None,
+        mtp_replays_remaining: dict[int, int] | None = None,
+    ) -> None:
+        # topk_indices format: {source_layer_idx: [seq_len, kv_group, topk]}.
+        # Invalid/padded sparse slots are represented by -1.
+        self.indices = {} if indices is None else indices
+        self.offloaded = {} if offloaded is None else offloaded
+        self.released_sources = set() if released_sources is None else released_sources
+        self.checkpoint_active = checkpoint_active
+        self.offload_slot = offload_slot
+        self.mtp_forward_uses_remaining = {} if mtp_forward_uses_remaining is None else mtp_forward_uses_remaining
+        self.mtp_replays_remaining = {} if mtp_replays_remaining is None else mtp_replays_remaining
+
+
+# Avoid using dataclass decorator here to get rid of extra ops called in pytorch 2.8 and above
+# The extra ops is introduced by function _apply_to_tensors in
+# https://github.com/pytorch/pytorch/blob/v2.8.0/torch/distributed/fsdp/_fully_shard/_fsdp_state.py
+# Due to dataclasses.replace is called in _apply_to_tensors that triggering SequenceContext.__init__
+class SequenceContext:
+    """Keyword arguments for Flash Attention with Compile.
+
+    Attributes:
+        cu_seq_lens_q (`torch.LongTensor`, *optional*)
+            Gets cumulative sequence length for query state.
+        cu_seq_lens_k (`torch.LongTensor`, *optional*)
+            Gets cumulative sequence length for key state.
+        max_length_q (`torch.Tensor | int`, *optional*):
+            Maximum sequence length for query state.
+        max_length_k (`torch.Tensor | int`, *optional*):
+            Maximum sequence length for key state.
+    """
+
+    input_ids: torch.LongTensor | None  # shape (1, seq_len)
+    cu_seq_lens_q: torch.IntTensor
+    cu_seq_lens_k: torch.IntTensor
+    max_length_q: torch.Tensor
+    max_length_k: torch.Tensor
+    num_padding: int
+    sequence_parallel_mesh: DeviceMesh | None
+    block_table: torch.Tensor | None
+    device: str | torch.device  # TODO: 这个地方有点乱，到处是 device
+    position_ids: torch.LongTensor | None
+    seq_idx: torch.IntTensor | None
+
+    # Qwen3VL
+    image_grid_thw: torch.Tensor | None
+    deepstack_visual_embeds: list[torch.Tensor] | None
+    visual_pos_masks: torch.Tensor | None
+    # mllm model
+    pixel_values: torch.FloatTensor | None
+    inputs_embeds: torch.FloatTensor | None
+    num_img_tokens: list[list[int]] | None
+
+    # moe routed_experts
+    rollout_routed_experts: torch.Tensor | None
+    offload_rollout_routed_experts: bool
+    dsa_topk_cache: DSATopKCacheState
+
+    # Private backing attributes for SP shard reconstruction
+    _raw_input_ids: torch.LongTensor | None
+    _raw_inputs_embeds: torch.FloatTensor | None
+    _shard_start: int
+    _shard_size: int
+
+    def __init__(
+        self,
+        input_ids: torch.LongTensor | None,  # shape (1, seq_len)
+        cu_seq_lens_q: torch.IntTensor,
+        cu_seq_lens_k: torch.IntTensor,
+        max_length_q: torch.Tensor | int,
+        max_length_k: torch.Tensor | int,
+        num_padding: int = 0,
+        sequence_parallel_mesh: DeviceMesh | None = None,
+        block_table: torch.Tensor | None = None,
+        device: str | torch.device = "cpu",  # TODO: 这个地方有点乱，到处是 device
+        position_ids: torch.LongTensor | None = None,
+        # Qwen3VL
+        image_grid_thw: torch.Tensor | None = None,
+        deepstack_visual_embeds: list[torch.Tensor] | None = None,
+        visual_pos_masks: torch.Tensor | None = None,
+        # mllm model
+        pixel_values: torch.FloatTensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        num_img_tokens: list[list[int]] | None = None,
+        rollout_routed_experts: torch.Tensor | None = None,
+        offload_rollout_routed_experts: bool = False,
+        dsa_topk_cache: DSATopKCacheState | None = None,
+        # SP shard metadata: private, accessed via properties below
+        raw_input_ids: torch.LongTensor | None = None,
+        raw_inputs_embeds: torch.FloatTensor | None = None,
+        shard_start: int = 0,
+        shard_size: int = 0,
+    ):
+        # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
+        # the argument can be an int, but as an attribute it can only be a tensor
+        self.input_ids = input_ids
+        self.cu_seq_lens_q = cu_seq_lens_q
+        self.cu_seq_lens_k = cu_seq_lens_k
+        # force max_length_q and max_length_k be cpu tensors to avoid cuda synchronization
+        # max_length_q and max_length_k should be unpacked to int in attention implementation
+        if isinstance(max_length_q, int):
+            self.max_length_q = torch.tensor(max_length_q, device="cpu")
+        else:
+            self.max_length_q = max_length_q
+        if isinstance(max_length_k, int):
+            self.max_length_k = torch.tensor(max_length_k, device="cpu")
+        else:
+            self.max_length_k = max_length_k
+        self.num_padding = num_padding
+        self.sequence_parallel_mesh = sequence_parallel_mesh
+        self.block_table = block_table
+        self.device = device
+        self.position_ids = position_ids
+        self.image_grid_thw = image_grid_thw
+        self.deepstack_visual_embeds = deepstack_visual_embeds
+        self.visual_pos_masks = visual_pos_masks
+        self.pixel_values = pixel_values
+        self.inputs_embeds = inputs_embeds
+        self.num_img_tokens = num_img_tokens
+        self.rollout_routed_experts = rollout_routed_experts
+        self.offload_rollout_routed_experts = offload_rollout_routed_experts
+        self.dsa_topk_cache = DSATopKCacheState() if dsa_topk_cache is None else dsa_topk_cache
+        self._raw_input_ids = raw_input_ids
+        self._raw_inputs_embeds = raw_inputs_embeds
+        self._shard_start = shard_start
+        self._shard_size = shard_size
+        self.seq_idx = None
+
+        # `DeviceMesh.get_local_rank` is not compatible with `torch.compile`, we calculate `_sp_rank` in
+        # `SequenceContext`
+        if sequence_parallel_mesh is not None:
+            self._sp_rank = sequence_parallel_mesh.get_local_rank()
+        else:
+            self._sp_rank = 0
+
+        seq_lens_k = self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]
+        seq_lens_q = self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]
+
+        if position_ids is None:
+            _position_ids = [torch.arange(k - q, k) for q, k in zip(seq_lens_q, seq_lens_k)]
+            position_ids = torch.cat(_position_ids).unsqueeze(0).to(self.device)  # type: ignore[assignment]
+
+            if self.sequence_parallel_mesh is not None:
+                position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)  # type: ignore
+
+        self.position_ids = position_ids
+
+    @property
+    def sp_rank(self):
+        return self._sp_rank
+
+    def packed_causal_query_ranges(
+        self,
+        query_len: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return global ``[start, end)`` KV ranges for local packed
+        queries."""
+        cu_seq_lens = self.cu_seq_lens_q.to(device)
+        query_positions = torch.arange(query_len, device=device) + self._shard_start
+        sequence_indices = torch.searchsorted(cu_seq_lens, query_positions, right=True) - 1
+
+        # Keep range construction tensorized because DSA indexers may run under
+        # torch.compile and cannot read CUDA sequence boundaries as Python scalars.
+        starts = cu_seq_lens[sequence_indices]
+        ends = query_positions + 1
+        return starts.to(torch.int32), ends.to(torch.int32)
+
+    @classmethod
+    def from_input_ids(
+        cls,
+        input_ids: tuple[torch.LongTensor, ...],
+        block_table: torch.Tensor | None = None,
+        sp_mesh: DeviceMesh | None = None,
+        device: str = "cuda",
+    ) -> Self:
+        assert isinstance(input_ids, (list, tuple))
+        for ids in input_ids:
+            assert ids.shape[0] == 1, "input_ids must have batch size of 1"
+        num_tokens = [x.numel() for x in input_ids]
+
+        cu_seq_lens = cast(torch.IntTensor, torch.cumsum(torch.LongTensor([0] + num_tokens), dim=0).to(device).int())
+        return cls(
+            input_ids=cast(torch.LongTensor, torch.cat(input_ids, dim=1).to(device)),
+            cu_seq_lens_k=cu_seq_lens,
+            cu_seq_lens_q=cu_seq_lens,
+            max_length_q=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
+            max_length_k=cast(int, (cu_seq_lens[1:] - cu_seq_lens[:-1]).max().item()),
+            block_table=block_table,
+            sequence_parallel_mesh=sp_mesh,
+            device=device,
+        )
+
+    def split(self, sequence_parallel_mesh: DeviceMesh | None = None) -> Self:
+        if sequence_parallel_mesh is None:
+            sequence_parallel_mesh = self.sequence_parallel_mesh
+        self.sequence_parallel_mesh = sequence_parallel_mesh
+
+        if sequence_parallel_mesh is None:
+            return self
+
+        multiple_of = sequence_parallel_mesh.size()
+        if self.input_ids is not None:
+            pad_input_ids = pad_to_multiple_of(self.input_ids, 0, multiple_of, 1)
+            sp_input_ids = cast(
+                torch.LongTensor, split_for_sequence_parallel(pad_input_ids, dim=1, sp_mesh=sequence_parallel_mesh)
+            )
+            new_padding = pad_input_ids.numel() - self.input_ids.numel()
+            if new_padding > 0:
+                if self.num_padding > 0:
+                    new_cu_seq_lens = self.cu_seq_lens_q.clone()
+                    new_cu_seq_lens[-1] += new_padding
+                else:
+                    new_cu_seq_lens = torch.ones(self.cu_seq_lens_q.numel() + 1, dtype=torch.int32, device=self.device)
+                    new_cu_seq_lens[: self.cu_seq_lens_q.numel()] = self.cu_seq_lens_q.clone()
+                    new_cu_seq_lens[-1] = self.cu_seq_lens_q[-1] + new_padding
+            else:
+                new_cu_seq_lens = self.cu_seq_lens_q.clone()
+            new_cu_seq_lens = cast(torch.IntTensor, new_cu_seq_lens)
+            new_max_length = cast(int, max(self.seq_lens_q.max().item(), new_padding))
+            num_non_padding = self.input_ids.shape[1] - self.num_padding
+            start = sp_input_ids.shape[1] * sequence_parallel_mesh.get_local_rank()
+            end = start + sp_input_ids.shape[1]
+            sp_num_padding = max(0, min(sp_input_ids.shape[1], end - num_non_padding))
+            shard_size = sp_input_ids.shape[1]
+
+            if self.position_ids is not None:
+                pad_position_ids = pad_to_multiple_of(self.position_ids, 0, multiple_of, -1)
+                position_ids = cast(
+                    torch.LongTensor,
+                    split_for_sequence_parallel(pad_position_ids, dim=-1, sp_mesh=sequence_parallel_mesh),
+                )
+                self.position_ids = position_ids
+
+            if self.rollout_routed_experts is not None:
+                assert isinstance(self.rollout_routed_experts, torch.Tensor), (
+                    f"rollout_routed_experts must be a tensor, but got {type(self.rollout_routed_experts)}"
+                )
+                pad_rollout_routed_experts = pad_to_multiple_of(self.rollout_routed_experts, 0, multiple_of, 0)
+                rollout_routed_experts = split_for_sequence_parallel(
+                    pad_rollout_routed_experts, dim=0, sp_mesh=sequence_parallel_mesh
+                )
+                self.rollout_routed_experts = rollout_routed_experts
+
+            sp_seq_ctx = self.__class__(
+                input_ids=sp_input_ids,
+                cu_seq_lens_q=new_cu_seq_lens,
+                cu_seq_lens_k=new_cu_seq_lens,
+                max_length_q=new_max_length,
+                max_length_k=new_max_length,
+                num_padding=sp_num_padding,
+                position_ids=self.position_ids,
+                block_table=self.block_table,
+                device=sp_input_ids.device,
+                sequence_parallel_mesh=sequence_parallel_mesh,
+                # TODO: 没有 copy 方法比较难受,容易漏掉变量
+                pixel_values=self.pixel_values,
+                image_grid_thw=self.image_grid_thw,
+                inputs_embeds=self.inputs_embeds,
+                num_img_tokens=self.num_img_tokens,
+                rollout_routed_experts=self.rollout_routed_experts,
+                offload_rollout_routed_experts=self.offload_rollout_routed_experts,
+                raw_input_ids=cast(torch.LongTensor, pad_input_ids),
+                shard_start=start,
+                shard_size=shard_size,
+            )
+            return sp_seq_ctx
+        else:
+            return self
+
+    @classmethod
+    def cat(cls, sequence_context_list: list["SequenceContext"]) -> "SequenceContext":
+        packed_input_ids: list[torch.Tensor] = []
+        cu_seq_lens_q: list[torch.IntTensor] = []
+        cu_seq_lens_k: list[torch.IntTensor] = []
+        max_length_q = 0
+        max_length_k = 0
+        num_padding = 0
+        device = []
+        inputs_embeds = []
+
+        pixel_values: list | torch.Tensor | None
+        pixel_values = []
+
+        image_grid_thw = []
+        num_img_tokens = []
+        position_ids = []
+        rollout_routed_experts = []
+        offload_rollout_routed_experts = False
+
+        for seq_ctx in sequence_context_list:
+            assert seq_ctx.sequence_parallel_mesh is None
+            if seq_ctx.input_ids is not None:
+                packed_input_ids.append(seq_ctx.input_ids)
+            cu_seq_lens_q.append(
+                seq_ctx.cu_seq_lens_q  # type: ignore
+                if len(cu_seq_lens_q) == 0
+                else (seq_ctx.cu_seq_lens_q + cu_seq_lens_q[-1][-1])[1:]
+            )
+            cu_seq_lens_k.append(
+                seq_ctx.cu_seq_lens_k  # type: ignore
+                if len(cu_seq_lens_k) == 0
+                else (seq_ctx.cu_seq_lens_k + cu_seq_lens_k[-1][-1])[1:]
+            )
+            max_length_q = max(max_length_q, seq_ctx.max_length_q)  # type: ignore[call-overload]
+            max_length_k = max(max_length_k, seq_ctx.max_length_k)  # type: ignore[call-overload]
+            num_padding += seq_ctx.num_padding
+            device.append(torch.device(seq_ctx.device))
+            if seq_ctx.inputs_embeds is not None:
+                inputs_embeds.append(seq_ctx.inputs_embeds)
+            if seq_ctx.pixel_values is not None:
+                pixel_values.append(seq_ctx.pixel_values)
+            if seq_ctx.image_grid_thw is not None:
+                image_grid_thw.append(seq_ctx.image_grid_thw)
+            if seq_ctx.num_img_tokens is not None:
+                num_img_tokens.extend(seq_ctx.num_img_tokens)
+            if seq_ctx.rollout_routed_experts is not None:
+                rollout_routed_experts.append(seq_ctx.rollout_routed_experts)
+            offload_rollout_routed_experts = offload_rollout_routed_experts or seq_ctx.offload_rollout_routed_experts
+            position_ids.append(seq_ctx.position_ids)
+        assert len(set(device)) == 1, f"All sequence contexts must be on the same device. Got {set(device)}"
+
+        if pixel_values:
+            if isinstance(pixel_values[0], torch.Tensor):
+                pixel_values = torch.cat(pixel_values, dim=0)
+        else:
+            pixel_values = None
+
+        return cls(
+            input_ids=torch.cat(packed_input_ids, dim=1) if len(packed_input_ids) > 0 else None,  # type: ignore
+            cu_seq_lens_q=torch.cat(cu_seq_lens_q, dim=0),  # type: ignore
+            cu_seq_lens_k=torch.cat(cu_seq_lens_k, dim=0),  # type: ignore
+            max_length_q=max_length_q,
+            max_length_k=max_length_k,
+            num_padding=num_padding,
+            device=device[0],
+            inputs_embeds=torch.cat(inputs_embeds, dim=1) if inputs_embeds else None,  # type: ignore
+            pixel_values=pixel_values,  # type: ignore
+            image_grid_thw=torch.cat(image_grid_thw, dim=0) if image_grid_thw else None,  # type: ignore
+            num_img_tokens=num_img_tokens if num_img_tokens else None,
+            position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
+            rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None,  # type: ignore
+            offload_rollout_routed_experts=offload_rollout_routed_experts,
+        )
+
+    @property
+    def mask(self) -> torch.BoolTensor:
+        mask: torch.BoolTensor
+        if self.input_ids is not None:
+            mask = cast(torch.BoolTensor, torch.ones_like(self.input_ids, dtype=torch.bool))
+        else:
+            assert self.inputs_embeds is not None, "input_ids or inputs_embeds must be provided"
+            # NOTE:
+            # In some distributed / optimization settings, inputs_embeds can be a tensor
+            # whose .storage() has size 0 (fake / sharded view), which breaks operations
+            # like torch.ones_like that rely on the underlying storage layout.
+            # Here we only care about the (batch, seq_len) shape, so construct the mask
+            # directly from the logical shape instead of using ones_like on the tensor.
+            seq_shape = self.inputs_embeds.shape[:-1]
+            mask = cast(
+                torch.BoolTensor,
+                torch.ones(seq_shape, dtype=torch.bool, device=self.inputs_embeds.device),
+            )
+        if self.num_padding > 0:
+            mask[..., -self.num_padding :] = False
+        return mask
+
+    @property
+    def seq_lens_q(self) -> torch.LongTensor:
+        return self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]  # type: ignore
+
+    @property
+    def seq_lens_k(self) -> torch.LongTensor:
+        return self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]  # type: ignore
+
+    @property
+    def raw_input_ids(self) -> torch.LongTensor | None:
+        """Full (un-split) input_ids across all SP ranks.
+
+        In non-SP mode, returns ``input_ids`` directly. In SP mode, returns the
+        pre-stored full tensor if available; otherwise triggers an allgather and
+        caches the result for subsequent calls.
+
+        Returns:
+            torch.LongTensor | None: The full input_ids tensor, or ``None`` if
+                ``input_ids`` is ``None``.
+        """
+        if self._raw_input_ids is not None:
+            return self._raw_input_ids
+        if self.sequence_parallel_mesh is None or self.sequence_parallel_mesh.size() == 1:
+            return self.input_ids
+        assert self.input_ids is not None
+        gathered = gather_for_sequence_parallel(
+            self.input_ids, dim=1, sp_group=self.sequence_parallel_mesh.get_group()
+        )
+        self._raw_input_ids = cast(torch.LongTensor, gathered)
+        return self._raw_input_ids
+
+    @property
+    def raw_inputs_embeds(self) -> torch.FloatTensor | None:
+        """Full (un-split) inputs_embeds across all SP ranks.
+
+        In non-SP mode, returns ``inputs_embeds`` directly. In SP mode, triggers
+        a single allgather on first access and caches the result for subsequent
+        calls, so the communication cost is paid at most once.
+
+        Returns:
+            torch.FloatTensor | None: The full inputs_embeds tensor, or ``None`` if
+                ``inputs_embeds`` is ``None``.
+        """
+        if self._raw_inputs_embeds is not None:
+            return self._raw_inputs_embeds
+        if self.inputs_embeds is None:
+            return None
+        if self.sequence_parallel_mesh is None or self.sequence_parallel_mesh.size() == 1:
+            return self.inputs_embeds
+        gathered = gather_for_sequence_parallel(
+            self.inputs_embeds, dim=1, sp_group=self.sequence_parallel_mesh.get_group()
+        )
+        self._raw_inputs_embeds = cast(torch.FloatTensor, gathered)
+        return self._raw_inputs_embeds
+
+    @property
+    def raw_position_ids(self) -> torch.LongTensor | None:
+        """Full (un-split) position_ids across all SP ranks.
+
+        Returns:
+            torch.LongTensor | None: The full position_ids tensor.
+        """
+        raise NotImplementedError("raw_position_ids is not yet implemented")
+
+    @property
+    def raw_rollout_routed_experts(self) -> torch.Tensor | None:
+        """Full (un-split) rollout_routed_experts across all SP ranks.
+
+        Returns:
+            torch.Tensor | None: The full rollout_routed_experts tensor.
+        """
+        raise NotImplementedError("raw_rollout_routed_experts is not yet implemented")
+
+    # TODO: 暂时没有用到，可能要删掉
+    def chunk(self, num_chunks: int) -> list[Self]:
+        n = self.seq_lens_q.numel()
+        assert n // num_chunks
+        n_per_chunk = n // num_chunks
+
+        q_lens_chunks = torch.chunk(self.seq_lens_q, chunks=num_chunks, dim=0)
+        k_lens_chunks = torch.chunk(self.seq_lens_k, chunks=num_chunks, dim=0)
+
+        lens_per_chunk = [chunk.sum() for chunk in q_lens_chunks]
+        input_ids_chunks = torch.split(self.input_ids, lens_per_chunk, dim=1)  # type: ignore
+
+        attn_meta_list: list[Self] = []
+        for i in range(num_chunks):
+            if self.block_table:
+                block_table = self.block_table[i * n_per_chunk : (i + 1) * n_per_chunk]
+            else:
+                block_table = None
+            # fmt: off
+            _meta = self.__class__(
+                input_ids=input_ids_chunks[i],  # type: ignore
+                cu_seq_lens_q=self.cu_seq_lens_q[i * n_per_chunk : (i + 1) * n_per_chunk + 1] - self.cu_seq_lens_q[i * n_per_chunk],  # type: ignore
+                cu_seq_lens_k=self.cu_seq_lens_k[i * n_per_chunk : (i + 1) * n_per_chunk + 1] - self.cu_seq_lens_k[i * n_per_chunk],  # type: ignore
+                max_length_q=q_lens_chunks[i].max(), # type: ignore
+                max_length_k=k_lens_chunks[i].max(), # type: ignore
+                block_table=block_table,
+                device=self.device,
+                sequence_parallel_mesh=self.sequence_parallel_mesh,
+            )
+            # fmt: on
+            attn_meta_list.append(_meta)
+        return attn_meta_list
+
+    def set_sp_mesh(self, sp_mesh: DeviceMesh) -> Self:
+        """Set the sequence parallel mesh."""
+        self.sequence_parallel_mesh = sp_mesh
+        self._sp_rank = sp_mesh.get_local_rank()
+        return self
+
+    def copy(self, **overrides) -> Self:
+        """Create a shallow copy of the SequenceContext with optional attribute
+        overrides.
+
+        Args:
+            **overrides: Keyword arguments to override specific attributes in the copy.
+
+        Returns:
+            Self: A new SequenceContext instance with copied attributes.
+        """
+        return self.__class__(
+            input_ids=overrides.get("input_ids", self.input_ids),
+            cu_seq_lens_q=overrides.get("cu_seq_lens_q", self.cu_seq_lens_q),
+            cu_seq_lens_k=overrides.get("cu_seq_lens_k", self.cu_seq_lens_k),
+            max_length_q=overrides.get("max_length_q", self.max_length_q),
+            max_length_k=overrides.get("max_length_k", self.max_length_k),
+            num_padding=overrides.get("num_padding", self.num_padding),
+            sequence_parallel_mesh=overrides.get("sequence_parallel_mesh", self.sequence_parallel_mesh),
+            block_table=overrides.get("block_table", self.block_table),
+            device=overrides.get("device", self.device),
+            position_ids=overrides.get("position_ids", self.position_ids),
+            image_grid_thw=overrides.get("image_grid_thw", self.image_grid_thw),
+            deepstack_visual_embeds=overrides.get("deepstack_visual_embeds", self.deepstack_visual_embeds),
+            visual_pos_masks=overrides.get("visual_pos_masks", self.visual_pos_masks),
+            pixel_values=overrides.get("pixel_values", self.pixel_values),
+            inputs_embeds=overrides.get("inputs_embeds", self.inputs_embeds),
+            num_img_tokens=overrides.get("num_img_tokens", self.num_img_tokens),
+            rollout_routed_experts=overrides.get("rollout_routed_experts", self.rollout_routed_experts),
+            offload_rollout_routed_experts=overrides.get(
+                "offload_rollout_routed_experts", self.offload_rollout_routed_experts
+            ),
+            dsa_topk_cache=overrides.get("dsa_topk_cache", self.dsa_topk_cache),
+            raw_input_ids=overrides.get("raw_input_ids", self._raw_input_ids),
+            raw_inputs_embeds=overrides.get("raw_inputs_embeds", self._raw_inputs_embeds),
+            shard_start=overrides.get("shard_start", self._shard_start),
+            shard_size=overrides.get("shard_size", self._shard_size),
+        )
+
+    def to(self, device: torch.device | str):
+        """Move all tensors in the context to the specified device.
+
+        Args:
+            device: The target device to move tensors to.
+
+        Returns:
+            Self: The context with tensors moved to the target device.
+        """
+        self.input_ids = self.input_ids.to(device)  # type: ignore
+        if device == "npu" or isinstance(device, torch.device) and device.type == "npu":
+            self.cu_seq_lens_q = self.cu_seq_lens_q.cpu()  # type: ignore
+            self.cu_seq_lens_k = self.cu_seq_lens_k.cpu()  # type: ignore
+        else:
+            self.cu_seq_lens_q = self.cu_seq_lens_q.to(device)  # type: ignore
+            self.cu_seq_lens_k = self.cu_seq_lens_k.to(device)  # type: ignore
+
+        if self.position_ids is not None and hasattr(self.position_ids, "to"):
+            self.position_ids = self.position_ids.to(device)  # type: ignore
+
+        if self.block_table is not None and hasattr(self.block_table, "to"):
+            self.block_table = self.block_table.to(device)  # type: ignore
+
+        #################################################################################################
+        # Background:
+        # `Trainer.fit` performs sequence-parallel slicing of the inputs. For text-only training this is
+        # straightforward — just slice `input_ids`. For VL training, however, splitting `pixel_values` is
+        # model-aware, so we deliberately do not slice it inside `SequenceContext`; the model handles it
+        # downstream in its forward pass.
+
+        # Given that, although `trainer` never slices `pixel_values`, it still calls `.to(device)` on it.
+        # Because `pixel_values` here is the full, un-sliced tensor, image/video-heavy batches trigger a
+        # single huge H2D — empirically up to 4–5 GB per step — which hurts both peak memory and step
+        # time significantly. So we intentionally skip the device move here and keep `pixel_values` on
+        # CPU; the model is responsible for moving its own slice to device after the SP split.
+
+        # TODO: hardcoding this is obviously not a great fix. Leaving it to the next person to do better.
+
+        # if self.pixel_values is not None and hasattr(self.pixel_values, "to"):
+        #     self.pixel_values = self.pixel_values.to(device)  # type: ignore
+        #################################################################################################
+
+        if self.inputs_embeds is not None and hasattr(self.inputs_embeds, "to"):
+            self.inputs_embeds = self.inputs_embeds.to(device)  # type: ignore
+
+        if self.image_grid_thw is not None and hasattr(self.image_grid_thw, "to"):
+            self.image_grid_thw = self.image_grid_thw.to(device)  # type: ignore
+
+        if (
+            self.rollout_routed_experts is not None
+            and not self.offload_rollout_routed_experts
+            and hasattr(self.rollout_routed_experts, "to")
+        ):
+            self.rollout_routed_experts = self.rollout_routed_experts.to(device)  # type: ignore
+
+        self.device = device
+
+        return self
+
+    @property
+    def data(self) -> dict:
+        """Export all attributes as a dictionary.
+
+        Returns:
+            dict: A dictionary containing all attributes of the SequenceContext.
+        """
+        return {
+            "input_ids": self.input_ids,
+            "cu_seq_lens_q": self.cu_seq_lens_q,
+            "cu_seq_lens_k": self.cu_seq_lens_k,
+            "max_length_q": self.max_length_q,
+            "max_length_k": self.max_length_k,
+            "num_padding": self.num_padding,
+            "sequence_parallel_mesh": self.sequence_parallel_mesh,
+            "block_table": self.block_table,
+            "device": self.device,
+            "position_ids": self.position_ids,
+            "image_grid_thw": self.image_grid_thw,
+            "deepstack_visual_embeds": self.deepstack_visual_embeds,
+            "visual_pos_masks": self.visual_pos_masks,
+            "pixel_values": self.pixel_values,
+            "inputs_embeds": self.inputs_embeds,
+            "num_img_tokens": self.num_img_tokens,
+            "rollout_routed_experts": self.rollout_routed_experts,
+            "offload_rollout_routed_experts": self.offload_rollout_routed_experts,
+            "dsa_topk_cache": self.dsa_topk_cache,
+        }

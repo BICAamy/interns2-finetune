@@ -1,0 +1,38 @@
+import json
+import os
+import subprocess
+import sys
+
+
+def update_meta(ori_meta_file, new_meta):
+    with open(ori_meta_file, encoding="utf-8") as f:
+        meta_info = json.load(f)
+        print(meta_info)
+
+    meta_info["exps"][0]["history"][0]["end"] = new_meta["end"]
+    meta_info["exps"][0]["exp_dir"] = new_meta["exp_dir"]
+    meta_info["exps"][0]["checkpoint_list"] = new_meta["checkpoint_list"]
+    meta_info["exps"][0]["cur_step"] = new_meta["end"]
+
+    subprocess.run(["sudo", "chmod", "777", ori_meta_file], capture_output=True, text=True)
+    with open(ori_meta_file, "w", encoding="utf-8") as f:
+        json.dump(meta_info, f, ensure_ascii=False, indent=4)
+
+
+def get_latest_subdir(work_dir):
+    dirs = [d for d in os.listdir(work_dir) if os.path.isdir(os.path.join(work_dir, d)) and len(d) == 14 and d.isdigit()]
+
+    if not dirs:
+        return None
+
+    latest = max(dirs, key=lambda d: os.path.getmtime(os.path.join(work_dir, d)))
+    return os.path.join(work_dir, latest)
+
+
+base_dir = f"{sys.argv[1]}/{os.environ['GITHUB_RUN_ID']}/{sys.argv[2]}/{sys.argv[3]}"
+real_dir = get_latest_subdir(base_dir)
+new_meta = {"end": 10, "exp_dir": real_dir, "checkpoint_list": [f"{real_dir}/checkpoints/ckpt-step-10"]}
+if sys.argv[3] == "rl":
+    update_meta(f"{base_dir}/.xtuner_grpo", new_meta)
+else:
+    update_meta(f"{base_dir}/.xtuner", new_meta)
