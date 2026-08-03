@@ -36,3 +36,13 @@ wandb/
 
 data/
 dataset/
+
+# Python virtual environments
+.venv-xtuner/
+
+# Third-party repositories
+# Python cache
+__pycache__/
+*.py[cod]
+
+ray_tmp/
