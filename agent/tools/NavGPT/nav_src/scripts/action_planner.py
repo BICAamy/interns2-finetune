@@ -1,8 +1,10 @@
 import json
+from dotenv import find_dotenv, load_dotenv
 
 from langchain.chains.llm import LLMChain
-from langchain.llms.openai import OpenAI
 from langchain.prompts import PromptTemplate
+
+from LLMs.langchain_openai_compatible import OpenAICompatibleLLM
 
 from prompt.planner_prompt import (
     PLANNER_PROMPT,
@@ -10,8 +12,8 @@ from prompt.planner_prompt import (
 
 from data_utils import construct_instrs
 
-# Using OpenAI davinci-text-003
-llm = OpenAI(temperature=0.0)
+load_dotenv(find_dotenv(usecwd=True), override=False)
+llm = OpenAICompatibleLLM.from_env(temperature=0.0)
 
 plan_prompt = PromptTemplate(
     template=PLANNER_PROMPT,

@@ -1,21 +1,16 @@
 """Agent that interacts with Matterport3D simulator via a hierarchical planning approach."""
-import json
-import yaml
 import re
-import warnings
 import numpy as np
-from typing import Any, Callable, List, NamedTuple, Optional, Sequence, Tuple, Dict, Union
+from typing import Any, List, Optional, Tuple, Dict, Union
 
 from env import R2RNavBatch
 from argparse import Namespace
 from agent_base import BaseAgent
 
-from langchain import HuggingFacePipeline
 from langchain.agents.agent import AgentExecutor, AgentAction, AgentOutputParser
 from langchain.agents.mrkl.base import ZeroShotAgent
 from langchain.agents.tools import Tool
 from langchain.chains import LLMChain
-from langchain.llms.openai import OpenAI
 from langchain.prompts import PromptTemplate
 from langchain.schema import (
     AgentAction,
@@ -157,12 +152,7 @@ class NavAgent(BaseAgent):
         super().__init__(env)
         self.config = config
 
-        if config.llm_model_name.split('-')[0] == 'gpt':
-            self.llm = OpenAI(
-                temperature=config.temperature,
-                model_name=config.llm_model_name,
-            )
-        elif config.llm_model_name == 'llama-2-13b':
+        if config.llm_provider == 'llama' or config.llm_model_name == 'llama-2-13b':
             from LLMs.Langchain_llama import Custom_Llama
             ckpt_dir = "LLMs/llama/llama-2-13b"
             tokenizer_path = "LLMs/llama/tokenizer.model"
@@ -174,6 +164,9 @@ class NavAgent(BaseAgent):
                 max_gen_len = 500,
                 max_batch_size = 1,
             )
+        else:
+            from LLMs.langchain_openai_compatible import OpenAICompatibleLLM
+            self.llm = OpenAICompatibleLLM.from_config(config)
         # elif config.llm_model_name == 'Vicuna-v1.5-13b':
         #     from LLMs.Langchain_Vicuna import Custom_Vicuna
         #     self.llm = Custom_Vicuna.from_config(

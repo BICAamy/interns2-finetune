@@ -55,45 +55,63 @@ Download R2R data from [Dropbox](https://www.dropbox.com/sh/i8ng3iq5kpa68nu/AAB5
 
 Related data preprocessing code can be found in `nav_src/scripts`.
 
-### 🍫 OpenAi API
+### 🍫 DeepSeek / OpenAI-compatible API
 
-Get an [OpenAI API Key](https://platform.openai.com/account/api-keys) and add to your environment variables:
+This repository variant uses the current OpenAI Python SDK against a configurable
+OpenAI-compatible Chat Completions endpoint. Copy the project-level environment
+template and fill in the values supplied by your provider:
 
 ```bash
-# prepare your private OpenAI key (for Linux)
-export OPENAI_API_KEY={Your_Private_Openai_Key}
-
-# prepare your private OpenAI key (for Windows)
-set OPENAI_API_KEY={Your_Private_Openai_Key}
+cd ../../../
+cp .env.example .env
 ```
 
-Alternatively, you can set the key in your code:
-```python
-import os
-os.environ["OPENAI_API_KEY"] = {Your_Private_Openai_Key}
+```dotenv
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_API_KEY=your-test-key
+DEEPSEEK_MODEL=your-model-name
+```
+
+The original R2R runner, observation summarizer, action planner, and standalone
+NavGPT tool all share these settings. `DEEPSEEK_MODEL` is intentionally
+configurable because compatible gateways often expose a provider-specific model
+name.
+
+To verify the URL and key without downloading R2R data or loading InternS2:
+
+```bash
+cd ../../../
+python3 -m agent.tools.NavGPT.nav_src.nav_tool_cli \
+  --instruction "Move toward the exit" \
+  --observation "An open doorway is visible ahead" \
+  --candidates-json '[]'
 ```
 
 ## 🍷 R2R Navigation
 
 ### 🍴 Reproduce Validation Results
 
-To replicate the performance reported in our paper, use GPT-4 and run validation with following configuration:
+To run R2R validation with the configured DeepSeek-compatible model:
 ```bash
 cd nav_src
-python NavGPT.py --llm_model_name gpt-4 \
-    --output_dir ../datasets/R2R/exprs/gpt-4-val-unseen \
+python NavGPT.py --llm_provider deepseek \
+    --llm_model_name "$DEEPSEEK_MODEL" \
+    --llm_base_url "$DEEPSEEK_BASE_URL" \
+    --output_dir ../datasets/R2R/exprs/deepseek-val-unseen \
     --val_env_name R2R_val_unseen_instr
 ```
 
-Results will be saved in `datasets/R2R/exprs/gpt-4-val-unseen` directory.
+Results will be saved in `datasets/R2R/exprs/deepseek-val-unseen` directory.
 
-The defualt `--llm_model_name` is set as `gpt-3.5-turbo`.
+The default `--llm_model_name` is read from `DEEPSEEK_MODEL`.
 
-An economic way to try 🎇NavGPT is by using GPT-3.5 and run validation on the first 10 samples with following configuration:
+To try NavGPT on only the first 10 samples:
 ```bash
 cd nav_src
-python NavGPT.py --llm_model_name gpt-3.5-turbo \
-    --output_dir ../datasets/R2R/exprs/gpt-3.5-turbo-test \
+python NavGPT.py --llm_provider deepseek \
+    --llm_model_name "$DEEPSEEK_MODEL" \
+    --llm_base_url "$DEEPSEEK_BASE_URL" \
+    --output_dir ../datasets/R2R/exprs/deepseek-test \
     --val_env_name R2R_val_unseen_instr \
     --iters 10
 ```

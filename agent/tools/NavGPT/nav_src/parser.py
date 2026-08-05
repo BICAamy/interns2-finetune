@@ -1,6 +1,11 @@
 import argparse
 import os
 
+from dotenv import find_dotenv, load_dotenv
+
+
+load_dotenv(find_dotenv(usecwd=True), override=False)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="")
@@ -8,13 +13,38 @@ def parse_args():
     # datasets
     parser.add_argument('--root_dir', type=str, default='../datasets')
     parser.add_argument('--dataset', type=str, default='r2r', choices=['r2r', 'r4r'])
-    parser.add_argument('--output_dir', type=str, default='../datasets/R2R/exprs/gpt-3.5-turbo', help='experiment id')
+    parser.add_argument('--output_dir', type=str, default='../datasets/R2R/exprs/deepseek', help='experiment id')
     # parser.add_argument('--output_dir', type=str, default='../datasets/R2R/exprs/LlaMA-2-13b-test', help='experiment id')
     parser.add_argument('--seed', type=int, default=0)
 
     # Agent
-    parser.add_argument('--temperature', type=float, default=0.0, help='temperature for llm')
-    parser.add_argument('--llm_model_name', type=str, default='gpt-3.5-turbo', help='llm model name')
+    parser.add_argument(
+        '--temperature', type=float,
+        default=float(os.getenv('DEEPSEEK_TEMPERATURE', '0.0')),
+        help='temperature for llm',
+    )
+    parser.add_argument(
+        '--llm_provider', type=str, default='deepseek',
+        choices=['deepseek', 'openai-compatible', 'llama'],
+        help='LLM provider used by NavGPT',
+    )
+    parser.add_argument(
+        '--llm_model_name', type=str,
+        default=os.getenv('DEEPSEEK_MODEL', ''),
+        help='model name exposed by the compatible endpoint',
+    )
+    parser.add_argument(
+        '--llm_base_url', type=str,
+        default=os.getenv('DEEPSEEK_BASE_URL', 'https://api.deepseek.com'),
+        help='OpenAI-compatible API base URL',
+    )
+    parser.add_argument(
+        '--llm_api_key_env', type=str, default='DEEPSEEK_API_KEY',
+        help='environment variable containing the API key',
+    )
+    parser.add_argument('--llm_max_tokens', type=int, default=int(os.getenv('DEEPSEEK_MAX_TOKENS', '1200')))
+    parser.add_argument('--llm_timeout', type=float, default=float(os.getenv('DEEPSEEK_TIMEOUT', '120')))
+    parser.add_argument('--llm_max_retries', type=int, default=int(os.getenv('DEEPSEEK_MAX_RETRIES', '2')))
     # parser.add_argument('--llm_model_name', type=str, default='gpt-4', help='llm model name')
     # parser.add_argument('--llm_model_name', type=str, default='LlaMA-2-13b', help='llm model name')
     parser.add_argument('--batch_size', type=int, default=1)
@@ -76,4 +106,3 @@ def postprocess_args(args):
     os.makedirs(args.pred_dir, exist_ok=True)
 
     return args
-

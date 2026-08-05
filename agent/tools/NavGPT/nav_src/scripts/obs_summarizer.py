@@ -5,10 +5,12 @@ import os
 import json
 import asyncio
 import argparse
+from dotenv import find_dotenv, load_dotenv
 
 from langchain.chains.llm import LLMChain
-from langchain.llms.openai import OpenAI
 from langchain.prompts import PromptTemplate
+
+from LLMs.langchain_openai_compatible import OpenAICompatibleLLM
 
 async def async_generate(chain, viewpointID, ob_list):
     print(f"Summarizing {viewpointID} ...")
@@ -25,6 +27,7 @@ async def generate_concurrently(chain, obs):
 
 
 if __name__ == "__main__":
+    load_dotenv(find_dotenv(usecwd=True), override=False)
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=5)
     parser.add_argument("--obs_dir", type=str, default="../datasets/R2R/observations_list/")
@@ -38,10 +41,7 @@ if __name__ == "__main__":
     # make sure the output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
-    llm = OpenAI(
-        temperature=0.0,
-        model_name="gpt-3.5-turbo",
-        )
+    llm = OpenAICompatibleLLM.from_env(temperature=0.0)
 
     if args.sum_type == "single":
         summarize_prompt = PromptTemplate(
