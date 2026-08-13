@@ -1,2 +1,4 @@
+-e ./packages/surgical_contracts
 openai>=1.30,<3
+pydantic>=2.10,<3
 python-dotenv>=1.0,<2

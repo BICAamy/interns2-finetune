@@ -1,0 +1,1 @@
+"""Tool fake tests."""
