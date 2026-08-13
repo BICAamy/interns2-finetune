@@ -1,2 +1,0 @@
-origin	git@github.com:GengzeZhou/NavGPT.git (fetch)
-origin	git@github.com:GengzeZhou/NavGPT.git (push)

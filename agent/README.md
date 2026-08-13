@@ -1,12 +1,15 @@
-# InternS2 + NavGPT 智能体
+# InternS2 手术机械臂智能体
 
-当前框架把两个模型职责拆开：
+当前仓库已移除旧的离散导航代码。InternS2 作为多模态基底模型，通过 LMDeploy 提供的 OpenAI-compatible API 接收文本和可选图片。
 
-1. **InternS2** 是面向用户的多模态基底模型。它读取图片和用户指令，并通过原生 function calling 决定是否调用导航工具。
-2. **NavGPTTool** 接收 InternS2 从图片中提取的、受图像约束的观察文本，再调用 DeepSeek-compatible Chat Completions API，返回结构化导航决策。
-3. 工具结果以 `tool` 消息回传 InternS2，由 InternS2 生成最终自然语言回复。
+目前处于架构迁移阶段：
 
-原 NavGPT 的 R2R 评测代码仍保留在 `tools/NavGPT/nav_src`。它需要预生成的八方向场景描述、候选 viewpoint、导航图和 R2R 标注，不能直接把一张普通图片当成完整的可交互环境。因此新增的 `NavGPTTool` 支持两种输入：有真实候选 viewpoint 时选择严格匹配的 ID；只有单张图片时只返回相对方向和保守动作，不伪造 ID。
+- 已保留 InternS2 客户端、模型发现和多模态输入；
+- 尚未接入机械臂仿真工具；
+- 尚未接入穿刺路径规划适配器；
+- 当前回复不能代表机械臂已经移动或已经完成穿刺。
+
+后续将按 `docs/手术导航技术实现流程文档.md` 增加结构化任务契约、机械臂定位工具和路径规划 Mock。
 
 ## 配置
 
@@ -16,45 +19,22 @@
 cp .env.example .env
 ```
 
-然后填写 `.env` 中以下三项：
+本地或服务器端运行 agent 时可配置：
 
 ```dotenv
-DEEPSEEK_BASE_URL=你的OpenAI兼容URL
-DEEPSEEK_API_KEY=你的测试API Key
-DEEPSEEK_MODEL=该URL实际暴露的模型名
+INTERNS2_BASE_URL=http://127.0.0.1:23333/v1
+INTERNS2_API_KEY=EMPTY
+INTERNS2_MODEL=/home/xl/interns2-finetune/models/Intern-S2-Preview
 ```
 
 `.env` 已被根目录 `.gitignore` 忽略，不会随 Git 推送；`.env.example` 会被提交，用于在服务器上复制。
 
-## 安装与分层测试
+## 安装
 
-安装新智能体的最小依赖：
+安装最小依赖：
 
 ```bash
 python3 -m pip install -r agent/requirements.txt
-```
-
-先只测试 DeepSeek 与 NavGPT，不需要 GPU，也不加载 InternS2：
-
-```bash
-python3 -m agent.tools.NavGPT.nav_src.nav_tool_cli \
-  --instruction "从当前位置走向前方出口" \
-  --observation "前方是一扇打开的门，左侧有桌子，地面没有明显障碍" \
-  --candidates-json '[]'
-```
-
-若要运行原始 R2R 数据集评测，再安装旧评测栈：
-
-```bash
-python3 -m pip install -r agent/tools/NavGPT/requirements.txt
-cd agent/tools/NavGPT/nav_src
-python3 NavGPT.py \
-  --llm_provider deepseek \
-  --llm_model_name "$DEEPSEEK_MODEL" \
-  --llm_base_url "$DEEPSEEK_BASE_URL" \
-  --output_dir ../datasets/R2R/exprs/deepseek-test \
-  --val_env_name R2R_val_unseen_instr \
-  --iters 10
 ```
 
 ## 启动 InternS2 服务
@@ -73,14 +53,22 @@ lmdeploy serve api_server \
   --tool-call-parser interns2-preview
 ```
 
-保持服务运行，在容器的第二个终端执行端到端调用：
+保持服务运行，在容器的第二个终端执行文本调用：
 
 ```bash
 cd /home/xl/interns2-finetune
 python3 -m agent.main \
-  --image /path/to/navigation.jpg \
-  --prompt "根据图片判断我下一步应该往哪里走，并给出安全的导航建议" \
+  --prompt "请确认当前 InternS2 服务已经可以正常响应" \
   --json
 ```
 
-`--json` 会同时输出工具调用参数和 NavGPT 结果，便于联调；去掉它时只输出最终回答。
+可选图片输入：
+
+```bash
+python3 -m agent.main \
+  --image /path/to/image.jpg \
+  --prompt "请描述这张图片" \
+  --json
+```
+
+`--json` 输出回答和实际模型 ID；去掉时只输出回答。

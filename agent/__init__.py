@@ -1,5 +1,5 @@
-"""InternS2 navigation-agent framework."""
+"""InternS2-based surgical robotics agent framework."""
 
-from .runtime import InternS2NavigationAgent, InvocationResult
+from .runtime import InternS2Agent, ModelResponse
 
-__all__ = ["InternS2NavigationAgent", "InvocationResult"]
+__all__ = ["InternS2Agent", "ModelResponse"]
