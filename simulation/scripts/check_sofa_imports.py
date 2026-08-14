@@ -21,7 +21,6 @@ REQUIRED_MODULES = (
     "Sofa.Simulation",
     "SofaRuntime",
     "SofaTypes",
-    "splib",
     "sofa_env",
 )
 REQUIRED_PLUGINS = (
@@ -96,6 +95,7 @@ def run_checks() -> dict[str, Any]:
         "modules": {name: _module_location(module) for name, module in modules.items()},
         "plugins": loaded_plugins,
         "simulation_step": "ok",
+        "legacy_splib": "not imported; SOFA v24.06 provides a relocation stub",
     }
 
 
