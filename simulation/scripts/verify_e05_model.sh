@@ -11,7 +11,7 @@ fi
 
 (
     cd "$mesh_dir"
-    sha256sum --check --strict <<'CHECKSUMS'
+    sha256sum -c - <<'CHECKSUMS'
 792afa9e61162fd025feabefc9efd0038086acf3eb60cc2ba8fb5fb25e7bf931  elfin_base.STL
 d30400c5b3367fcc00c572b4609e8e4819fc6fdc8968f98c2e3615e995d1969b  elfin_end_link.STL
 95cae5fdfbd9f5ed396a3d52f9b0be0662b58d6f36f043fe2e55c9d6955d1328  elfin_link1.STL
@@ -26,4 +26,4 @@ CHECKSUMS
 printf '%s  %s\n' \
     "0f006772323d07d10a06d70b5f6823de1dab392fdbd80ee900e16a09516e255c" \
     "$model_root/urdf/ROS2/485/elfin5.urdf.xacro" \
-    | sha256sum --check --strict
+    | sha256sum -c -

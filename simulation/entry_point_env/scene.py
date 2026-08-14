@@ -52,14 +52,17 @@ UNIT_SPHERE_PATH = (
 
 
 def _require_model_assets(model_dir: Path) -> dict[str, Path]:
-    assets = {"base": model_dir / "elfin_base.STL"}
+    # Huayan publishes uppercase .STL names. The pinned sofa_env loader uses a
+    # case-sensitive suffix table, so the image prepares lowercase symlink
+    # aliases while retaining and checksum-verifying the original files.
+    assets = {"base": model_dir / "elfin_base.stl"}
     assets.update(
-        {f"link{index}": model_dir / f"elfin_link{index}.STL" for index in range(1, 7)}
+        {f"link{index}": model_dir / f"elfin_link{index}.stl" for index in range(1, 7)}
     )
     missing = [str(path) for path in assets.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError(
-            "official E05 model assets are missing; rebuild the simulation image: "
+            "SOFA-compatible E05 mesh aliases are missing; rebuild the simulation image: "
             + ", ".join(missing)
         )
     return assets
@@ -206,4 +209,3 @@ def createScene(
             "visual_terminal_is_scaled_proxy": True,
         },
     }
-

@@ -28,6 +28,7 @@ simulation/scripts/check_sofa_imports.py
 simulation/scripts/check_upstream_env.py
 simulation/scripts/check_entry_point_env.py
 simulation/scripts/verify_e05_model.sh
+simulation/scripts/prepare_e05_model.sh
 simulation/entry_point_env/
 simulation/assets/unit_cylinder_z.obj
 configs/simulation.yaml
@@ -39,6 +40,7 @@ third_party/wheelhouse/
 - `check_sofa_imports.py` 检查 Python/CPU 架构、SOFA Python 模块、必要插件和最小仿真步。
 - `check_upstream_env.py` 加载上游 `controllable_object_example` 场景，执行固定步数、验证位置变化并检查 RGB 帧。
 - `verify_e05_model.sh` 校验随项目传输的厂家 E05 最小网格/xacro 快照的逐文件 SHA256。
+- `prepare_e05_model.sh` 在镜像内为厂家大写 `.STL` 创建小写 `.stl` 符号链接，以兼容 `sofa_env` 的大小写敏感加载器；原文件内容和校验值保持不变。
 - `entry_point_env` 提供 E05-Pro 六轴正逆运动学、毫米制连续轨迹、关节速度限制、SOFA 场景适配、状态输出和 RGB 轨迹叠加。
 - `check_entry_point_env.py` 验证绝对入点定位、相对 `+Z 5 mm`、六轴关节变化、有限步长、SOFA 位姿同步和 RGB 输出。
 - `Dockerfile.offline` 以已验证的 Step 4 镜像为基座，从项目内 wheelhouse 安装 Step 5 增量依赖，全程不访问网络。

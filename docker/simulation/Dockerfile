@@ -120,7 +120,7 @@ COPY tests /workspace/tests
 RUN SKIP_SOFA=1 python3 -m pip install \
         --no-deps \
         --editable /workspace/third_party/sofa_env \
-    && sh simulation/scripts/verify_e05_model.sh /opt/huayan-elfin-model \
+    && sh simulation/scripts/prepare_e05_model.sh /opt/huayan-elfin-model \
     && python3 simulation/scripts/check_sofa_imports.py
 
 CMD ["python3", "simulation/scripts/check_sofa_imports.py"]

@@ -72,10 +72,15 @@ def run_checks() -> dict[str, Any]:
             "/opt/huayan-elfin-model/model/485/elfin5",
         )
     )
-    expected_e05_assets = [e05_model_dir / "elfin_base.STL"] + [
+    source_e05_assets = [e05_model_dir / "elfin_base.STL"] + [
         e05_model_dir / f"elfin_link{index}.STL" for index in range(1, 7)
     ]
-    missing_e05_assets = [str(path) for path in expected_e05_assets if not path.is_file()]
+    runtime_e05_assets = [path.with_suffix(".stl") for path in source_e05_assets]
+    missing_e05_assets = [
+        str(path)
+        for path in source_e05_assets + runtime_e05_assets
+        if not path.is_file()
+    ]
     if missing_e05_assets:
         raise RuntimeError(f"E05 model assets are missing: {missing_e05_assets}")
 
@@ -117,7 +122,8 @@ def run_checks() -> dict[str, Any]:
         "sofa_python_root": str(sofa_python_root.resolve()),
         "sofa_version": getattr(sofa, "__version__", "v24.06.00 (image pin)"),
         "e05_model_dir": str(e05_model_dir.resolve()),
-        "e05_model_assets": [path.name for path in expected_e05_assets],
+        "e05_model_assets": [path.name for path in source_e05_assets],
+        "e05_runtime_mesh_aliases": [path.name for path in runtime_e05_assets],
         "modules": {name: _module_location(module) for name, module in modules.items()},
         "plugins": loaded_plugins,
         "simulation_step": "ok",

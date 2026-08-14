@@ -46,7 +46,7 @@ COPY configs /workspace/configs
 COPY simulation /workspace/simulation
 COPY tests /workspace/tests
 
-RUN sh simulation/scripts/verify_e05_model.sh /opt/huayan-elfin-model \
+RUN sh simulation/scripts/prepare_e05_model.sh /opt/huayan-elfin-model \
     && python3 simulation/scripts/check_sofa_imports.py
 
 CMD ["python3", "simulation/scripts/check_sofa_imports.py"]
