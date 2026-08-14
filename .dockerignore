@@ -7,7 +7,9 @@
 **/__pycache__/
 **/*.py[cod]
 **/.DS_Store
+*.log
 models/
+ray_tmp/
 hua_yan_robo/
 docs/*.pdf
 third_party/xtuner/

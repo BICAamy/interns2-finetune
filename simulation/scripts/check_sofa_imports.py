@@ -12,6 +12,13 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+# When this file is launched as ``python3 simulation/scripts/...py``, Python
+# otherwise places only ``simulation/scripts`` on sys.path. Add the repository
+# root before importing the Step 5 simulation package.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 
 EXPECTED_PYTHON = (3, 10)
 EXPECTED_MACHINE = "x86_64"
