@@ -1,0 +1,14 @@
+# Step 5 additions that are not present in the already validated Step 4 image.
+# Keep this list fully pinned so it can be installed from third_party/wheelhouse
+# with networking disabled.
+annotated-types==0.7.0
+exceptiongroup==1.2.2
+iniconfig==2.0.0
+packaging==24.2
+pluggy==1.5.0
+pydantic==2.10.6
+pydantic-core==2.27.2
+pytest==8.3.5
+PyYAML==6.0.2
+tomli==2.2.1
+typing-extensions==4.12.2

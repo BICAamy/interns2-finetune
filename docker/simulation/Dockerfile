@@ -25,7 +25,6 @@ RUN apt-get update \
         build-essential \
         ca-certificates \
         curl \
-        git \
         libdbus-1-3 \
         libegl-mesa0 \
         libegl1 \
@@ -70,12 +69,6 @@ RUN test "$(uname -m)" = "x86_64" \
 
 WORKDIR /opt
 
-# Fetch only the official E05 model/URDF paths used by Step 5. The helper
-# verifies both the full upstream commit and each consumed asset checksum.
-COPY simulation/scripts/fetch_e05_model.sh /usr/local/bin/fetch-e05-model
-RUN chmod 0755 /usr/local/bin/fetch-e05-model \
-    && fetch-e05-model /opt/huayan-elfin-model
-
 RUN curl --fail --location --retry 5 --retry-all-errors \
         --output "/tmp/${SOFA_ARCHIVE}" "${SOFA_DOWNLOAD_URL}" \
     && echo "${SOFA_ARCHIVE_SHA256}  /tmp/${SOFA_ARCHIVE}" | sha256sum --check --strict \
@@ -117,6 +110,7 @@ RUN python3 -m pip install \
 WORKDIR /workspace
 
 COPY third_party/sofa_env /workspace/third_party/sofa_env
+COPY third_party/elfin_model /opt/huayan-elfin-model
 COPY configs /workspace/configs
 COPY simulation /workspace/simulation
 COPY tests /workspace/tests
@@ -126,6 +120,7 @@ COPY tests /workspace/tests
 RUN SKIP_SOFA=1 python3 -m pip install \
         --no-deps \
         --editable /workspace/third_party/sofa_env \
+    && sh simulation/scripts/verify_e05_model.sh /opt/huayan-elfin-model \
     && python3 simulation/scripts/check_sofa_imports.py
 
 CMD ["python3", "simulation/scripts/check_sofa_imports.py"]

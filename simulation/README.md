@@ -21,22 +21,27 @@
 
 ```text
 docker/simulation/Dockerfile
+docker/simulation/Dockerfile.offline
 simulation/requirements.txt
+simulation/step5-requirements.txt
 simulation/scripts/check_sofa_imports.py
 simulation/scripts/check_upstream_env.py
 simulation/scripts/check_entry_point_env.py
-simulation/scripts/fetch_e05_model.sh
+simulation/scripts/verify_e05_model.sh
 simulation/entry_point_env/
 simulation/assets/unit_cylinder_z.obj
 configs/simulation.yaml
 tests/simulation/
+third_party/elfin_model/
+third_party/wheelhouse/
 ```
 
 - `check_sofa_imports.py` 检查 Python/CPU 架构、SOFA Python 模块、必要插件和最小仿真步。
 - `check_upstream_env.py` 加载上游 `controllable_object_example` 场景，执行固定步数、验证位置变化并检查 RGB 帧。
-- `fetch_e05_model.sh` 在镜像构建时稀疏拉取厂家 E05 网格和 xacro，并校验完整提交及逐文件 SHA256。
+- `verify_e05_model.sh` 校验随项目传输的厂家 E05 最小网格/xacro 快照的逐文件 SHA256。
 - `entry_point_env` 提供 E05-Pro 六轴正逆运动学、毫米制连续轨迹、关节速度限制、SOFA 场景适配、状态输出和 RGB 轨迹叠加。
 - `check_entry_point_env.py` 验证绝对入点定位、相对 `+Z 5 mm`、六轴关节变化、有限步长、SOFA 位姿同步和 RGB 输出。
+- `Dockerfile.offline` 以已验证的 Step 4 镜像为基座，从项目内 wheelhouse 安装 Step 5 增量依赖，全程不访问网络。
 
 SOFA v24.06 中的旧 `splib` Python 包是一个会主动抛错的迁移提示桩，不是必需运行时模块。Step 4 的 `controllable_object_example` 不依赖它，因此导入检查不会导入 `splib`，也不需要为当前场景额外安装 STLIB。
 
@@ -46,28 +51,66 @@ SOFA v24.06 中的旧 `splib` Python 包是一个会主动抛错的迁移提示�
 
 以下命令全部在服务器宿主机的 `~/interns2-finetune` 中执行，不要先 `docker exec` 进入 LMDeploy 容器。
 
-### 1. 更新并检查基线
+### 1. 无网服务器：先保留已经验证的 Step 4 镜像
+
+当前实验室服务器不能访问外网。正在等待 SOFA 下载的构建可直接按
+`Ctrl+C` 停止；失败构建不会覆盖已有的 `interns2-robot-simulation:dev`
+标签。不要执行 `docker system prune` 或删除旧镜像。
+
+在拉取/传输 Step 5 代码后、再次构建之前，先将现有 Step 4 镜像固定为
+独立标签：
 
 ```bash
 cd ~/interns2-finetune
-git pull
-git status --short
-uname -m
-docker version
+docker image inspect interns2-robot-simulation:dev >/dev/null
+docker tag \
+  interns2-robot-simulation:dev \
+  interns2-robot-simulation:step4-base
+
+docker run --rm \
+  interns2-robot-simulation:step4-base \
+  python3 simulation/scripts/check_sofa_imports.py
 ```
 
-`uname -m` 必须输出 `x86_64`。建议保存镜像构建日志：
+随后确认通过 VSCode/Git 传到服务器的离线资产完整。两个目录总计约
+`12 MB`，不能只传文本源码而漏掉 `.STL` 和 `.whl` 文件：
+
+```bash
+test "$(uname -m)" = "x86_64"
+test -f third_party/elfin_model/model/485/elfin5/elfin_link6.STL
+test -f third_party/wheelhouse/pydantic_core-2.27.2-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+du -sh third_party/elfin_model third_party/wheelhouse
+
+sh simulation/scripts/verify_e05_model.sh third_party/elfin_model
+(
+  cd third_party/wheelhouse
+  sha256sum --check --strict SHA256SUMS
+)
+```
+
+### 2. 无网增量构建 Step 5
+
+使用离线 Dockerfile，并显式禁用构建网络。该构建只在 Step 4 镜像上增加
+E05-Pro 资产、共享契约、Step 5 代码和约 `3.6 MB` 的离线 Python 包：
 
 ```bash
 docker build \
-  -f docker/simulation/Dockerfile \
+  --network=none \
+  -f docker/simulation/Dockerfile.offline \
+  --build-arg BASE_IMAGE=interns2-robot-simulation:step4-base \
   -t interns2-robot-simulation:dev \
-  . 2>&1 | tee step4-simulation-build.log
+  . 2>&1 | tee step5-e05-pro-offline-build.log
 ```
 
-构建时会从 SOFA 官方 GitHub Release 下载 Linux ZIP，并在解压前强制校验 SHA256。镜像构建末尾也会自动执行一次导入检查。
+构建日志中不应出现 `curl`、`git clone`、`apt-get update` 或访问 PyPI。
+如报 `pull access denied for interns2-robot-simulation:step4-base`，说明尚未执行
+上一步的 `docker tag`，而不是需要登录镜像仓库。
 
-### 2. SOFA/SofaPython3 导入和最小步进
+`docker/simulation/Dockerfile` 保留为有网环境从 Ubuntu 22.04 开始的完整、
+可复现构建入口；实验室无网服务器不要使用它从零重建，因为它需要下载
+SOFA 和完整的 Step 4 Python 依赖。
+
+### 3. SOFA/SofaPython3 导入和最小步进
 
 ```bash
 docker run --rm \
@@ -88,7 +131,7 @@ docker run --rm \
 
 `plugins` 应包含 `SofaPython3`、`Sofa.Component.AnimationLoop`、`Sofa.Component.StateContainer` 和 `Sofa.GL.Component.Rendering3D`。
 
-### 3. Xvfb 无头渲染与上游场景
+### 4. Xvfb 无头渲染与上游场景
 
 ```bash
 docker run --rm \
@@ -110,7 +153,7 @@ docker run --rm \
 - `rgb.minimum` 和 `rgb.maximum` 不相等；
 - `opengl.renderer` 有值，使用软件渲染时通常可见 `llvmpipe`。
 
-### 4. 可选诊断
+### 5. 可选诊断
 
 只检查物理场景，不生成 RGB：
 

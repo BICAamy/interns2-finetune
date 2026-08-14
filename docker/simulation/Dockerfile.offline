@@ -1,0 +1,52 @@
+# Build Step 5 on an already validated Step 4 image without network access.
+#
+# On the server, preserve the old image before building:
+#   docker tag interns2-robot-simulation:dev interns2-robot-simulation:step4-base
+#
+# Then build with:
+#   docker build --network=none \
+#     -f docker/simulation/Dockerfile.offline \
+#     --build-arg BASE_IMAGE=interns2-robot-simulation:step4-base \
+#     -t interns2-robot-simulation:dev .
+
+ARG BASE_IMAGE=interns2-robot-simulation:step4-base
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="InternS2 E05-Pro simulation (offline Step 5)"
+LABEL org.opencontainers.image.description="Offline Step 5 layer built on the validated SOFA/sofa_env Step 4 image"
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# These wheels target the Step 4 runtime: CPython 3.10 on Linux x86_64.
+COPY third_party/wheelhouse /opt/offline-wheelhouse
+COPY simulation/step5-requirements.txt /tmp/step5-requirements.txt
+RUN cd /opt/offline-wheelhouse \
+    && sha256sum --check --strict SHA256SUMS \
+    && python3 -m pip install \
+        --no-index \
+        --find-links=/opt/offline-wheelhouse \
+        --requirement /tmp/step5-requirements.txt
+
+COPY packages/surgical_contracts /workspace/packages/surgical_contracts
+RUN python3 -m pip install \
+        --no-index \
+        --no-deps \
+        --no-build-isolation \
+        --editable /workspace/packages/surgical_contracts
+
+# The minimal official E05 snapshot is transferred with the project, so this
+# layer performs no git clone or HTTP request.
+COPY third_party/elfin_model /opt/huayan-elfin-model
+
+WORKDIR /workspace
+COPY configs /workspace/configs
+COPY simulation /workspace/simulation
+COPY tests /workspace/tests
+
+RUN sh simulation/scripts/verify_e05_model.sh /opt/huayan-elfin-model \
+    && python3 simulation/scripts/check_sofa_imports.py
+
+CMD ["python3", "simulation/scripts/check_sofa_imports.py"]
