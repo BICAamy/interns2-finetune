@@ -81,16 +81,13 @@ docker run --rm \
 ### 3. Xvfb 无头渲染与上游场景
 
 ```bash
-timeout --signal=INT --kill-after=10s 180s \
-  docker run --rm \
-    interns2-robot-simulation:dev \
-    xvfb-run \
-      --server-num=99 \
-      --error-file=/dev/stderr \
-      --server-args="-screen 0 1280x1024x24 -nolisten tcp -ac" \
-      python3 -u simulation/scripts/check_upstream_env.py \
-        --steps 10 \
-        --render-backend xvfb
+docker run --rm \
+  interns2-robot-simulation:dev \
+  timeout --signal=INT --kill-after=10s 180s \
+    run-with-xvfb \
+    python3 -u simulation/scripts/check_upstream_env.py \
+      --steps 10 \
+      --render-backend xvfb
 ```
 
 成功时必须同时满足：
@@ -120,11 +117,8 @@ docker run --rm \
 ```bash
 docker run --rm \
   interns2-robot-simulation:dev \
-  xvfb-run \
-    --server-num=99 \
-    --error-file=/dev/stderr \
-    --server-args="-screen 0 1280x1024x24 -nolisten tcp -ac" \
-    glxinfo -B
+  timeout --signal=INT --kill-after=5s 30s \
+    run-with-xvfb glxinfo -B
 ```
 
 EGL 是可选路线，其是否可用取决于宿主机和 Docker 图形栈，不作为 Step 4 必须验收项：
@@ -158,11 +152,11 @@ docker run --rm \
 
 ### `NoSuchDisplayException`
 
-表示使用了 `--render-backend xvfb` 却没有通过 `xvfb-run` 启动。使用上文完整命令。不使用 `xvfb-run -a`：自动显示号模式会在 Xvfb 本身启动失败时不断换端口重试，看起来像永久卡住。固定 `:99` 并使用 `--error-file=/dev/stderr` 可让错误立即显示。
+表示使用了 `--render-backend xvfb` 却没有通过镜像内的 `run-with-xvfb` 启动。使用上文完整命令。项目不再使用 `xvfb-run -a`：自动显示号模式会在 Xvfb 本身启动失败时不断换端口重试，看起来像永久卡住。`run-with-xvfb` 固定使用 `:99`，通过 `xdpyinfo` 最多等待 15 秒，启动失败时会输出 Xvfb 日志并清理子进程。
 
 ### RGB 帧全黑或 OpenGL 上下文失败
 
-先运行上文固定 `:99` 的 `glxinfo -B` 命令。镜像已设置 `LIBGL_ALWAYS_SOFTWARE=1`，此阶段应使用 Mesa 软件渲染，不应为了冒烟测试去修改 LMDeploy 的 NVIDIA 运行时。
+先运行上文 `run-with-xvfb glxinfo -B` 命令。镜像已设置 `LIBGL_ALWAYS_SOFTWARE=1`，此阶段应使用 Mesa 软件渲染，不应为了冒烟测试去修改 LMDeploy 的 NVIDIA 运行时。
 
 ### SOFA 插件无法加载
 

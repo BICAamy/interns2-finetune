@@ -80,7 +80,7 @@ def _render_mode(backend: str) -> RenderMode:
         if not os.environ.get("DISPLAY"):
             raise RuntimeError(
                 "The xvfb backend requires DISPLAY. Run this script through "
-                "`xvfb-run --server-num=99 --error-file=/dev/stderr`."
+                "the image command `run-with-xvfb`."
             )
         return RenderMode.HUMAN
     if backend == "egl":
