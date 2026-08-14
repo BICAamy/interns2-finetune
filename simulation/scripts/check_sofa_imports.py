@@ -22,6 +22,8 @@ REQUIRED_MODULES = (
     "SofaRuntime",
     "SofaTypes",
     "sofa_env",
+    "sofa_env.base",
+    "sofa_env.scenes.controllable_object_example.controllable_env",
 )
 REQUIRED_PLUGINS = (
     "SofaPython3",

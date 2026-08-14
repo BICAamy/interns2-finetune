@@ -29,6 +29,8 @@ simulation/scripts/check_upstream_env.py
 
 SOFA v24.06 中的旧 `splib` Python 包是一个会主动抛错的迁移提示桩，不是必需运行时模块。Step 4 的 `controllable_object_example` 不依赖它，因此导入检查不会导入 `splib`，也不需要为当前场景额外安装 STLIB。
 
+`sofa_env.base` 会通过 `sofa_env.utils.io` 在导入阶段直接导入 `open3d`，场景工具又会导入 `numba`。即使当前冒烟测试不写点云，这些仍是上游源码的导入时依赖，已纳入镜像。
+
 ## 服务器执行流程
 
 以下命令全部在服务器宿主机的 `~/interns2-finetune` 中执行，不要先 `docker exec` 进入 LMDeploy 容器。
@@ -79,13 +81,16 @@ docker run --rm \
 ### 3. Xvfb 无头渲染与上游场景
 
 ```bash
-docker run --rm \
-  interns2-robot-simulation:dev \
-  xvfb-run -a \
-    -s "-screen 0 1280x1024x24 +extension GLX +render -noreset" \
-    python3 simulation/scripts/check_upstream_env.py \
-      --steps 10 \
-      --render-backend xvfb
+timeout --signal=INT --kill-after=10s 180s \
+  docker run --rm \
+    interns2-robot-simulation:dev \
+    xvfb-run \
+      --server-num=99 \
+      --error-file=/dev/stderr \
+      --server-args="-screen 0 1280x1024x24 -nolisten tcp -ac" \
+      python3 -u simulation/scripts/check_upstream_env.py \
+        --steps 10 \
+        --render-backend xvfb
 ```
 
 成功时必须同时满足：
@@ -115,7 +120,11 @@ docker run --rm \
 ```bash
 docker run --rm \
   interns2-robot-simulation:dev \
-  xvfb-run -a glxinfo -B
+  xvfb-run \
+    --server-num=99 \
+    --error-file=/dev/stderr \
+    --server-args="-screen 0 1280x1024x24 -nolisten tcp -ac" \
+    glxinfo -B
 ```
 
 EGL 是可选路线，其是否可用取决于宿主机和 Docker 图形栈，不作为 Step 4 必须验收项：
@@ -149,11 +158,11 @@ docker run --rm \
 
 ### `NoSuchDisplayException`
 
-表示使用了 `--render-backend xvfb` 却没有通过 `xvfb-run` 启动。使用上文完整命令。
+表示使用了 `--render-backend xvfb` 却没有通过 `xvfb-run` 启动。使用上文完整命令。不使用 `xvfb-run -a`：自动显示号模式会在 Xvfb 本身启动失败时不断换端口重试，看起来像永久卡住。固定 `:99` 并使用 `--error-file=/dev/stderr` 可让错误立即显示。
 
 ### RGB 帧全黑或 OpenGL 上下文失败
 
-先运行 `xvfb-run -a glxinfo -B`。镜像已设置 `LIBGL_ALWAYS_SOFTWARE=1`，此阶段应使用 Mesa 软件渲染，不应为了冒烟测试去修改 LMDeploy 的 NVIDIA 运行时。
+先运行上文固定 `:99` 的 `glxinfo -B` 命令。镜像已设置 `LIBGL_ALWAYS_SOFTWARE=1`，此阶段应使用 Mesa 软件渲染，不应为了冒烟测试去修改 LMDeploy 的 NVIDIA 运行时。
 
 ### SOFA 插件无法加载
 

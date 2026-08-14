@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import os
 import platform
@@ -16,6 +17,13 @@ import numpy as np
 import sofa_env.scenes.controllable_object_example.controllable_env as upstream_controllable
 from sofa_env.base import RenderFramework, RenderMode, SofaEnv
 from sofa_env.scenes.controllable_object_example.controllable_env import ControllableEnv
+
+
+def _progress(stage: str, **details: Any) -> None:
+    suffix = ""
+    if details:
+        suffix = " " + json.dumps(details, ensure_ascii=False, sort_keys=True)
+    print(f"[step4-smoke] {stage}{suffix}", file=sys.stderr, flush=True)
 
 
 class SmokeControllableEnv(ControllableEnv):
@@ -71,7 +79,8 @@ def _render_mode(backend: str) -> RenderMode:
     if backend == "xvfb":
         if not os.environ.get("DISPLAY"):
             raise RuntimeError(
-                "The xvfb backend requires DISPLAY. Run this script through `xvfb-run -a`."
+                "The xvfb backend requires DISPLAY. Run this script through "
+                "`xvfb-run --server-num=99 --error-file=/dev/stderr`."
             )
         return RenderMode.HUMAN
     if backend == "egl":
@@ -115,6 +124,7 @@ def run_smoke_test(steps: int, backend: str) -> dict[str, Any]:
         raise ValueError("--steps must be greater than zero")
 
     render_mode = _render_mode(backend)
+    _progress("create_environment", backend=backend, steps=steps)
     env = SmokeControllableEnv(
         scene_path=Path(upstream_controllable.__file__).resolve().with_name(
             "scene_description.py"
@@ -125,7 +135,12 @@ def run_smoke_test(steps: int, backend: str) -> dict[str, Any]:
 
     started_at = time.perf_counter()
     try:
+        _progress("reset_start")
         reset_frame, reset_info = env.reset(seed=0)
+        _progress(
+            "reset_complete",
+            elapsed_seconds=round(time.perf_counter() - started_at, 4),
+        )
         initial_position = np.asarray(
             env.scene_creation_result["controllable_sphere"].get_pose()[:3],
             dtype=np.float64,
@@ -140,8 +155,15 @@ def run_smoke_test(steps: int, backend: str) -> dict[str, Any]:
         truncated = False
         completed_steps = 0
         for step_number in range(1, steps + 1):
+            _progress("step_start", step=step_number)
             last_frame, _, terminated, truncated, last_info = env.step(action)
             completed_steps = step_number
+            _progress(
+                "step_complete",
+                step=step_number,
+                terminated=terminated,
+                truncated=truncated,
+            )
             if terminated or truncated:
                 break
 
@@ -150,11 +172,12 @@ def run_smoke_test(steps: int, backend: str) -> dict[str, Any]:
         if float(np.linalg.norm(displacement)) <= 0.0:
             raise RuntimeError("The controllable object did not move during the smoke test")
 
+        _progress("frame_validation_start")
         frame = _frame_summary(last_frame)
         if backend != "none" and not frame["generated"]:
             raise RuntimeError("Rendered backend did not return an RGB frame")
 
-        return {
+        result = {
             "status": "ok",
             "python": platform.python_version(),
             "environment": "controllable_object_example",
@@ -179,12 +202,18 @@ def run_smoke_test(steps: int, backend: str) -> dict[str, Any]:
                 "preserve quaternion during Cartesian translation",
             ],
         }
+        _progress("smoke_test_complete")
+        return result
     finally:
+        _progress("close_start")
         env.close()
+        _progress("close_complete")
 
 
 def main() -> int:
     args = _parse_args()
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(60, repeat=True)
     try:
         result = run_smoke_test(args.steps, args.render_backend)
     except Exception as error:  # pragma: no cover - exercised inside the image
@@ -203,6 +232,8 @@ def main() -> int:
         )
         traceback.print_exc()
         return 1
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

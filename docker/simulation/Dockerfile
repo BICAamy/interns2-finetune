@@ -87,6 +87,14 @@ ENV PATH="${SOFA_ROOT}/bin:${PATH}" \
     QT_QPA_PLATFORM=offscreen \
     OMP_NUM_THREADS=1
 
+# Use a fixed display number so an Xvfb startup failure is reported instead of
+# xvfb-run --auto-servernum retrying forever with successively larger numbers.
+RUN timeout 30s xvfb-run \
+        --server-num=99 \
+        --error-file=/dev/stderr \
+        --server-args="-screen 0 1280x1024x24 -nolisten tcp -ac" \
+        glxinfo -B
+
 COPY simulation/requirements.txt /tmp/simulation-requirements.txt
 
 RUN python3 -m pip install \
@@ -108,4 +116,3 @@ RUN SKIP_SOFA=1 python3 -m pip install \
     && python3 simulation/scripts/check_sofa_imports.py
 
 CMD ["python3", "simulation/scripts/check_sofa_imports.py"]
-
