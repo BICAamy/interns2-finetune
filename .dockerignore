@@ -8,10 +8,11 @@
 **/*.py[cod]
 **/.DS_Store
 models/
+hua_yan_robo/
+docs/*.pdf
 third_party/xtuner/
 third_party/sofa_env/.github/
 third_party/sofa_env/docs/
 third_party/sofa_env/tests/
 web/node_modules/
 web/dist/
-

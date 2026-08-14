@@ -1,0 +1,61 @@
+entry_point_env:
+  tcp_name: needle_tip
+  coordinate_frame: robot_base
+  time_step_s: 0.05
+  default_speed_mm_s: 20.0
+  maximum_speed_mm_s: 50.0
+  reach_tolerance_mm: 0.5
+  maximum_relative_distance_mm: 50.0
+  trajectory_history_limit: 2048
+
+  # This box is an early command filter, not a claim that every point is
+  # reachable. Every accepted command must additionally pass six-axis IK.
+  workspace:
+    low_mm: [300.0, -250.0, 250.0]
+    high_mm: [700.0, 250.0, 750.0]
+
+  robot:
+    model_name: E05-Pro
+    force_control_variant: true
+    source_repository: https://github.com/huayan-robotics/elfin_model
+    source_commit: 84baf18d37eefa46b6f092c7fa1f105f81f70ecb
+    source_variant: 485/elfin5
+
+    # Vendor force-control dimension drawing:
+    # 1204 mm total = 220 + 380 + 420 + 184 mm.
+    force_flange_offset_mm: 184.0
+
+    # Purchased E05-Pro datasheet limits: J1/J4/J6 ±360°, J2 ±135°,
+    # J3 ±153°, J5 ±180°. Maximum speeds are J1-J4 180°/s and
+    # J5-J6 200°/s.
+    joint_limits_deg:
+      - [-360.0, 360.0]
+      - [-135.0, 135.0]
+      - [-153.0, 153.0]
+      - [-360.0, 360.0]
+      - [-180.0, 180.0]
+      - [-360.0, 360.0]
+    joint_max_speeds_deg_s: [180.0, 180.0, 180.0, 180.0, 200.0, 200.0]
+
+    # A deterministic, non-singular simulation start pose. The resulting
+    # needle TCP is approximately [530.7, 0.0, 520.7] mm.
+    initial_joint_positions_deg: [0.0, 0.0, 60.0, 0.0, 90.0, 0.0]
+
+    tool_transform:
+      # Temporary flange -> needle-tip transform requested for simulation.
+      # The +Z convention follows the verified vendor xacro flange axis.
+      translation_mm: [0.0, 0.0, 150.0]
+      rpy_deg: [0.0, 0.0, 0.0]
+      provisional: true
+      real_robot_motion_allowed: false
+      note: 仿真临时值；实机前必须安装针架后通过厂家TCP标定流程替换
+
+  inverse_kinematics:
+    orientation_weight_mm_per_rad: 100.0
+    position_tolerance_mm: 0.05
+    orientation_tolerance_deg: 0.05
+    maximum_solver_evaluations: 300
+
+  image:
+    height: 600
+    width: 600

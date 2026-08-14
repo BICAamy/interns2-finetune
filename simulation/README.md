@@ -1,6 +1,6 @@
 # SOFA/LapGym 仿真环境
 
-本目录承载手术导航项目的独立仿真运行时。Step 4 只验证 SOFA、SofaPython3、`sofa_env` 和无头渲染，不连接 InternS2、网页、路径规划或真实机械臂。
+本目录承载手术导航项目的独立仿真运行时。Step 4 验证了 SOFA、SofaPython3、`sofa_env` 和无头渲染；Step 5 使用已购买的华沿 E05-Pro 力控版六轴机械臂，实现针尖/TCP 到入点的连续定位和相对移动。当前仍不连接 InternS2、网页、路径规划或真实机械臂，也不包含穿刺执行逻辑。
 
 ## 固定版本
 
@@ -11,6 +11,8 @@
 | SOFA | v24.06.00 Linux x86_64 |
 | SOFA ZIP SHA256 | `9d515e2f25f657c744821be8a5361e22803c18947b33af7a0b357c259202236a` |
 | `sofa_env` | 上游提交 `85bf7e05dd088b824794dda0046679df13b13e6e` |
+| 华沿 E05 网格/URDF | 官方 `elfin_model` 提交 `84baf18d37eefa46b6f092c7fa1f105f81f70ecb`，`485/elfin5` |
+| 力控末端修正 | J6 到法兰 `184 mm`，来自 E05-Pro 力控尺寸图 |
 | 默认渲染 | Xvfb + Pyglet + Mesa 软件 OpenGL |
 
 镜像与 InternS2/LMDeploy 镜像完全分离。默认的 Step 4 检查不需要 NVIDIA GPU，也不要在 `xl_interns2_lmdeploy` 容器中安装 SOFA。
@@ -22,10 +24,19 @@ docker/simulation/Dockerfile
 simulation/requirements.txt
 simulation/scripts/check_sofa_imports.py
 simulation/scripts/check_upstream_env.py
+simulation/scripts/check_entry_point_env.py
+simulation/scripts/fetch_e05_model.sh
+simulation/entry_point_env/
+simulation/assets/unit_cylinder_z.obj
+configs/simulation.yaml
+tests/simulation/
 ```
 
 - `check_sofa_imports.py` 检查 Python/CPU 架构、SOFA Python 模块、必要插件和最小仿真步。
 - `check_upstream_env.py` 加载上游 `controllable_object_example` 场景，执行固定步数、验证位置变化并检查 RGB 帧。
+- `fetch_e05_model.sh` 在镜像构建时稀疏拉取厂家 E05 网格和 xacro，并校验完整提交及逐文件 SHA256。
+- `entry_point_env` 提供 E05-Pro 六轴正逆运动学、毫米制连续轨迹、关节速度限制、SOFA 场景适配、状态输出和 RGB 轨迹叠加。
+- `check_entry_point_env.py` 验证绝对入点定位、相对 `+Z 5 mm`、六轴关节变化、有限步长、SOFA 位姿同步和 RGB 输出。
 
 SOFA v24.06 中的旧 `splib` Python 包是一个会主动抛错的迁移提示桩，不是必需运行时模块。Step 4 的 `controllable_object_example` 不依赖它，因此导入检查不会导入 `splib`，也不需要为当前场景额外安装 STLIB。
 
@@ -49,7 +60,6 @@ docker version
 
 ```bash
 docker build \
-  --progress=plain \
   -f docker/simulation/Dockerfile \
   -t interns2-robot-simulation:dev \
   . 2>&1 | tee step4-simulation-build.log
@@ -140,6 +150,90 @@ docker run --rm \
 
 本项目不修改 `third_party/sofa_env`。`check_upstream_env.py` 通过仅用于冒烟测试的子类修正上述逻辑，场景描述、物理组件、网格和渲染仍全部使用上游实现。
 
+## Step 5 连续入点定位
+
+### 坐标、单位与控制边界
+
+- 外部命令、共享契约、状态和轨迹一律使用毫米；
+- 坐标系固定为 `robot_base`，当前与仿真世界坐标轴对齐；
+- 六个关节原点/轴采用厂家新版 `485/elfin5` xacro，力控版 J6 到法兰距离由普通版 `146 mm` 修正为尺寸图中的 `184 mm`；
+- 只有 `EntryPointReachEnv` 的 SOFA 适配边界执行毫米到米的转换，厂家 STL 本身以米建模；
+- TCP 固定命名为 `needle_tip`；
+- 当前法兰到针尖暂定为法兰局部 `+Z 150 mm`、零姿态偏移，配置明确标记为临时值且禁止实机运动；
+- 每步最大欧氏位移为 `speed_mm_s × time_step_s`，最后一步同样不会跳变；
+- 每步关节角变化同时受 E05-Pro 各关节最大速度限制；
+- 工作空间、速度、误差阈值、初始位置和图像尺寸来自 `configs/simulation.yaml`；
+- 工作空间盒只做第一层过滤，所有目标还必须通过固定安全姿态下的六轴逆解；
+- 入点是定位目标；本环境没有靶点运动和穿刺逻辑。
+
+官方仓库只提供普通新版 E05 网格；当前将第六连杆沿局部 Z 方向按 `184/146` 缩放作为力控末端的可视化代理，运动学法兰位置使用准确的 `184 mm`。厂家提供的 E05-Pro STEP 用于尺寸交叉核对，暂不在运行时直接解析。待取得单独的力控末端网格后，只替换第六连杆可视资产，不修改运动学、命令或工具协议。
+
+针架 CAD 不是 Step 5 阻塞项，但真实法兰到针尖的刚体变换是实机阻塞项。安装后应使用厂家 TCP 标定接口测得 XYZ/RPY，更新 `tool_transform`，并在独立实机安全评审后才能将 `provisional` 改为 `false`、允许实机运动。
+
+### 快速单元测试
+
+不启动 SOFA 的轨迹、边界、停止和 RGB 叠加测试：
+
+```bash
+docker run --rm \
+  interns2-robot-simulation:dev \
+  python3 -m pytest \
+    tests/simulation/test_e05_pro_kinematics.py \
+    tests/simulation/test_entry_point_env.py \
+    tests/simulation/test_relative_motion.py \
+    -q
+```
+
+默认会跳过两项显式标记的 SOFA 集成测试。
+
+### SOFA 集成测试
+
+绝对定位和 RGB 测试需要 Xvfb：
+
+```bash
+docker run --rm \
+  -e ENTRY_POINT_SOFA_TESTS=1 \
+  interns2-robot-simulation:dev \
+  timeout --signal=INT --kill-after=10s 180s \
+    run-with-xvfb \
+    python3 -m pytest \
+      tests/simulation/test_entry_point_env.py \
+      -q
+
+docker run --rm \
+  -e ENTRY_POINT_SOFA_TESTS=1 \
+  interns2-robot-simulation:dev \
+  timeout --signal=INT --kill-after=10s 120s \
+    python3 -m pytest \
+      tests/simulation/test_relative_motion.py \
+      -q
+```
+
+两个文件分别在独立容器中运行，避免在同一个 Python 进程中创建多个 SOFA 仿真实例。
+
+### Step 5 综合冒烟测试
+
+```bash
+docker run --rm \
+  interns2-robot-simulation:dev \
+  timeout --signal=INT --kill-after=10s 180s \
+    run-with-xvfb \
+    python3 -u simulation/scripts/check_entry_point_env.py
+```
+
+成功输出必须满足：
+
+- `status` 为 `ok`；
+- 机器人型号为 `E05-Pro` 且 `force_control_variant` 为 `true`；
+- 入点为 `[500, 0, 500]` mm，之后相对移动 `[0, 0, 5]` mm；
+- 最终位置在 `[500, 0, 505]` mm 附近，绝对定位残差不超过配置阈值；
+- `tcp_transform_provisional` 为 `true`、`real_robot_ready` 为 `false`；
+- 初始与最终六轴关节角不同；
+- `entry_error_mm` 不超过配置阈值；
+- `maximum_step_mm` 不超过 `allowed_maximum_step_mm`；
+- `rgb.generated` 为 `true`，图像形状为 `[600, 600, 3]`；
+- `puncture_logic_present` 为 `false`。
+
 ## 常见故障
 
 ### SHA256 校验失败
@@ -165,3 +259,7 @@ docker run --rm \
 ## Step 4 验收
 
 只有导入检查和 Xvfb RGB 冒烟测试均输出 `status: ok`，才算完成 Step 4。镜像成功构建但无法生成非空 RGB 帧，不算通过。
+
+## Step 5 验收
+
+只有控制器测试、SOFA 集成测试和 Step 5 综合冒烟测试全部通过，才算完成 Step 5。纯数学控制器到达目标但 SOFA TCP 未同步，或 SOFA 成功移动但没有有效 RGB/轨迹输出，均不算通过。
