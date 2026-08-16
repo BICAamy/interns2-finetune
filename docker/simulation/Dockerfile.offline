@@ -1,4 +1,5 @@
-# Build Step 5 on an already validated Step 4 image without network access.
+# Build the Step 5/6 simulation and service on a validated Step 4 image without
+# network access.
 #
 # On the server, preserve the old image before building:
 #   docker tag interns2-robot-simulation:dev interns2-robot-simulation:step4-base
@@ -12,8 +13,8 @@
 ARG BASE_IMAGE=interns2-robot-simulation:step4-base
 FROM ${BASE_IMAGE}
 
-LABEL org.opencontainers.image.title="InternS2 E05-Pro simulation (offline Step 5)"
-LABEL org.opencontainers.image.description="Offline Step 5 layer built on the validated SOFA/sofa_env Step 4 image"
+LABEL org.opencontainers.image.title="InternS2 E05-Pro robot-simulation service"
+LABEL org.opencontainers.image.description="Offline Step 5/6 runtime built on the validated SOFA/sofa_env Step 4 image"
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -23,12 +24,14 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
 # These wheels target the Step 4 runtime: CPython 3.10 on Linux x86_64.
 COPY third_party/wheelhouse /opt/offline-wheelhouse
 COPY simulation/step5-requirements.txt /tmp/step5-requirements.txt
+COPY simulation/service-requirements.txt /tmp/service-requirements.txt
 RUN cd /opt/offline-wheelhouse \
     && sha256sum --check --strict SHA256SUMS \
     && python3 -m pip install \
         --no-index \
         --find-links=/opt/offline-wheelhouse \
-        --requirement /tmp/step5-requirements.txt
+        --requirement /tmp/step5-requirements.txt \
+        --requirement /tmp/service-requirements.txt
 
 COPY packages/surgical_contracts /workspace/packages/surgical_contracts
 RUN python3 -m pip install \
@@ -49,4 +52,9 @@ COPY tests /workspace/tests
 RUN sh simulation/scripts/prepare_e05_model.sh /opt/huayan-elfin-model \
     && python3 simulation/scripts/check_sofa_imports.py
 
-CMD ["python3", "simulation/scripts/check_sofa_imports.py"]
+EXPOSE 8001
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
+    CMD ["python3", "simulation/scripts/healthcheck_simulation_service.py"]
+
+CMD ["run-with-xvfb", "python3", "-m", "simulation.server.main"]

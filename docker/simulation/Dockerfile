@@ -123,4 +123,9 @@ RUN SKIP_SOFA=1 python3 -m pip install \
     && sh simulation/scripts/prepare_e05_model.sh /opt/huayan-elfin-model \
     && python3 simulation/scripts/check_sofa_imports.py
 
-CMD ["python3", "simulation/scripts/check_sofa_imports.py"]
+EXPOSE 8001
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
+    CMD ["python3", "simulation/scripts/healthcheck_simulation_service.py"]
+
+CMD ["run-with-xvfb", "python3", "-m", "simulation.server.main"]

@@ -191,6 +191,9 @@ class EntryPointReachEnv(SofaEnv):
     def stop(self) -> RobotState:
         return self.controller.stop()
 
+    def emergency_stop(self) -> RobotState:
+        return self.controller.emergency_stop()
+
     def render(self, mode: str | None = None) -> np.ndarray:
         return self._render_overlay(super().render(mode=mode))
 
@@ -231,4 +234,3 @@ class EntryPointReachEnv(SofaEnv):
         """Return the controller FK snapshot used to place all SOFA link meshes."""
 
         return self.controller.kinematic_snapshot
-

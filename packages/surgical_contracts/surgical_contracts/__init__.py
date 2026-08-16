@@ -25,6 +25,18 @@ from .robot import (
     RuntimeMode,
     ToolStatus,
 )
+from .simulation import (
+    CommandExecutionStatus,
+    ResetSimulationRequest,
+    RobotActionRequest,
+    RobotActionResult,
+    RobotCommandKind,
+    RobotCommandRecord,
+    SimulationEvent,
+    SimulationHealth,
+    SimulationHeartbeat,
+    SimulationTelemetry,
+)
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -32,6 +44,7 @@ __all__ = [
     "ContractModel",
     "Axis",
     "CommandIntent",
+    "CommandExecutionStatus",
     "CoordinateFrame",
     "CoordinateSource",
     "Direction",
@@ -52,7 +65,16 @@ __all__ = [
     "Point3D",
     "RelativeMotion",
     "RobotState",
+    "ResetSimulationRequest",
+    "RobotActionRequest",
+    "RobotActionResult",
+    "RobotCommandKind",
+    "RobotCommandRecord",
     "RuntimeMode",
+    "SimulationEvent",
+    "SimulationHealth",
+    "SimulationHeartbeat",
+    "SimulationTelemetry",
     "ToolEvent",
     "ToolName",
     "ToolStatus",

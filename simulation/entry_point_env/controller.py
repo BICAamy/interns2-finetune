@@ -104,6 +104,7 @@ class ContinuousTrajectoryController:
         self._target_position_mm: tuple[float, float, float] | None = None
         self._speed_mm_s = self.config.default_speed_mm_s
         self._motion_state = MotionState.IDLE
+        self._estop = False
         self._active_command_id: str | None = None
         self._last_command_id: str | None = None
         self._command_kind: MotionCommandKind | None = None
@@ -201,6 +202,8 @@ class ContinuousTrajectoryController:
         return self._start_motion(target, speed, MotionCommandKind.RELATIVE, "relative")
 
     def _ensure_motion_can_start(self) -> None:
+        if self._estop:
+            raise InvalidMotionCommand("emergency stop is active")
         if self._motion_state == MotionState.MOVING:
             raise InvalidMotionCommand("cannot replace a motion command while it is moving")
 
@@ -328,7 +331,7 @@ class ContinuousTrajectoryController:
             tcp_position=self._point(self._position_mm),
             orientation_xyzw=tuple(float(value) for value in orientation),
             motion_state=self._motion_state,
-            estop=False,
+            estop=self._estop,
             active_command_id=self._active_command_id,
         )
 
@@ -336,7 +339,17 @@ class ContinuousTrajectoryController:
         self._target_position_mm = None
         self._command_kind = None
         self._active_command_id = None
-        self._motion_state = MotionState.STOPPED
+        self._motion_state = MotionState.ESTOP if self._estop else MotionState.STOPPED
+        return self.get_state()
+
+    def emergency_stop(self) -> RobotState:
+        """Latch the simulation emergency stop and cancel active motion."""
+
+        self._target_position_mm = None
+        self._command_kind = None
+        self._active_command_id = None
+        self._estop = True
+        self._motion_state = MotionState.ESTOP
         return self.get_state()
 
     def mark_failed(self) -> RobotState:

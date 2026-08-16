@@ -1,7 +1,8 @@
-# Step 5 offline wheelhouse
+# Step 5/6 offline wheelhouse
 
 This directory contains the pinned additions from
-`simulation/step5-requirements.txt` for the validated Step 4 runtime:
+`simulation/step5-requirements.txt` and `simulation/service-requirements.txt`
+for the validated Step 4 runtime:
 
 - Linux x86_64 (`manylinux2014_x86_64`);
 - CPython 3.10 (`cp310`);
@@ -22,5 +23,6 @@ python3 -m pip download \
   --implementation cp \
   --abi cp310 \
   --dest third_party/wheelhouse \
-  --requirement simulation/step5-requirements.txt
+  --requirement simulation/step5-requirements.txt \
+  --requirement simulation/service-requirements.txt
 ```

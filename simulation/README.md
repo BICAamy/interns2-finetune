@@ -1,6 +1,6 @@
 # SOFA/LapGym 仿真环境
 
-本目录承载手术导航项目的独立仿真运行时。Step 4 验证了 SOFA、SofaPython3、`sofa_env` 和无头渲染；Step 5 使用已购买的华沿 E05-Pro 力控版六轴机械臂，实现针尖/TCP 到入点的连续定位和相对移动。当前仍不连接 InternS2、网页、路径规划或真实机械臂，也不包含穿刺执行逻辑。
+本目录承载手术导航项目的独立仿真运行时。Step 4 验证了 SOFA、SofaPython3、`sofa_env` 和无头渲染；Step 5 使用已购买的华沿 E05-Pro 力控版六轴机械臂，实现针尖/TCP 到入点的连续定位和相对移动；Step 6 将该环境封装为单 worker 的 HTTP/WebSocket/MJPEG 服务。当前仍不连接 InternS2、网页、路径规划或真实机械臂，也不包含穿刺执行逻辑。
 
 ## 固定版本
 
@@ -24,15 +24,21 @@ docker/simulation/Dockerfile
 docker/simulation/Dockerfile.offline
 simulation/requirements.txt
 simulation/step5-requirements.txt
+simulation/service-requirements.txt
+simulation/server/
 simulation/scripts/check_sofa_imports.py
 simulation/scripts/check_upstream_env.py
 simulation/scripts/check_entry_point_env.py
 simulation/scripts/verify_e05_model.sh
 simulation/scripts/prepare_e05_model.sh
+simulation/scripts/healthcheck_simulation_service.py
+simulation/scripts/check_simulation_service.py
 simulation/entry_point_env/
 simulation/assets/unit_cylinder_z.obj
 configs/simulation.yaml
 tests/simulation/
+tests/integration/test_simulation_api.py
+tests/integration/test_simulation_api_sofa.py
 third_party/elfin_model/
 third_party/wheelhouse/
 ```
@@ -43,7 +49,7 @@ third_party/wheelhouse/
 - `prepare_e05_model.sh` 在镜像内为厂家大写 `.STL` 创建小写 `.stl` 符号链接，以兼容 `sofa_env` 的大小写敏感加载器；原文件内容和校验值保持不变。
 - `entry_point_env` 提供 E05-Pro 六轴正逆运动学、毫米制连续轨迹、关节速度限制、SOFA 场景适配、状态输出和 RGB 轨迹叠加。
 - `check_entry_point_env.py` 验证绝对入点定位、相对 `+Z 5 mm`、六轴关节变化、有限步长、SOFA 位姿同步和 RGB 输出。
-- `Dockerfile.offline` 以已验证的 Step 4 镜像为基座，从项目内 wheelhouse 安装 Step 5 增量依赖，全程不访问网络。
+- `Dockerfile.offline` 以已验证的 Step 4 镜像为基座，从项目内 wheelhouse 安装 Step 5/6 增量依赖，全程不访问网络。
 
 SOFA v24.06 中的旧 `splib` Python 包是一个会主动抛错的迁移提示桩，不是必需运行时模块。Step 4 的 `controllable_object_example` 不依赖它，因此导入检查不会导入 `splib`，也不需要为当前场景额外安装 STLIB。
 
@@ -74,8 +80,9 @@ docker run --rm \
   python3 simulation/scripts/check_sofa_imports.py
 ```
 
-随后确认通过 VSCode/Git 传到服务器的离线资产完整。两个目录总计约
-`12 MB`，不能只传文本源码而漏掉 `.STL` 和 `.whl` 文件：
+随后确认通过 VSCode/Git 传到服务器的离线资产完整。Step 6 增加服务 wheel
+后，E05 模型约 `8.8 MB`、wheelhouse 约 `8.8 MB`；不能只传文本源码而漏掉
+`.STL` 和 `.whl` 文件：
 
 ```bash
 test "$(uname -m)" = "x86_64"
@@ -90,10 +97,10 @@ sh simulation/scripts/verify_e05_model.sh third_party/elfin_model
 )
 ```
 
-### 2. 无网增量构建 Step 5
+### 2. 无网增量构建 Step 5/6
 
 使用离线 Dockerfile，并显式禁用构建网络。该构建只在 Step 4 镜像上增加
-E05-Pro 资产、共享契约、Step 5 代码和约 `3.6 MB` 的离线 Python 包：
+E05-Pro 资产、共享契约、Step 5/6 代码和离线 Python 包：
 
 ```bash
 docker build \
@@ -101,7 +108,7 @@ docker build \
   -f docker/simulation/Dockerfile.offline \
   --build-arg BASE_IMAGE=interns2-robot-simulation:step4-base \
   -t interns2-robot-simulation:dev \
-  . 2>&1 | tee step5-e05-pro-offline-build.log
+  . 2>&1 | tee step6-robot-simulation-offline-build.log
 ```
 
 构建日志中不应出现 `curl`、`git clone`、`apt-get update` 或访问 PyPI。
@@ -308,3 +315,101 @@ docker run --rm \
 ## Step 5 验收
 
 只有控制器测试、SOFA 集成测试和 Step 5 综合冒烟测试全部通过，才算完成 Step 5。纯数学控制器到达目标但 SOFA TCP 未同步，或 SOFA 成功移动但没有有效 RGB/轨迹输出，均不算通过。
+
+## Step 6 `robot-simulation` 服务
+
+### 并发与安全边界
+
+- 只有 `robot-simulation-worker` 线程创建、步进和关闭 SOFA/OpenGL 环境；
+- FastAPI 请求线程只验证共享契约并把命令放入队列；
+- 普通命令 FIFO 串行执行，不能覆盖正在运行的轨迹；
+- `stop`/`estop` 使用独立高优先级队列，会取消正在运行及此前排队的普通命令；
+- `estop` 是锁存状态，后续运动返回 `ESTOP_ACTIVE`，仿真 `reset` 后才清除；
+- 相同 `command_id` 和相同参数幂等返回原记录；相同 ID 配不同参数返回 HTTP 409；
+- `SIMULATION_PAUSE_ON_NO_CLIENTS=1` 时，MJPEG/WebSocket 客户端全部断开会暂停轨迹；默认值 `0`，HTTP 提交后即使页面刷新也继续执行；
+- Uvicorn 固定一个进程，禁止通过 `--workers` 启动多个 SOFA 实例。
+
+### API
+
+```text
+GET  /health
+GET  /v1/state
+POST /v1/reset
+POST /v1/commands/move-to-entry
+POST /v1/commands/move-relative
+POST /v1/commands/stop
+POST /v1/commands/estop
+GET  /v1/commands/{command_id}
+GET  /v1/stream.mjpeg
+WS   /v1/events
+```
+
+所有 JSON 请求、响应和事件都使用 `surgical_contracts` 的 `schema_version=1.0`
+模型。运动 POST 返回 HTTP 202 和命令记录，客户端通过命令查询或 WebSocket
+观察 `queued → running → succeeded/failed/rejected/cancelled`。
+
+### 无 SOFA API/并发测试
+
+```bash
+docker run --rm \
+  interns2-robot-simulation:dev \
+  python3 -m pytest tests/integration/test_simulation_api.py -q
+```
+
+### 真实 SOFA worker HTTP 集成测试
+
+```bash
+docker run --rm \
+  -e ROBOT_SIMULATION_SOFA_TESTS=1 \
+  interns2-robot-simulation:dev \
+  timeout --signal=INT --kill-after=10s 180s \
+    run-with-xvfb \
+    python3 -m pytest \
+      tests/integration/test_simulation_api_sofa.py \
+      -q -s
+```
+
+### 启动服务并验收
+
+服务只映射到服务器回环地址，当前版本没有认证，不得直接暴露到局域网或公网：
+
+```bash
+docker run --rm -d \
+  --name robot-simulation-test \
+  -p 127.0.0.1:8001:8001 \
+  interns2-robot-simulation:dev
+
+docker logs -f robot-simulation-test
+```
+
+日志出现 Uvicorn 启动成功后，另开服务器终端执行：
+
+```bash
+curl -s http://127.0.0.1:8001/health
+curl -s http://127.0.0.1:8001/v1/state
+
+python3 simulation/scripts/check_simulation_service.py \
+  --base-url http://127.0.0.1:8001 \
+  --timeout 30
+```
+
+验收脚本会通过真实 HTTP 依次 reset、移动到 `[500,0,500] mm`、相对移动
+`+Z 5 mm`，校验最终 TCP、轨迹和一帧 MJPEG。成功输出包含
+`"status": "ok"`。浏览器/后续网页可直接使用：
+
+```text
+http://127.0.0.1:8001/v1/stream.mjpeg
+ws://127.0.0.1:8001/v1/events
+```
+
+验收结束后停止测试服务：
+
+```bash
+docker stop robot-simulation-test
+```
+
+### Step 6 验收
+
+以下各项全部通过才算完成：无 SOFA API 测试、真实 SOFA worker HTTP 测试、
+独立服务 `/health`、HTTP 绝对/相对运动、状态/轨迹、MJPEG、幂等与冲突、
+普通命令串行、停止/急停抢占和可配置断连暂停。
