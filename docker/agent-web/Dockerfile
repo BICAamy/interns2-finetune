@@ -24,7 +24,10 @@ ENV LANG=C.UTF-8 \
 WORKDIR /workspace
 
 COPY web/backend/requirements.txt /tmp/agent-web-requirements.txt
-RUN python3 -m pip install --requirement /tmp/agent-web-requirements.txt
+COPY web/backend/asr-requirements.txt /tmp/asr-requirements.txt
+RUN python3 -m pip install \
+        --requirement /tmp/agent-web-requirements.txt \
+        --requirement /tmp/asr-requirements.txt
 
 COPY packages/surgical_contracts /workspace/packages/surgical_contracts
 COPY agent /workspace/agent

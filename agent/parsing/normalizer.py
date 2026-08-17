@@ -291,7 +291,13 @@ class CommandNormalizer:
         if point_missing:
             return None, point_missing
 
-        source_value = value.get("source", input_source.value)
+        # Provenance is runtime-owned. A model must not relabel ASR coordinates
+        # as direct user text merely because its tool arguments include source.
+        source_value = (
+            input_source.value
+            if input_source == CoordinateSource.ASR_TEXT
+            else value.get("source", input_source.value)
+        )
         try:
             source = CoordinateSource(source_value)
         except (TypeError, ValueError) as error:

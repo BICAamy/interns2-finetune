@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from collections.abc import AsyncIterator
 from pathlib import Path
+from threading import Event
 import time
 
 from fastapi.testclient import TestClient
@@ -14,6 +16,7 @@ from agent.tools.robot import FakeRobotController
 from surgical_contracts import (
     Axis,
     CommandIntent,
+    CoordinateSource,
     Direction,
     ParsedCommand,
     Point3D,
@@ -23,6 +26,9 @@ from surgical_contracts import (
     SimulationTelemetry,
 )
 from web.backend.main import create_app
+from web.backend.asr import ASRSettings
+from web.backend.asr.service import RawTranscription
+from web.backend.models import TextCommandRequest
 from web.backend.runtime import WebRuntime
 
 
@@ -70,10 +76,18 @@ class StubParser:
         self.calls = 0
         self.image_paths: list[Path | None] = []
         self.image_existed_during_parse: list[bool] = []
+        self.input_sources: list[CoordinateSource] = []
 
-    def parse_command(self, prompt: str, image_path=None) -> ParsedCommandResponse:
+    def parse_command(
+        self,
+        prompt: str,
+        image_path=None,
+        *,
+        input_source: CoordinateSource = CoordinateSource.USER_TEXT,
+    ) -> ParsedCommandResponse:
         assert prompt.strip()
         self.calls += 1
+        self.input_sources.append(input_source)
         selected = Path(image_path) if image_path is not None else None
         self.image_paths.append(selected)
         self.image_existed_during_parse.append(
@@ -178,6 +192,60 @@ class StubSimulationObserver:
         self.closed = True
 
 
+class StubSpeechTranscriber:
+    def __init__(
+        self,
+        text: str,
+        *,
+        confidence: float = 0.92,
+        duration_s: float = 1.4,
+    ) -> None:
+        self.text = text
+        self.confidence = confidence
+        self.duration_s = duration_s
+        self.calls = 0
+        self.paths: list[Path] = []
+        self.existed_during_call: list[bool] = []
+
+    @property
+    def loaded(self) -> bool:
+        return True
+
+    def transcribe(self, audio_path: Path) -> RawTranscription:
+        self.calls += 1
+        self.paths.append(audio_path)
+        self.existed_during_call.append(audio_path.is_file())
+        return RawTranscription(
+            text=self.text,
+            language="zh",
+            language_probability=0.99,
+            confidence=self.confidence,
+            duration_s=self.duration_s,
+        )
+
+
+class BlockingParser(StubParser):
+    def __init__(self, command: ParsedCommand) -> None:
+        super().__init__(command)
+        self.started = Event()
+        self.release = Event()
+
+    def parse_command(
+        self,
+        prompt: str,
+        image_path=None,
+        *,
+        input_source: CoordinateSource = CoordinateSource.USER_TEXT,
+    ) -> ParsedCommandResponse:
+        self.started.set()
+        assert self.release.wait(timeout=3)
+        return super().parse_command(
+            prompt,
+            image_path,
+            input_source=input_source,
+        )
+
+
 def make_client(command: ParsedCommand):
     parser = StubParser(command)
     robot = FakeRobotController()
@@ -196,6 +264,34 @@ def make_client(command: ParsedCommand):
         robot,
         planner,
         observer,
+    )
+
+
+def make_speech_client(
+    command: ParsedCommand,
+    text: str,
+    *,
+    confidence: float = 0.92,
+):
+    parser = StubParser(command)
+    robot = FakeRobotController()
+    planner = FakePuncturePlannerClient()
+    observer = StubSimulationObserver(robot)
+    transcriber = StubSpeechTranscriber(text, confidence=confidence)
+    runtime = WebRuntime(
+        settings(),
+        parser=parser,
+        robot=robot,
+        planner=planner,
+        simulation_observer=observer,
+        asr_settings=ASRSettings(max_audio_bytes=1024, max_duration_s=30),
+        speech_transcriber=transcriber,
+    )
+    return (
+        TestClient(create_app(runtime, static_dir="/missing")),
+        parser,
+        robot,
+        transcriber,
     )
 
 
@@ -265,6 +361,7 @@ def test_puncture_preview_requires_confirmation_and_never_executes_puncture():
             if event["status"] == "completed"
         )
         assert parser.calls == 1
+        assert parser.input_sources == [CoordinateSource.USER_TEXT]
 
         # The web service has no browser-facing planner passthrough.
         blocked = client.post("/api/planner/plan", json={})
@@ -464,3 +561,192 @@ def test_camera_state_and_bounded_view_controls_are_proxied_by_session():
         )
         assert missing.status_code == 404
         assert len(observer.camera_calls) == 1
+
+
+def test_speech_is_transcribed_deleted_and_reuses_confirmed_text_chain():
+    client, parser, robot, transcriber = make_speech_client(
+        relative_command("voice-relative"),
+        "机械臂沿基座坐标系Z轴正方向移动8毫米",
+    )
+    with client:
+        session_id = create_session(client)["session_id"]
+        status = client.get("/api/asr/status")
+        assert status.status_code == 200
+        assert status.json()["available"] is True
+        assert status.json()["loaded"] is True
+
+        response = client.post(
+            f"/api/sessions/{session_id}/commands/speech",
+            content=b"stub-webm-opus",
+            headers={
+                "Content-Type": "audio/webm;codecs=opus",
+                "X-Audio-Duration-Ms": "1400",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "awaiting_confirmation"
+        assert payload["input_source"] == "voice"
+        assert payload["prompt"] == "机械臂沿基座坐标系Z轴正方向移动8毫米"
+        assert payload["asr_transcription"]["confidence"] == 0.92
+        assert payload["asr_transcription"]["asr_latency_ms"] >= 0
+        assert payload["asr_transcription"]["end_to_end_latency_ms"] >= 0
+        assert payload["asr_transcription"]["safety_action"] is None
+        assert parser.calls == 1
+        assert parser.input_sources == [CoordinateSource.ASR_TEXT]
+        assert transcriber.calls == 1
+        assert transcriber.existed_during_call == [True]
+        assert not transcriber.paths[0].exists()
+        assert robot.move_relative_calls == []
+
+        accepted = client.post(f"/api/sessions/{session_id}/confirm")
+        assert accepted.status_code == 202
+        completed = wait_for_status(client, session_id, {"completed", "failed"})
+        assert completed["status"] == "completed"
+        assert len(robot.move_relative_calls) == 1
+
+
+def test_low_confidence_speech_never_executes_without_doctor_confirmation():
+    client, parser, robot, _transcriber = make_speech_client(
+        relative_command("voice-low-confidence"),
+        "机械臂向上移动8毫米",
+        confidence=0.41,
+    )
+    with client:
+        session_id = create_session(client)["session_id"]
+        response = client.post(
+            f"/api/sessions/{session_id}/commands/speech",
+            content=b"low-confidence-audio",
+            headers={
+                "Content-Type": "audio/webm",
+                "X-Audio-Duration-Ms": "1200",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "awaiting_confirmation"
+        assert payload["pending_confirmation"] is True
+        assert payload["asr_transcription"]["low_confidence"] is True
+        assert "逐字核对" in payload["message"]
+        assert parser.calls == 1
+        assert robot.move_relative_calls == []
+
+
+def test_exact_spoken_stop_uses_fast_path_without_interns2():
+    client, parser, robot, _transcriber = make_speech_client(
+        relative_command("unused-voice-command"),
+        "停止机械臂。",
+    )
+    with client:
+        session_id = create_session(client)["session_id"]
+        response = client.post(
+            f"/api/sessions/{session_id}/commands/speech",
+            content=b"spoken-stop",
+            headers={
+                "Content-Type": "audio/ogg;codecs=opus",
+                "X-Audio-Duration-Ms": "900",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "stopped"
+        assert payload["input_source"] == "voice"
+        assert payload["asr_transcription"]["safety_action"] == "stop"
+        assert parser.calls == 0
+        assert robot.stop_calls == 1
+
+
+def test_speech_upload_validation_happens_before_transcription():
+    client, parser, robot, transcriber = make_speech_client(
+        relative_command(),
+        "机械臂向上移动8毫米",
+    )
+    with client:
+        session_id = create_session(client)["session_id"]
+        unsupported = client.post(
+            f"/api/sessions/{session_id}/commands/speech",
+            content=b"audio",
+            headers={
+                "Content-Type": "application/octet-stream",
+                "X-Audio-Duration-Ms": "1000",
+            },
+        )
+        assert unsupported.status_code == 415
+        assert unsupported.json()["code"] == "ASR_UNSUPPORTED_AUDIO_TYPE"
+
+        too_large = client.post(
+            f"/api/sessions/{session_id}/commands/speech",
+            content=b"x" * 1025,
+            headers={
+                "Content-Type": "audio/webm",
+                "X-Audio-Duration-Ms": "1000",
+            },
+        )
+        assert too_large.status_code == 413
+        assert too_large.json()["code"] == "ASR_AUDIO_TOO_LARGE"
+
+        missing_duration = client.post(
+            f"/api/sessions/{session_id}/commands/speech",
+            content=b"audio",
+            headers={"Content-Type": "audio/webm"},
+        )
+        assert missing_duration.status_code == 400
+        assert missing_duration.json()["code"] == "ASR_DURATION_REQUIRED"
+
+        unknown = client.post(
+            "/api/sessions/unknown/commands/speech",
+            content=b"audio",
+            headers={
+                "Content-Type": "audio/webm",
+                "X-Audio-Duration-Ms": "1000",
+            },
+        )
+        assert unknown.status_code == 404
+        assert transcriber.calls == 0
+        assert parser.calls == 0
+        assert robot.move_relative_calls == []
+
+
+def test_spoken_stop_preempts_inflight_interns2_parse_without_stale_overwrite():
+    parser = BlockingParser(relative_command("stale-parse"))
+    robot = FakeRobotController()
+    runtime = WebRuntime(
+        settings(),
+        parser=parser,
+        robot=robot,
+        planner=FakePuncturePlannerClient(),
+        simulation_observer=StubSimulationObserver(robot),
+        asr_settings=ASRSettings(),
+        speech_transcriber=StubSpeechTranscriber("立即停止"),
+    )
+
+    async def scenario():
+        session_id = (await runtime.create_session()).session_id
+        parsing = asyncio.create_task(
+            runtime.submit_text(
+                session_id,
+                TextCommandRequest(prompt="机械臂向上移动8毫米"),
+            )
+        )
+        assert await asyncio.to_thread(parser.started.wait, 1)
+        stopped = await runtime.submit_speech(
+            session_id,
+            b"spoken-stop",
+            content_type="audio/webm",
+            duration_ms=900,
+        )
+        assert stopped.status.value == "stopped"
+        parser.release.set()
+        stale_result = await parsing
+        final = runtime.get_session(session_id)
+        assert stale_result.status.value == "stopped"
+        assert final.status.value == "stopped"
+        assert final.asr_transcription is not None
+        assert final.asr_transcription.safety_action == "stop"
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        parser.release.set()
+        runtime.close()
+    assert robot.stop_calls == 1

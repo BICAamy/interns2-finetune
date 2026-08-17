@@ -9,6 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from surgical_contracts import Point3D
 
+from .asr import ASRStatus, TranscriptionResult
+
 
 class WebModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -59,6 +61,11 @@ class TextCommandRequest(WebModel):
     image_name: str | None = Field(default=None, max_length=255)
 
 
+class InputSource(str, Enum):
+    TEXT = "text"
+    VOICE = "voice"
+
+
 class SessionSnapshot(WebModel):
     schema_version: Literal["1.0"] = "1.0"
     session_id: str
@@ -68,7 +75,9 @@ class SessionSnapshot(WebModel):
     created_at_ms: int = Field(ge=0)
     updated_at_ms: int = Field(ge=0)
     prompt: str | None = None
+    input_source: InputSource = InputSource.TEXT
     image_name: str | None = None
+    asr_transcription: TranscriptionResult | None = None
     pending_confirmation: bool = False
     active_command_id: str | None = None
     raw_model_output: dict[str, Any] | None = None
@@ -87,6 +96,7 @@ class HealthResponse(WebModel):
     puncture_execution_enabled: Literal[False] = False
     sessions: int = Field(ge=0)
     downstream: dict[str, str]
+    asr: ASRStatus
 
 
 class SimulationTelemetryView(WebModel):

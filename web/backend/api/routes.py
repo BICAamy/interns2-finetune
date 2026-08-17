@@ -18,6 +18,7 @@ from ..models import (
     SimulationTelemetryView,
     TextCommandRequest,
 )
+from ..asr import ASRError, ASRStatus
 from ..runtime import WebRuntime
 from ..simulation_proxy import SimulationProxyError
 
@@ -63,6 +64,40 @@ async def submit_text(
     request: Request,
 ) -> SessionSnapshot:
     return await _runtime(request).submit_text(session_id, command)
+
+
+@router.get("/api/asr/status", response_model=ASRStatus)
+def asr_status(request: Request) -> ASRStatus:
+    return _runtime(request).asr_status()
+
+
+@router.post(
+    "/api/sessions/{session_id}/commands/speech",
+    response_model=SessionSnapshot,
+)
+async def submit_speech(
+    session_id: str,
+    request: Request,
+):
+    runtime = _runtime(request)
+    runtime.get_session(session_id)
+    try:
+        duration_ms = _audio_duration_ms(request)
+        audio = await _read_bounded_audio(
+            request,
+            runtime.asr.settings.max_audio_bytes,
+        )
+        return await runtime.submit_speech(
+            session_id,
+            audio,
+            content_type=request.headers.get("content-type", ""),
+            duration_ms=duration_ms,
+        )
+    except ASRError as error:
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error.as_dict(),
+        )
 
 
 @router.post(
@@ -199,3 +234,50 @@ async def simulation_video(session_id: str, request: Request):
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+def _audio_duration_ms(request: Request) -> int:
+    value = request.headers.get("x-audio-duration-ms", "").strip()
+    try:
+        duration_ms = int(value)
+    except ValueError as error:
+        raise ASRError(
+            "ASR_DURATION_REQUIRED",
+            "语音请求缺少有效的 X-Audio-Duration-Ms。",
+            status_code=400,
+        ) from error
+    if duration_ms <= 0:
+        raise ASRError(
+            "ASR_DURATION_REQUIRED",
+            "语音时长必须大于零。",
+            status_code=400,
+        )
+    return duration_ms
+
+
+async def _read_bounded_audio(request: Request, maximum: int) -> bytes:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > maximum:
+                raise ASRError(
+                    "ASR_AUDIO_TOO_LARGE",
+                    "录音文件超过大小限制。",
+                    status_code=413,
+                    details={"max_audio_bytes": maximum},
+                )
+        except ValueError:
+            pass
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > maximum:
+            raise ASRError(
+                "ASR_AUDIO_TOO_LARGE",
+                "录音文件超过大小限制。",
+                status_code=413,
+                details={"max_audio_bytes": maximum},
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)

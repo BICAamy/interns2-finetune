@@ -10,7 +10,8 @@ from uuid import uuid4
 
 from surgical_contracts import ParsedCommand, ToolEvent, ToolName
 
-from ..models import STATUS_LABELS, SessionSnapshot, SessionStatus
+from ..asr import TranscriptionResult
+from ..models import InputSource, STATUS_LABELS, SessionSnapshot, SessionStatus
 
 
 def _now_ms() -> int:
@@ -33,7 +34,9 @@ class SessionRecord:
     revision: int = 1
     status: SessionStatus = SessionStatus.READY
     prompt: str | None = None
+    input_source: InputSource = InputSource.TEXT
     image_name: str | None = None
+    asr_transcription: TranscriptionResult | None = None
     pending_command: ParsedCommand | None = None
     active_command_id: str | None = None
     raw_model_output: dict[str, Any] | None = None
@@ -46,6 +49,7 @@ class SessionRecord:
     error: dict[str, Any] | None = None
     parse_started_ms: int | None = None
     parse_finished_ms: int | None = None
+    parse_token: str | None = None
 
     def snapshot(self) -> SessionSnapshot:
         timeline = self.execution_events or self.live_tool_events
@@ -57,7 +61,9 @@ class SessionRecord:
             created_at_ms=self.created_at_ms,
             updated_at_ms=self.updated_at_ms,
             prompt=self.prompt,
+            input_source=self.input_source,
             image_name=self.image_name,
+            asr_transcription=self.asr_transcription,
             pending_confirmation=self.pending_command is not None,
             active_command_id=self.active_command_id,
             raw_model_output=self.raw_model_output,

@@ -14,6 +14,7 @@ from surgical_contracts import (
     Axis,
     CommandIntent,
     CoordinateFrame,
+    CoordinateSource,
     Direction,
     DistanceSource,
     ErrorCode,
@@ -126,6 +127,27 @@ class InternS2AgentTests(unittest.TestCase):
         self.assertIn("relative_axis", properties)
         self.assertIn("relative_direction", properties)
         self.assertNotIn("relative_motion", properties)
+
+    def test_asr_coordinate_provenance_cannot_be_overridden_by_model(self):
+        arguments = base_arguments(
+            "move_to_entry",
+            entry_point={
+                "x": 20,
+                "y": 35,
+                "z": 80,
+                "unit": "mm",
+                "frame": "robot_base",
+                "source": "user_text",
+            },
+        )
+        agent, _client = make_agent(arguments)
+
+        command = agent.parse_command(
+            "移动到入点X二十Y三十五Z八十毫米",
+            input_source=CoordinateSource.ASR_TEXT,
+        ).command
+
+        self.assertEqual(command.entry_point.source, CoordinateSource.ASR_TEXT)
 
     def test_lmdeploy_stringified_nested_parameters_are_decoded(self):
         arguments = base_arguments(

@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from surgical_contracts import (
     CommandIntent,
+    CoordinateSource,
     ParsedCommand,
     Point3D,
     SimulationCameraControlRequest,
@@ -34,8 +35,16 @@ from agent.runtime import InternS2Agent, ParsedCommandResponse
 from agent.tools.puncture_planner import PlannerAdapterHTTPClient
 from agent.tools.robot import RobotSimulationHTTPController
 
+from .asr import (
+    ASRService,
+    ASRSettings,
+    ASRStatus,
+    SpeechTranscriber,
+    TranscriptionResult,
+)
 from .models import (
     HealthResponse,
+    InputSource,
     SessionSnapshot,
     SessionStatus,
     SimulationTelemetryView,
@@ -54,6 +63,8 @@ class CommandParser(Protocol):
         self,
         prompt: str,
         image_path: str | Path | None = None,
+        *,
+        input_source: CoordinateSource = CoordinateSource.USER_TEXT,
     ) -> ParsedCommandResponse: ...
 
 
@@ -96,6 +107,8 @@ class WebRuntime:
         planner: Any | None = None,
         store: SessionStore | None = None,
         simulation_observer: SimulationObserver | None = None,
+        asr_settings: ASRSettings | None = None,
+        speech_transcriber: SpeechTranscriber | None = None,
     ) -> None:
         settings.validate()
         if settings.runtime_mode.value != "simulation":
@@ -144,6 +157,10 @@ class WebRuntime:
         self._fps_samples: dict[str, tuple[int, float, float]] = {}
         self._telemetry_lock = RLock()
         self.telemetry_interval_s = 0.1
+        self.asr = ASRService(
+            asr_settings or ASRSettings.from_env(),
+            transcriber=speech_transcriber,
+        )
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> "WebRuntime":
@@ -276,21 +293,75 @@ class WebRuntime:
                 "robot_simulation": self.settings.robot_simulation_base_url,
                 "planner_adapter": self.settings.planner_adapter_base_url,
             },
+            asr=self.asr.status(),
+        )
+
+    def asr_status(self) -> ASRStatus:
+        return self.asr.status()
+
+    async def submit_speech(
+        self,
+        session_id: str,
+        audio: bytes,
+        *,
+        content_type: str,
+        duration_ms: int,
+    ) -> SessionSnapshot:
+        # Reject unknown sessions before spending time on ASR inference.
+        self.store.snapshot(session_id)
+        request_started = time.monotonic()
+        transcription = await asyncio.to_thread(
+            self.asr.transcribe,
+            audio,
+            content_type=content_type,
+            reported_duration_ms=duration_ms,
+        )
+        safety_action = _speech_safety_action(transcription.text)
+        if safety_action is not None:
+            transcription = transcription.model_copy(
+                update={"safety_action": safety_action}
+            )
+            await self.stop(
+                session_id,
+                emergency=safety_action == "estop",
+            )
+            return self.store.mutate(
+                session_id,
+                lambda record: _record_speech_metadata(
+                    record,
+                    transcription,
+                    request_started,
+                ),
+            )
+
+        return await self.submit_text(
+            session_id,
+            TextCommandRequest(prompt=transcription.text),
+            input_source=InputSource.VOICE,
+            asr_transcription=transcription,
+            request_started=request_started,
         )
 
     async def submit_text(
         self,
         session_id: str,
         request: TextCommandRequest,
+        *,
+        input_source: InputSource = InputSource.TEXT,
+        asr_transcription: TranscriptionResult | None = None,
+        request_started: float | None = None,
     ) -> SessionSnapshot:
         parse_started_ms = time.time_ns() // 1_000_000
+        parse_token = uuid4().hex
 
         def begin(record) -> None:
             if record.status in _BUSY_STATUSES:
                 raise SessionConflict("session already has a pending or active command")
             record.status = SessionStatus.PARSING
             record.prompt = request.prompt.strip()
+            record.input_source = input_source
             record.image_name = request.image_name
+            record.asr_transcription = asr_transcription
             record.pending_command = None
             record.active_command_id = None
             record.raw_model_output = None
@@ -302,6 +373,7 @@ class WebRuntime:
             record.error = None
             record.parse_started_ms = parse_started_ms
             record.parse_finished_ms = None
+            record.parse_token = parse_token
 
         self.store.mutate(session_id, begin)
         image_path: Path | None = None
@@ -312,9 +384,18 @@ class WebRuntime:
                 self.parser.parse_command,
                 request.prompt,
                 image_path,
+                input_source=(
+                    CoordinateSource.ASR_TEXT
+                    if input_source == InputSource.VOICE
+                    else CoordinateSource.USER_TEXT
+                ),
             )
         except CommandParsingError as error:
-            return self._record_parse_error(session_id, error.as_dict())
+            return self._record_parse_error(
+                session_id,
+                error.as_dict(),
+                parse_token=parse_token,
+            )
         except (ValueError, OSError) as error:
             return self._record_parse_error(
                 session_id,
@@ -323,6 +404,7 @@ class WebRuntime:
                     "message": str(error),
                     "details": {},
                 },
+                parse_token=parse_token,
             )
         except Exception as error:  # pragma: no cover - defensive service boundary
             return self._record_parse_error(
@@ -332,6 +414,7 @@ class WebRuntime:
                     "message": f"解析失败：{type(error).__name__}",
                     "details": {},
                 },
+                parse_token=parse_token,
             )
         finally:
             if image_path is not None:
@@ -340,10 +423,13 @@ class WebRuntime:
         parse_finished_ms = time.time_ns() // 1_000_000
 
         def finish(record) -> None:
+            if record.parse_token != parse_token:
+                return
             payload = parsed.as_dict()
             record.raw_model_output = payload.get("raw_model_output")
             record.normalized_command = parsed.command.model_dump(mode="json")
             record.parse_finished_ms = parse_finished_ms
+            record.parse_token = None
             record.execution_events = [
                 event.as_dict()
                 for event in build_runtime_events(
@@ -352,6 +438,14 @@ class WebRuntime:
                     orchestration=None,
                 )
             ]
+            if asr_transcription is not None and request_started is not None:
+                record.asr_transcription = asr_transcription.model_copy(
+                    update={
+                        "end_to_end_latency_ms": round(
+                            (time.monotonic() - request_started) * 1000
+                        )
+                    }
+                )
             if parsed.command.intent == CommandIntent.CLARIFY:
                 record.status = SessionStatus.CLARIFICATION_REQUIRED
                 record.pending_command = None
@@ -362,6 +456,10 @@ class WebRuntime:
                 record.status = SessionStatus.AWAITING_CONFIRMATION
                 record.pending_command = parsed.command
                 record.message = "请核对结构化任务，确认后才会调用机械臂"
+                if asr_transcription is not None and asr_transcription.low_confidence:
+                    record.message = (
+                        "语音置信度较低，请逐字核对转写与坐标；确认后才会调用机械臂"
+                    )
 
         return self.store.mutate(session_id, finish)
 
@@ -420,6 +518,7 @@ class WebRuntime:
         )
 
         def begin(record) -> None:
+            record.parse_token = None
             record.pending_command = None
             record.active_command_id = command.command_id
             record.status = SessionStatus.ESTOP if emergency else SessionStatus.STOPPING
@@ -498,6 +597,8 @@ class WebRuntime:
             ]
 
             def finish(record) -> None:
+                if record.active_command_id != command.command_id:
+                    return
                 record.active_command_id = None
                 record.execution_events = events
                 record.live_tool_events = []
@@ -515,10 +616,11 @@ class WebRuntime:
 
             self.store.mutate(session_id, finish)
         except Exception as error:  # pragma: no cover - defensive task boundary
-            self.store.mutate(
-                session_id,
-                lambda record: self._mark_background_failure(record, error),
-            )
+            def fail_if_active(record) -> None:
+                if record.active_command_id == command.command_id:
+                    self._mark_background_failure(record, error)
+
+            self.store.mutate(session_id, fail_if_active)
         finally:
             self.store.unbind_command(command.command_id)
 
@@ -554,14 +656,19 @@ class WebRuntime:
         self,
         session_id: str,
         error: dict[str, Any],
+        *,
+        parse_token: str,
     ) -> SessionSnapshot:
         def operation(record) -> None:
+            if record.parse_token != parse_token:
+                return
             record.status = SessionStatus.FAILED
             record.pending_command = None
             record.active_command_id = None
             record.message = str(error.get("message") or "解析失败")
             record.error = error
             record.parse_finished_ms = time.time_ns() // 1_000_000
+            record.parse_token = None
 
         return self.store.mutate(session_id, operation)
 
@@ -626,6 +733,55 @@ class WebRuntime:
 
 def _now_ms() -> int:
     return time.time_ns() // 1_000_000
+
+
+_STOP_SPEECH_PHRASES = {
+    "停止",
+    "停止机械臂",
+    "机械臂停止",
+    "停下来",
+    "立即停止",
+}
+
+_ESTOP_SPEECH_PHRASES = {
+    "急停",
+    "紧急停止",
+    "立即急停",
+    "机械臂急停",
+}
+
+
+def _speech_safety_action(text: str) -> str | None:
+    normalized = "".join(
+        character
+        for character in text.strip().lower()
+        if character not in " ，。！？、,.!?;；:：\t\r\n"
+    )
+    if normalized in _ESTOP_SPEECH_PHRASES:
+        return "estop"
+    if normalized in _STOP_SPEECH_PHRASES:
+        return "stop"
+    return None
+
+
+def _record_speech_metadata(
+    record: Any,
+    transcription: TranscriptionResult,
+    request_started: float,
+) -> None:
+    record.prompt = transcription.text
+    record.input_source = InputSource.VOICE
+    record.image_name = None
+    if transcription.safety_action is not None:
+        record.raw_model_output = None
+        record.normalized_command = None
+    record.asr_transcription = transcription.model_copy(
+        update={
+            "end_to_end_latency_ms": round(
+                (time.monotonic() - request_started) * 1000
+            )
+        }
+    )
 
 
 def _point_from_payload(value: Any) -> Point3D | None:

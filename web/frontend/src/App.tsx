@@ -5,6 +5,7 @@ import type {
 } from "react";
 import { api, fileToDataUrl, openSessionSocket } from "./api";
 import type {
+  ASRStatus,
   CameraControlPayload,
   CameraPreset,
   Point3D,
@@ -34,6 +35,18 @@ const cameraPresets: Array<{ id: CameraPreset; label: string }> = [
   { id: "top", label: "俯视" },
   { id: "isometric", label: "等轴测" },
 ];
+
+const audioMimeCandidates = [
+  "audio/webm;codecs=opus",
+  "audio/webm",
+  "audio/ogg;codecs=opus",
+  "audio/mp4",
+];
+
+function supportedAudioMimeType(): string | undefined {
+  if (typeof MediaRecorder === "undefined") return undefined;
+  return audioMimeCandidates.find((value) => MediaRecorder.isTypeSupported(value));
+}
 
 function JsonPanel({ value, empty }: { value: unknown; empty: string }) {
   return (
@@ -150,6 +163,11 @@ export default function App() {
   const [camera, setCamera] = useState<SimulationCameraState | null>(null);
   const [cameraDragging, setCameraDragging] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [asrStatus, setAsrStatus] = useState<ASRStatus | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [speechBusy, setSpeechBusy] = useState(false);
+  const [recordingElapsedMs, setRecordingElapsedMs] = useState(0);
+  const [speechError, setSpeechError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
   const cameraDrag = useRef<{
     pointerId: number;
@@ -159,6 +177,11 @@ export default function App() {
   } | null>(null);
   const cameraRequestInFlight = useRef(false);
   const lastCameraSendAt = useRef(0);
+  const mediaRecorder = useRef<MediaRecorder | null>(null);
+  const microphoneStream = useRef<MediaStream | null>(null);
+  const audioChunks = useRef<Blob[]>([]);
+  const recordingStartedAt = useRef(0);
+  const recordingTimer = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -215,6 +238,35 @@ export default function App() {
   }, [session?.session_id]);
 
   useEffect(() => {
+    let cancelled = false;
+    api.asrStatus()
+      .then((status) => {
+        if (!cancelled) setAsrStatus(status);
+      })
+      .catch((error) => {
+        if (!cancelled) setSpeechError(String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (recordingTimer.current !== null) {
+        window.clearInterval(recordingTimer.current);
+      }
+      if (mediaRecorder.current?.state === "recording") {
+        mediaRecorder.current.ondataavailable = null;
+        mediaRecorder.current.onstop = null;
+        mediaRecorder.current.onerror = null;
+        mediaRecorder.current.stop();
+      }
+      microphoneStream.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
+
+  useEffect(() => {
     if (!session?.session_id) return;
     let cancelled = false;
     api.camera(session.session_id)
@@ -243,7 +295,19 @@ export default function App() {
 
   const command = session?.normalized_command;
   const isBusy = session ? busyStatuses.has(session.status) : true;
-  const canSubmit = Boolean(session && prompt.trim() && !isBusy && !session.pending_confirmation);
+  const canSubmit = Boolean(
+    session &&
+      prompt.trim() &&
+      !isBusy &&
+      !session.pending_confirmation &&
+      !recording &&
+      !speechBusy,
+  );
+  const canRecord = Boolean(
+    session &&
+      asrStatus?.available &&
+      !speechBusy,
+  );
   const entry = (command?.entry_point ?? telemetry?.entry_point) as Point3D | undefined;
   const target = (command?.target_point ?? telemetry?.target_point) as Point3D | undefined;
   const currentTcp = telemetry?.current_tcp ?? session?.current_tcp;
@@ -356,6 +420,116 @@ export default function App() {
     }
   }
 
+  function releaseMicrophone() {
+    if (recordingTimer.current !== null) {
+      window.clearInterval(recordingTimer.current);
+      recordingTimer.current = null;
+    }
+    microphoneStream.current?.getTracks().forEach((track) => track.stop());
+    microphoneStream.current = null;
+    mediaRecorder.current = null;
+    setRecording(false);
+  }
+
+  async function uploadSpeech(blob: Blob, durationMs: number) {
+    if (!session) return;
+    setSpeechBusy(true);
+    setSpeechError(null);
+    setRequestError(null);
+    try {
+      const snapshot = await api.submitSpeech(
+        session.session_id,
+        blob,
+        durationMs,
+      );
+      setSession(snapshot);
+      if (snapshot.prompt) setPrompt(snapshot.prompt);
+    } catch (error) {
+      setSpeechError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSpeechBusy(false);
+    }
+  }
+
+  async function startRecording() {
+    if (!canRecord || recording) return;
+    setSpeechError(null);
+    if (!window.isSecureContext) {
+      setSpeechError("麦克风要求安全页面，请通过 SSH 转发后使用 localhost 打开控制台。");
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setSpeechError("当前浏览器不支持麦克风录音，请使用最新版 Chrome、Edge 或 Safari。");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+        video: false,
+      });
+      const mimeType = supportedAudioMimeType();
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+      microphoneStream.current = stream;
+      mediaRecorder.current = recorder;
+      audioChunks.current = [];
+      recordingStartedAt.current = performance.now();
+      setRecordingElapsedMs(0);
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) audioChunks.current.push(event.data);
+      };
+      recorder.onerror = () => {
+        setSpeechError("麦克风录音失败，请检查浏览器权限后重试。");
+        recorder.onstop = null;
+        releaseMicrophone();
+      };
+      recorder.onstop = () => {
+        const durationMs = Math.max(
+          1,
+          Math.round(performance.now() - recordingStartedAt.current),
+        );
+        const blob = new Blob(audioChunks.current, {
+          type: recorder.mimeType || mimeType || "audio/webm",
+        });
+        audioChunks.current = [];
+        releaseMicrophone();
+        if (blob.size === 0) {
+          setSpeechError("没有采集到音频，请检查麦克风后重试。");
+          return;
+        }
+        void uploadSpeech(blob, durationMs);
+      };
+      recorder.start(250);
+      setRecording(true);
+      recordingTimer.current = window.setInterval(() => {
+        const elapsed = performance.now() - recordingStartedAt.current;
+        setRecordingElapsedMs(Math.round(elapsed));
+        const limitMs = (asrStatus?.max_duration_s ?? 30) * 1000;
+        if (elapsed >= limitMs - 200 && recorder.state === "recording") recorder.stop();
+      }, 100);
+    } catch (error) {
+      releaseMicrophone();
+      const name = error instanceof DOMException ? error.name : "";
+      setSpeechError(
+        name === "NotAllowedError"
+          ? "麦克风权限被拒绝。请允许当前 localhost 页面使用麦克风。"
+          : "无法打开麦克风，请确认设备未被其他程序占用。",
+      );
+    }
+  }
+
+  function stopRecording() {
+    if (mediaRecorder.current?.state === "recording") {
+      mediaRecorder.current.stop();
+    }
+  }
+
   function selectImage(file: File | null) {
     if (file && file.size > 10 * 1024 * 1024) {
       setRequestError("图像不能超过 10 MiB");
@@ -428,14 +602,64 @@ export default function App() {
                 <span className="eyebrow">01 · 指令输入</span>
                 <h2>医生任务</h2>
               </div>
-              <span className="step-badge">文本 + 可选图像</span>
+              <span className="step-badge">文本 + 语音 + 可选图像</span>
             </div>
             <textarea
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
-              disabled={isBusy}
+              disabled={isBusy || recording || speechBusy}
               aria-label="手术导航文本指令"
             />
+            <div className={`speech-console ${recording ? "recording" : ""}`}>
+              <div className="speech-control-row">
+                <button
+                  className={`button voice ${recording ? "recording" : ""}`}
+                  disabled={recording ? false : !canRecord}
+                  onClick={recording ? stopRecording : startRecording}
+                >
+                  <span className="microphone-dot" />
+                  {recording
+                    ? `结束录音 ${(recordingElapsedMs / 1000).toFixed(1)}s`
+                    : speechBusy
+                      ? "正在转写并解析…"
+                      : "开始语音指令"}
+                </button>
+                <span className="speech-engine">
+                  {asrStatus?.available
+                    ? `${asrStatus.model} · 本地离线`
+                    : asrStatus?.unavailable_reason ?? "正在检查本地 ASR"}
+                </span>
+              </div>
+              {session?.asr_transcription && (
+                <div
+                  className={`transcription-result ${session.asr_transcription.low_confidence ? "warning" : ""}`}
+                >
+                  <div>
+                    <span>最终转写</span>
+                    <strong>{session.asr_transcription.text}</strong>
+                  </div>
+                  <div className="transcription-metrics">
+                    <span>
+                      置信度 {(session.asr_transcription.confidence * 100).toFixed(1)}%
+                    </span>
+                    <span>语言 {session.asr_transcription.language}</span>
+                    <span>ASR {session.asr_transcription.asr_latency_ms} ms</span>
+                    {session.asr_transcription.end_to_end_latency_ms !== null && (
+                      <span>端到端 {session.asr_transcription.end_to_end_latency_ms} ms</span>
+                    )}
+                    {session.asr_transcription.safety_action && (
+                      <span className="fast-action">
+                        已走{session.asr_transcription.safety_action === "estop" ? "急停" : "停止"}快速通道
+                      </span>
+                    )}
+                  </div>
+                  {session.asr_transcription.low_confidence && (
+                    <p>低置信度：请逐字核对数字、正负号、单位与 XYZ 顺序后再确认。</p>
+                  )}
+                </div>
+              )}
+              {speechError && <div className="speech-error">{speechError}</div>}
+            </div>
             <div className="example-row">
               <button className="text-button" onClick={() => setPrompt(DEFAULT_PROMPT)}>
                 填入点/靶点示例

@@ -25,7 +25,9 @@ export interface SessionSnapshot {
   created_at_ms: number;
   updated_at_ms: number;
   prompt: string | null;
+  input_source: "text" | "voice";
   image_name: string | null;
+  asr_transcription: ASRTranscription | null;
   pending_confirmation: boolean;
   active_command_id: string | null;
   raw_model_output: Record<string, unknown> | null;
@@ -35,6 +37,36 @@ export interface SessionSnapshot {
   orchestration: Record<string, any> | null;
   message: string;
   error: Record<string, any> | null;
+}
+
+export interface ASRStatus {
+  backend: string;
+  model: string;
+  available: boolean;
+  loaded: boolean;
+  language: string;
+  device: string;
+  compute_type: string;
+  max_audio_bytes: number;
+  max_duration_s: number;
+  low_confidence_threshold: number;
+  supported_mime_types: string[];
+  unavailable_reason: string | null;
+}
+
+export interface ASRTranscription {
+  text: string;
+  language: string;
+  language_probability: number;
+  confidence: number;
+  low_confidence: boolean;
+  duration_ms: number;
+  audio_bytes: number;
+  asr_latency_ms: number;
+  end_to_end_latency_ms: number | null;
+  backend: string;
+  model: string;
+  safety_action: "stop" | "estop" | null;
 }
 
 export interface TextCommandPayload {

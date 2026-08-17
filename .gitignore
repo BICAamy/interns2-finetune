@@ -11,6 +11,7 @@
 /models/**/*.gguf
 /models/**/*.onnx
 /models/**/.cache/
+/models/asr/
 
 
 # ============================================================
@@ -91,3 +92,8 @@ Thumbs.db
 # Web frontend
 # ============================================================
 /web/frontend/node_modules/
+
+# Step 13 ASR binary assets are generated locally and copied to the offline
+# server outside Git. Only their preparation scripts and README are versioned.
+/third_party/asr-wheelhouse/*.whl
+/third_party/asr-wheelhouse/SHA256SUMS

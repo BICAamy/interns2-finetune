@@ -1,4 +1,5 @@
 import type {
+  ASRStatus,
   CameraControlPayload,
   SessionSnapshot,
   SimulationCameraState,
@@ -31,6 +32,29 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  asrStatus: () => request<ASRStatus>("/api/asr/status"),
+  submitSpeech: async (
+    sessionId: string,
+    audio: Blob,
+    durationMs: number,
+  ): Promise<SessionSnapshot> => {
+    const response = await fetch(
+      `/api/sessions/${sessionId}/commands/speech`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": audio.type || "audio/webm",
+          "X-Audio-Duration-Ms": String(Math.max(1, Math.round(durationMs))),
+        },
+        body: audio,
+      },
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.message || `语音请求失败（HTTP ${response.status}）`);
+    }
+    return payload as SessionSnapshot;
+  },
   action: (sessionId: string, action: string) =>
     request<SessionSnapshot>(`/api/sessions/${sessionId}/${action}`, {
       method: "POST",

@@ -13,13 +13,22 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /workspace
 
+COPY third_party/asr-wheelhouse /opt/asr-wheelhouse
+COPY web/backend/asr-requirements.txt /tmp/asr-requirements.txt
+RUN cd /opt/asr-wheelhouse \
+    && sha256sum --check --strict SHA256SUMS \
+    && python3 -m pip install \
+        --no-index \
+        --find-links=/opt/asr-wheelhouse \
+        --requirement /tmp/asr-requirements.txt
+
 COPY packages/surgical_contracts /workspace/packages/surgical_contracts
 COPY agent /workspace/agent
 COPY web /workspace/web
 COPY tests /workspace/tests
 
 RUN python3 -m compileall -q /workspace/agent /workspace/web/backend \
-    && python3 -c "import fastapi, httpx, pydantic, uvicorn" \
+    && python3 -c "import av, ctranslate2, faster_whisper, fastapi, httpx, pydantic, uvicorn" \
     && test -s /workspace/web/frontend/dist/index.html
 
 EXPOSE 8000
