@@ -21,8 +21,10 @@ submit_surgical_task
 - JSON 解码后再用 Pydantic `ParsedCommand` 二次校验；
 - 兼容 LMDeploy 0.14 XML tool parser 将对象、数组、布尔值或 `null` 二次编码为
   JSON 字符串的响应，但不接受 Python 字面量或任意文本；
-- 对 InternS2 偶发提升到顶层的相对移动字段做受限重组；仅接受
-  `move_relative` 的已知字段，类型错误、未知字段和内外冲突仍会被拒绝；
+- 模型侧使用 LMDeploy XML parser 稳定支持的扁平 `relative_*` 参数，运行时再组装
+  为统一 `ParsedCommand.relative_motion`；同时受限兼容已观察到的旧嵌套/提升格式；
+- 明确要求穿刺但缺靶点时，即使模型误判为 `move_to_entry`，运行时也会强制降级为
+  `clarify`；类型错误、未知字段和内外冲突仍会被拒绝；
 - 对外距离统一为 `mm`；仿真模式缺失坐标系时使用 `robot_base`；
 - “往上抬一点”规范化为 `robot_base +Z 5 mm`，5 mm 来自配置；
 - 完整穿刺缺入点或靶点、三维坐标不完整、坐标顺序含糊时降级为 `clarify`；

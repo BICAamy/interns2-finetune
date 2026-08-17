@@ -32,10 +32,10 @@ def build_system_prompt(settings: AgentSettings) -> str:
 3. puncture 表示“准备完整穿刺任务”，必须同时有明确的入点和靶点。
 4. move_to_entry 只将针尖移动到入点，只要求入点，不要求靶点。
 5. move_relative 表示相对移动。第一版“上/抬高”映射为 robot_base +Z，
-   “下/降低”映射为 robot_base -Z；其他含糊方向返回 clarify。axis、direction、
-   distance_mm、frame 和 distance_source 必须全部放在 relative_motion 对象内部，
-   绝不能作为函数参数的顶层字段。
-6. “一点/一些/稍微”没有明确距离时，省略 distance_mm；运行时会采用配置值
+   “下/降低”映射为 robot_base -Z；其他含糊方向返回 clarify。相对移动必须使用
+   relative_axis、relative_direction、relative_distance_mm、relative_frame 和
+   relative_distance_source 这些扁平函数参数；不要生成 relative_motion 参数。
+6. “一点/一些/稍微”没有明确距离时，省略 relative_distance_mm；运行时会采用配置值
    {settings.default_relative_step_mm:g} mm，不要自己猜另一个数值。
 7. stop 表示停止或“不要移动”；emergency_stop 只用于明确的急停、紧急停止。
 8. 不能生成关节角、速度轨迹、力矩、逆运动学结果或穿刺轨迹。
@@ -48,6 +48,8 @@ def build_system_prompt(settings: AgentSettings) -> str:
 12. 所有显式距离换算成毫米。坐标来源按实际情况填写 user_text、asr_text、
     image_annotation、structured_data 或 gesture。
 13. 不得调用任何其他函数，不得返回底层工具名或服务地址。
+14. 用户明确要求穿刺、进针或针刺时，不得改写成 move_to_entry；如果缺少靶点，
+    必须选择 clarify，并在 missing_fields 中加入 target_point。
 
 当前运行模式：{settings.runtime_mode.value}
 默认距离单位：{settings.default_distance_unit.value}
@@ -128,44 +130,36 @@ def build_submit_surgical_task_tool() -> dict[str, Any]:
                     },
                     "entry_point": _point_schema("Three-dimensional puncture entry point"),
                     "target_point": _point_schema("Three-dimensional puncture target point"),
-                    "relative_motion": {
+                    "relative_axis": {
+                        "type": "string",
+                        "enum": ["x", "y", "z"],
+                        "description": "Axis for move_relative; omit for other intents",
+                    },
+                    "relative_direction": {
+                        "type": "string",
+                        "enum": ["positive", "negative"],
+                        "description": "Direction for move_relative; omit for other intents",
+                    },
+                    "relative_distance_mm": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
                         "description": (
-                            "Relative motion object. Keep axis, direction, distance_mm, "
-                            "frame and distance_source inside this object; never emit "
-                            "them as top-level function arguments."
+                            "Positive distance for move_relative in mm; omit for vague "
+                            "words such as 一点 or 稍微, and omit for other intents"
                         ),
-                        "anyOf": [
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "axis": {"type": "string", "enum": ["x", "y", "z"]},
-                                    "direction": {
-                                        "type": "string",
-                                        "enum": ["positive", "negative"],
-                                    },
-                                    "distance_mm": {
-                                        "type": "number",
-                                        "exclusiveMinimum": 0,
-                                        "description": (
-                                            "Positive distance in mm; omit for vague words "
-                                            "such as 一点 or 稍微"
-                                        ),
-                                    },
-                                    "frame": {
-                                        "type": "string",
-                                        "enum": ["robot_base"],
-                                        "description": "Omit when not explicit",
-                                    },
-                                    "distance_source": {
-                                        "type": "string",
-                                        "enum": ["user_provided", "configured_default"],
-                                    },
-                                },
-                                "required": ["axis", "direction"],
-                                "additionalProperties": False,
-                            },
-                            {"type": "null"},
-                        ]
+                    },
+                    "relative_frame": {
+                        "type": "string",
+                        "enum": ["robot_base"],
+                        "description": (
+                            "Reference frame for move_relative; omit when not explicit "
+                            "or for other intents"
+                        ),
+                    },
+                    "relative_distance_source": {
+                        "type": "string",
+                        "enum": ["user_provided", "configured_default"],
+                        "description": "Distance source for move_relative; omit otherwise",
                     },
                     "missing_fields": {
                         "type": "array",
@@ -193,6 +187,7 @@ def build_submit_surgical_task_tool() -> dict[str, Any]:
                                 "relative_motion.direction",
                                 "relative_motion.frame",
                                 "entry_point_3d",
+                                "target_point_3d",
                             ],
                         },
                         "description": "Fields needing clarification; empty for executable intents",
@@ -208,7 +203,6 @@ def build_submit_surgical_task_tool() -> dict[str, Any]:
                     "intent",
                     "entry_point",
                     "target_point",
-                    "relative_motion",
                     "missing_fields",
                     "needs_confirmation",
                     "confidence",

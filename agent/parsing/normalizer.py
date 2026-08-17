@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from math import isfinite
 from typing import Any, Callable
@@ -26,6 +27,13 @@ from surgical_contracts import (
 from .errors import CommandParsingError
 
 
+MODEL_RELATIVE_FIELD_MAP = {
+    "relative_axis": "axis",
+    "relative_direction": "direction",
+    "relative_distance_mm": "distance_mm",
+    "relative_frame": "frame",
+    "relative_distance_source": "distance_source",
+}
 TOP_LEVEL_FIELDS = {
     "intent",
     "entry_point",
@@ -35,7 +43,7 @@ TOP_LEVEL_FIELDS = {
     "needs_confirmation",
     "confidence",
     "summary",
-}
+} | set(MODEL_RELATIVE_FIELD_MAP)
 IGNORED_MODEL_FIELDS = {"command_id", "schema_version"}
 POINT_FIELDS = {"x", "y", "z", "unit", "frame", "source"}
 RELATIVE_FIELDS = {"axis", "direction", "distance_mm", "frame", "distance_source"}
@@ -61,6 +69,7 @@ ALLOWED_MISSING_FIELDS = {
     "relative_motion.direction",
     "relative_motion.frame",
     "entry_point_3d",
+    "target_point_3d",
 }
 MISSING_FIELD_ALIASES = {
     "coordinate_labels": "coordinate_order",
@@ -118,6 +127,7 @@ class CommandNormalizer:
         arguments: dict[str, Any],
         *,
         input_source: CoordinateSource = CoordinateSource.USER_TEXT,
+        input_text: str | None = None,
     ) -> ParsedCommand:
         if not isinstance(arguments, dict):
             raise self._invalid("Tool arguments must be a JSON object")
@@ -165,9 +175,8 @@ class CommandNormalizer:
             else:
                 normalized[name] = point
 
-        relative = self._embedded_json_parameter(
+        relative = self._relative_object_parameter(
             raw.get("relative_motion"),
-            "relative_motion",
         )
         if relative is not None:
             motion, motion_missing = self._normalize_relative(relative)
@@ -175,6 +184,13 @@ class CommandNormalizer:
                 missing.extend(motion_missing)
             else:
                 normalized["relative_motion"] = motion
+
+        if self._must_preserve_incomplete_puncture(intent, normalized, input_text):
+            # Never reinterpret an explicit puncture request that lacks a target
+            # as an executable move-to-entry command.
+            intent = CommandIntent.CLARIFY
+            normalized["summary"] = ""
+            missing.append("target_point")
 
         self._append_intent_requirements(intent, normalized, missing)
         missing = list(dict.fromkeys(missing))
@@ -387,7 +403,19 @@ class CommandNormalizer:
         for a move_relative intent, and conflicts are rejected.
         """
 
-        flattened_fields = set(raw) & RELATIVE_FIELDS
+        external_field_map = {
+            **{field: field for field in RELATIVE_FIELDS},
+            **MODEL_RELATIVE_FIELD_MAP,
+        }
+        flattened_fields = set(raw) & set(external_field_map)
+        for field in tuple(flattened_fields):
+            value = raw[field]
+            if value is None or (
+                isinstance(value, str) and value.strip().lower() == "null"
+            ):
+                raw.pop(field)
+                flattened_fields.remove(field)
+
         if not flattened_fields:
             return
         if intent != CommandIntent.MOVE_RELATIVE:
@@ -396,19 +424,7 @@ class CommandNormalizer:
                 details={"fields": sorted(flattened_fields)},
             )
 
-        relative_value = raw.get("relative_motion")
-        if (
-            isinstance(relative_value, str)
-            and relative_value.strip().lower() in {axis.value for axis in Axis}
-        ):
-            # InternS2 can emit <parameter=relative_motion>z</parameter>
-            # followed by direction/distance/frame as sibling parameters.
-            relative = {"axis": relative_value.strip().lower()}
-        else:
-            relative = cls._embedded_json_parameter(
-                relative_value,
-                "relative_motion",
-            )
+        relative = cls._relative_object_parameter(raw.get("relative_motion"))
         if relative is None:
             relative = {}
         if not isinstance(relative, dict):
@@ -420,20 +436,63 @@ class CommandNormalizer:
                 },
             )
 
-        conflicts = [
-            field
-            for field in flattened_fields
-            if field in relative and relative[field] != raw[field]
-        ]
+        conflicts: list[str] = []
+        for external_field in flattened_fields:
+            internal_field = external_field_map[external_field]
+            if (
+                internal_field in relative
+                and relative[internal_field] != raw[external_field]
+            ):
+                conflicts.append(external_field)
         if conflicts:
             raise cls._invalid(
                 "Flattened relative motion conflicts with relative_motion",
                 details={"fields": sorted(conflicts)},
             )
 
-        for field in flattened_fields:
-            relative[field] = raw.pop(field)
+        for external_field in flattened_fields:
+            internal_field = external_field_map[external_field]
+            relative[internal_field] = raw.pop(external_field)
         raw["relative_motion"] = relative
+
+    @classmethod
+    def _relative_object_parameter(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            marker = value.strip().lower()
+            match = re.fullmatch(
+                r'(?:["\']?axis["\']?\s*[:=]\s*)?'
+                r'["\']?([xyz])["\']?'
+                r'(?:\s*(?:[-_ ]?axis|轴))?',
+                marker,
+            )
+            if match:
+                return {"axis": match.group(1)}
+        return cls._embedded_json_parameter(value, "relative_motion")
+
+    @staticmethod
+    def _must_preserve_incomplete_puncture(
+        intent: CommandIntent,
+        normalized: dict[str, Any],
+        input_text: str | None,
+    ) -> bool:
+        if (
+            intent != CommandIntent.MOVE_TO_ENTRY
+            or normalized["target_point"] is not None
+            or not input_text
+        ):
+            return False
+        text = input_text.strip().lower()
+        puncture_requested = bool(
+            re.search(r"穿刺|进针|针刺|\bpunctur(?:e|ing)\b|\bneedle insertion\b", text)
+        )
+        puncture_negated = bool(
+            re.search(
+                r"(?:不|不要|无需|禁止)(?:进行|执行|做)?(?:穿刺|进针|针刺)"
+                r"|\b(?:do not|don't|without) punctur(?:e|ing)\b",
+                text,
+            )
+        )
+        return puncture_requested and not puncture_negated
 
     @staticmethod
     def _append_intent_requirements(

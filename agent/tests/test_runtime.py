@@ -122,6 +122,10 @@ class InternS2AgentTests(unittest.TestCase):
             "command_id",
             request["tools"][0]["function"]["parameters"]["properties"],
         )
+        properties = request["tools"][0]["function"]["parameters"]["properties"]
+        self.assertIn("relative_axis", properties)
+        self.assertIn("relative_direction", properties)
+        self.assertNotIn("relative_motion", properties)
 
     def test_lmdeploy_stringified_nested_parameters_are_decoded(self):
         arguments = base_arguments(
@@ -202,6 +206,23 @@ class InternS2AgentTests(unittest.TestCase):
             command.relative_motion.distance_source,
             DistanceSource.USER_PROVIDED,
         )
+
+    def test_model_facing_prefixed_relative_fields_are_assembled(self):
+        arguments = base_arguments(
+            "move_relative",
+            relative_motion=None,
+            relative_axis="z",
+            relative_direction="positive",
+            relative_distance_mm=8,
+            relative_frame="robot_base",
+            relative_distance_source="user_provided",
+        )
+        agent, _client = make_agent(arguments)
+
+        command = agent.parse_command("机械臂沿Z轴正方向移动8毫米").command
+
+        self.assertEqual(command.intent, CommandIntent.MOVE_RELATIVE)
+        self.assertEqual(command.relative_motion.translation_mm(), (0.0, 0.0, 8.0))
 
     def test_flattened_relative_fields_are_rejected_for_other_intents(self):
         arguments = base_arguments("stop", direction="positive")
@@ -322,6 +343,39 @@ class InternS2AgentTests(unittest.TestCase):
         self.assertIsNotNone(command.entry_point)
         self.assertIsNone(command.relative_motion)
 
+    def test_explicit_incomplete_puncture_cannot_be_downgraded_to_entry_move(self):
+        arguments = base_arguments(
+            "move_to_entry",
+            entry_point={
+                "x": 500,
+                "y": 0,
+                "z": 500,
+                "unit": "mm",
+                "frame": "robot_base",
+            },
+            summary="移动到入点位置",
+        )
+        agent, _client = make_agent(arguments)
+
+        command = agent.parse_command(
+            "从基座坐标系入点(500,0,500)毫米开始穿刺，但我还没有提供靶点。"
+        ).command
+
+        self.assertEqual(command.intent, CommandIntent.CLARIFY)
+        self.assertEqual(command.missing_fields, ["target_point"])
+        self.assertIn("靶点", command.summary)
+
+    def test_explicitly_negated_puncture_can_remain_entry_only(self):
+        arguments = base_arguments(
+            "move_to_entry",
+            entry_point={"x": 500, "y": 0, "z": 500},
+        )
+        agent, _client = make_agent(arguments)
+
+        command = agent.parse_command("不要穿刺，只移动到入点(500,0,500)。").command
+
+        self.assertEqual(command.intent, CommandIntent.MOVE_TO_ENTRY)
+
     def test_non_default_coordinate_frame_cannot_form_executable_motion(self):
         arguments = base_arguments(
             "move_to_entry",
@@ -368,6 +422,23 @@ class InternS2AgentTests(unittest.TestCase):
 
         self.assertEqual(command.intent, CommandIntent.CLARIFY)
         self.assertEqual(command.missing_fields, ["coordinate_order"])
+
+    def test_target_point_3d_is_an_allowed_clarification_field(self):
+        arguments = base_arguments(
+            "clarify",
+            missing_fields=["entry_point_3d", "target_point_3d"],
+            needs_confirmation=True,
+            summary="请标明三维入点和靶点。",
+        )
+        agent, _client = make_agent(arguments)
+
+        command = agent.parse_command("坐标没有标签").command
+
+        self.assertEqual(command.intent, CommandIntent.CLARIFY)
+        self.assertEqual(
+            command.missing_fields,
+            ["entry_point_3d", "target_point_3d"],
+        )
 
     def test_optional_image_is_encoded_as_a_data_url(self):
         arguments = base_arguments(

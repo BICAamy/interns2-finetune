@@ -196,7 +196,11 @@ class InternS2Agent:
                 details={"function_name": name},
             )
         arguments = self._decode_arguments(getattr(function, "arguments", None))
-        command = self.normalizer.normalize(arguments, input_source=input_source)
+        command = self.normalizer.normalize(
+            arguments,
+            input_source=input_source,
+            input_text=normalized_prompt,
+        )
         return ParsedCommandResponse(
             command=command,
             model=self.model,
