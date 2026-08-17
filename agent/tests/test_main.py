@@ -4,7 +4,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from agent.config import AgentSettings
 from agent.main import main
@@ -73,6 +73,56 @@ class AgentMainTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertNotIn("orchestration", payload)
+        self.assertEqual(payload["execution_mode"], "parse_only")
+        self.assertEqual(payload["execution_events"][0]["event"], "command.parsed")
+
+    @patch("agent.main.PlannerAdapterHTTPClient")
+    @patch("agent.main.RobotSimulationHTTPController")
+    @patch("agent.main.InternS2Agent")
+    @patch("agent.main.AgentSettings.from_env")
+    def test_default_mode_runs_service_clients_and_emits_ordered_timeline(
+        self,
+        from_env,
+        agent_class,
+        robot_class,
+        planner_class,
+    ):
+        from agent.tools.puncture_planner import FakePuncturePlannerClient
+        from agent.tools.robot import FakeRobotController
+
+        from_env.return_value = settings()
+        agent_class.return_value.parse_command.return_value = parsed_response()
+        robot_context = MagicMock()
+        robot_context.__enter__.return_value = FakeRobotController()
+        robot_class.return_value = robot_context
+        planner_context = MagicMock()
+        planner_context.__enter__.return_value = FakePuncturePlannerClient()
+        planner_class.return_value = planner_context
+        output = StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(["--prompt", "test", "--json"])
+
+        payload = json.loads(output.getvalue())
+        event_names = [event["event"] for event in payload["execution_events"]]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["execution_mode"], "services")
+        self.assertEqual(payload["orchestration"]["final_state"], "plan_ready")
+        self.assertLess(
+            event_names.index("robot.entry_verified"),
+            event_names.index("planner.started"),
+        )
+        self.assertEqual(event_names[-1], "task.plan_ready")
+        robot_class.assert_called_once_with(
+            "http://127.0.0.1:8001",
+            http_timeout_s=10.0,
+            command_timeout_s=120.0,
+            poll_interval_s=0.05,
+        )
+        planner_class.assert_called_once_with(
+            "http://127.0.0.1:8002",
+            timeout_s=15.0,
+        )
 
 
 if __name__ == "__main__":

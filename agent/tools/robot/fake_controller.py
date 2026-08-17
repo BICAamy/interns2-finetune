@@ -222,18 +222,21 @@ class FakeRobotController:
             error_code=error_code,
         )
 
-    def stop(self) -> RobotState:
+    def stop(self, command_id: str | None = None) -> RobotState:
+        del command_id
         self.stop_calls += 1
         self._motion_state = MotionState.STOPPED
         return self._state()
 
-    def emergency_stop(self) -> RobotState:
+    def emergency_stop(self, command_id: str | None = None) -> RobotState:
+        del command_id
         self.emergency_stop_calls += 1
         self._estop = True
         self._motion_state = MotionState.ESTOP
         return self._state()
 
-    def reset_estop(self) -> RobotState:
+    def reset_estop(self, command_id: str | None = None) -> RobotState:
+        del command_id
         self.reset_estop_calls += 1
         self._estop = False
         self._motion_state = MotionState.IDLE

@@ -6,6 +6,7 @@ from .orchestrator import (
     OrchestrationResult,
     SurgicalTaskOrchestrator,
 )
+from .runtime_events import RuntimeEvent, build_runtime_events
 from .state_machine import (
     AgentTaskState,
     InvalidStateTransition,
@@ -20,8 +21,10 @@ __all__ = [
     "InvalidStateTransition",
     "OrchestrationPolicy",
     "OrchestrationResult",
+    "RuntimeEvent",
     "StateTransitionEvent",
     "SurgicalTaskOrchestrator",
     "TaskStateMachine",
+    "build_runtime_events",
     "choose_command",
 ]

@@ -232,7 +232,11 @@ class SurgicalTaskOrchestrator:
     ) -> OrchestrationResult:
         emergency = command.intent == CommandIntent.EMERGENCY_STOP
         tool = ToolName.ROBOT_EMERGENCY_STOP if emergency else ToolName.ROBOT_STOP
-        operation = self.robot.emergency_stop if emergency else self.robot.stop
+        operation = (
+            (lambda: self.robot.emergency_stop(command.command_id))
+            if emergency
+            else (lambda: self.robot.stop(command.command_id))
+        )
         try:
             state = self._call_tool(
                 command.command_id,
@@ -247,7 +251,7 @@ class SurgicalTaskOrchestrator:
                 machine,
                 command,
                 tool_events,
-                error_code=ErrorCode.INTERNAL_ERROR,
+                error_code=_robot_exception_code(exc),
                 message=f"{'急停' if emergency else '停止'}工具调用失败：{type(exc).__name__}",
             )
 
@@ -311,7 +315,7 @@ class SurgicalTaskOrchestrator:
                 machine,
                 command,
                 tool_events,
-                error_code=ErrorCode.INTERNAL_ERROR,
+                error_code=_robot_exception_code(exc),
                 message=f"读取机械臂状态失败：{type(exc).__name__}",
             )
 
@@ -519,7 +523,7 @@ class SurgicalTaskOrchestrator:
                 command,
                 tool_events,
                 robot_result=move_result,
-                error_code=ErrorCode.INTERNAL_ERROR,
+                error_code=_robot_exception_code(exc),
                 message=f"到点后读取 TCP 状态失败：{type(exc).__name__}",
             )
 
@@ -638,7 +642,11 @@ class SurgicalTaskOrchestrator:
                 tool_events,
             )
         except Exception as exc:
-            unavailable = isinstance(exc, ConnectionError)
+            exception_code = _planner_exception_code(exc)
+            unavailable = (
+                isinstance(exc, ConnectionError)
+                or exception_code == ErrorCode.PLANNER_UNAVAILABLE
+            )
             machine.transition(
                 AgentTaskState.PLANNER_UNAVAILABLE
                 if unavailable
@@ -654,7 +662,7 @@ class SurgicalTaskOrchestrator:
                 error_code=(
                     ErrorCode.PLANNER_UNAVAILABLE
                     if unavailable
-                    else _planner_exception_code(exc)
+                    else exception_code
                 ),
                 message=f"路径规划工具调用失败：{type(exc).__name__}；未执行穿刺。",
             )
@@ -911,8 +919,26 @@ def _json_value(value: Any) -> Any:
 
 
 def _robot_exception_code(exc: Exception) -> ErrorCode:
+    explicit = _explicit_error_code(exc)
+    if explicit is not None:
+        return explicit
     return ErrorCode.ROBOT_TIMEOUT if isinstance(exc, TimeoutError) else ErrorCode.INTERNAL_ERROR
 
 
 def _planner_exception_code(exc: Exception) -> ErrorCode:
+    explicit = _explicit_error_code(exc)
+    if explicit is not None:
+        return explicit
     return ErrorCode.PLANNER_TIMEOUT if isinstance(exc, TimeoutError) else ErrorCode.INTERNAL_ERROR
+
+
+def _explicit_error_code(exc: Exception) -> ErrorCode | None:
+    value = getattr(exc, "error_code", None)
+    if isinstance(value, ErrorCode):
+        return value
+    if isinstance(value, str):
+        try:
+            return ErrorCode(value)
+        except ValueError:
+            return None
+    return None

@@ -30,17 +30,17 @@ class RobotController(Protocol):
 
         ...
 
-    def stop(self) -> RobotState:
+    def stop(self, command_id: str | None = None) -> RobotState:
         """Stop normal motion and return the resulting state."""
 
         ...
 
-    def emergency_stop(self) -> RobotState:
+    def emergency_stop(self, command_id: str | None = None) -> RobotState:
         """Latch an emergency stop and return the resulting state."""
 
         ...
 
-    def reset_estop(self) -> RobotState:
+    def reset_estop(self, command_id: str | None = None) -> RobotState:
         """Explicitly clear a previously latched emergency stop."""
 
         ...

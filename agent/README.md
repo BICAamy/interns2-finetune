@@ -1,9 +1,9 @@
 # InternS2 手术机械臂智能体
 
-当前完成到 Step 8：InternS2 通过 LMDeploy 的 OpenAI-compatible API，将文本和
-可选图片解析成统一 `ParsedCommand`；确定性状态机再决定是否调用机械臂与路径规划。
-Step 8 仅提供内存 Mock 工具验收入口，尚未连接 Step 6 的仿真 HTTP 服务，更不会
-连接真实机械臂或执行穿刺。
+当前完成到 Step 10：InternS2 通过 LMDeploy 的 OpenAI-compatible API，将文本和
+可选图片解析成统一 `ParsedCommand`；确定性状态机通过 HTTP 调用 Step 6
+`robot-simulation` 和 Step 9 `planner-adapter`。当前只连接仿真机械臂，规划结果始终
+`executable=false`，不会连接真实机械臂或执行穿刺。
 
 ## Step 7 解析边界
 
@@ -72,7 +72,7 @@ IDLE → PARSING → VALIDATING
 cp .env.example .env
 ```
 
-Step 7/8 使用的主要配置：
+Step 7～10 使用的主要配置：
 
 ```dotenv
 INTERNS2_BASE_URL=http://127.0.0.1:23333/v1
@@ -92,6 +92,14 @@ ENTRY_TOLERANCE_MM=1
 MAX_TRANSLATION_PER_COMMAND_MM=20
 ROBOT_MOVE_SPEED_MM_S=5
 MAX_ROBOT_SPEED_MM_S=10
+
+ROBOT_SIMULATION_BASE_URL=http://127.0.0.1:8001
+PLANNER_ADAPTER_BASE_URL=http://127.0.0.1:8002
+ROBOT_SIMULATION_HTTP_TIMEOUT=10
+ROBOT_SIMULATION_COMMAND_TIMEOUT=120
+ROBOT_SIMULATION_POLL_INTERVAL=0.05
+PLANNER_ADAPTER_TIMEOUT=15
+PUNCTURE_EXECUTION_ENABLED=false
 ```
 
 `RUNTIME_MODE=simulation` 时，用户缺失单位/坐标系可以采用页面以后会明确展示的
@@ -216,7 +224,7 @@ python3 -m agent.main \
 
 期望 `orchestration.final_state` 为 `plan_ready`，工具事件顺序为读取状态、移动到
 入点、再次读取状态、调用路径规划，且消息明确包含“未执行穿刺”。这里的机械臂和
-planner 都是进程内 Fake；Step 10 才会把相同编排器连接到真实的仿真服务适配器。
+planner 都是进程内 Fake；它作为不依赖两个 HTTP 服务的快速回归入口继续保留。
 
 相对移动：
 
@@ -229,3 +237,102 @@ python3 -m agent.main \
 
 期望终态为 `completed`，只出现 `robot.get_state` 和 `robot.move_relative`，planner
 调用次数为零。
+
+## Step 10 三服务 CLI 端到端验收
+
+不带 `--parse-only` 或 `--mock-execute` 时，CLI 会连接真实运行中的
+`robot-simulation` 和 `planner-adapter` 服务。该模式只允许
+`RUNTIME_MODE=simulation`；`PUNCTURE_EXECUTION_ENABLED=true` 会被配置校验直接拒绝。
+
+### 容器网络
+
+当前 agent 代码运行在 `xl_interns2_lmdeploy` 内，而另外两个服务各自在独立容器中，
+因此不能把它们都配置成容器内的 `127.0.0.1`。在服务器宿主机执行一次：
+
+```bash
+cd ~/interns2-finetune
+
+docker network inspect surgical-nav-net >/dev/null 2>&1 || \
+  docker network create surgical-nav-net
+
+for container in \
+  xl_interns2_lmdeploy \
+  robot-simulation-test \
+  interns2-planner-adapter
+do
+  docker inspect "$container" \
+    --format '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}{{"\n"}}{{end}}' \
+    | grep -qx surgical-nav-net || \
+    docker network connect surgical-nav-net "$container"
+done
+```
+
+确保 Step 6 和 Step 9 的容器仍在运行，然后从 LMDeploy 容器验证 Docker DNS 和两个
+服务：
+
+```bash
+docker exec xl_interns2_lmdeploy \
+  curl -sS http://robot-simulation-test:8001/health
+
+docker exec xl_interns2_lmdeploy \
+  curl -sS http://interns2-planner-adapter:8002/health
+```
+
+### CLI 配置
+
+进入 LMDeploy 容器的新终端：
+
+```bash
+docker exec -it xl_interns2_lmdeploy /bin/bash
+cd /home/xl/interns2-finetune
+
+export INTERNS2_BASE_URL=http://127.0.0.1:23333/v1
+export INTERNS2_API_KEY=EMPTY
+export INTERNS2_MODEL=/home/xl/interns2-finetune/models/Intern-S2-Preview
+export INTERNS2_TEMPERATURE=0
+export RUNTIME_MODE=simulation
+export DEFAULT_COORDINATE_FRAME=robot_base
+export DEFAULT_DISTANCE_UNIT=mm
+export ROBOT_SIMULATION_BASE_URL=http://robot-simulation-test:8001
+export PLANNER_ADAPTER_BASE_URL=http://interns2-planner-adapter:8002
+export ROBOT_SIMULATION_COMMAND_TIMEOUT=120
+export PUNCTURE_EXECUTION_ENABLED=false
+```
+
+文档早期使用的 `(20,35,80)` 只适合解析和 Mock 测试，不在当前 E05-Pro 仿真工作
+空间内。真实仿真端到端测试使用已经在 Step 6 验证可达的入点 `[500,0,500] mm`。
+
+先记录 TCP，再执行完整任务：
+
+```bash
+curl -sS http://robot-simulation-test:8001/v1/state
+
+python3 -m agent.main \
+  --prompt '入点为基座坐标系下(X=500,Y=0,Z=500)毫米，靶点为(X=500,Y=0,Z=550)毫米，请准备穿刺' \
+  --json
+
+curl -sS http://robot-simulation-test:8001/v1/state
+```
+
+预期：
+
+- `execution_mode` 为 `services`；
+- `orchestration.final_state` 为 `plan_ready`；
+- TCP 到达 `[500,0,500] mm` 容差范围；
+- `robot.entry_verified` 严格早于 `planner.started`；
+- `planner_result.executable` 为 `false`；
+- 最终消息包含“未执行穿刺”，而不是“穿刺完成”。
+
+然后执行相对移动：
+
+```bash
+python3 -m agent.main \
+  --prompt '机械臂沿基座坐标系 Z 轴正方向移动 8 毫米' \
+  --json
+
+curl -sS http://robot-simulation-test:8001/v1/state
+```
+
+预期终态为 `completed`，TCP 的 Z 坐标增加约 `8 mm`，事件中没有
+`planner.started`。`execution_events` 给出统一顺序、毫秒时间戳和每个已完成步骤的
+耗时；底层 `orchestration.state_events` 与 `tool_events` 保留完整审计数据。

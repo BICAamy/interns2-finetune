@@ -32,6 +32,20 @@ def _as_int(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer, got {value!r}") from exc
 
 
+def _as_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"{name} must be one of true/false, 1/0, yes/no, or on/off; got {value!r}"
+    )
+
+
 def load_environment(env_file: str | Path | None = None) -> Path:
     """Load the project .env without overriding explicitly exported variables."""
 
@@ -68,6 +82,13 @@ class AgentSettings:
     max_relative_translation_mm: float = 20.0
     robot_move_speed_mm_s: float = 5.0
     max_robot_speed_mm_s: float = 10.0
+    robot_simulation_base_url: str = "http://127.0.0.1:8001"
+    planner_adapter_base_url: str = "http://127.0.0.1:8002"
+    robot_simulation_http_timeout: float = 10.0
+    robot_simulation_command_timeout: float = 120.0
+    robot_simulation_poll_interval: float = 0.05
+    planner_adapter_timeout: float = 15.0
+    puncture_execution_enabled: bool = False
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> "AgentSettings":
@@ -106,6 +127,31 @@ class AgentSettings:
             ),
             robot_move_speed_mm_s=_as_float("ROBOT_MOVE_SPEED_MM_S", 5.0),
             max_robot_speed_mm_s=_as_float("MAX_ROBOT_SPEED_MM_S", 10.0),
+            robot_simulation_base_url=os.getenv(
+                "ROBOT_SIMULATION_BASE_URL",
+                "http://127.0.0.1:8001",
+            ).strip(),
+            planner_adapter_base_url=os.getenv(
+                "PLANNER_ADAPTER_BASE_URL",
+                "http://127.0.0.1:8002",
+            ).strip(),
+            robot_simulation_http_timeout=_as_float(
+                "ROBOT_SIMULATION_HTTP_TIMEOUT",
+                10.0,
+            ),
+            robot_simulation_command_timeout=_as_float(
+                "ROBOT_SIMULATION_COMMAND_TIMEOUT",
+                120.0,
+            ),
+            robot_simulation_poll_interval=_as_float(
+                "ROBOT_SIMULATION_POLL_INTERVAL",
+                0.05,
+            ),
+            planner_adapter_timeout=_as_float("PLANNER_ADAPTER_TIMEOUT", 15.0),
+            puncture_execution_enabled=_as_bool(
+                "PUNCTURE_EXECUTION_ENABLED",
+                False,
+            ),
         )
         settings.validate()
         return settings
@@ -145,3 +191,20 @@ class AgentSettings:
             raise ValueError("MAX_ROBOT_SPEED_MM_S must be greater than zero")
         if self.robot_move_speed_mm_s > self.max_robot_speed_mm_s:
             raise ValueError("ROBOT_MOVE_SPEED_MM_S cannot exceed MAX_ROBOT_SPEED_MM_S")
+        if not self.robot_simulation_base_url:
+            raise ValueError("ROBOT_SIMULATION_BASE_URL cannot be empty")
+        if not self.planner_adapter_base_url:
+            raise ValueError("PLANNER_ADAPTER_BASE_URL cannot be empty")
+        if self.robot_simulation_http_timeout <= 0:
+            raise ValueError("ROBOT_SIMULATION_HTTP_TIMEOUT must be greater than zero")
+        if self.robot_simulation_command_timeout <= 0:
+            raise ValueError("ROBOT_SIMULATION_COMMAND_TIMEOUT must be greater than zero")
+        if self.robot_simulation_poll_interval <= 0:
+            raise ValueError("ROBOT_SIMULATION_POLL_INTERVAL must be greater than zero")
+        if self.planner_adapter_timeout <= 0:
+            raise ValueError("PLANNER_ADAPTER_TIMEOUT must be greater than zero")
+        if self.puncture_execution_enabled:
+            raise ValueError(
+                "PUNCTURE_EXECUTION_ENABLED must remain false: this project does not "
+                "implement puncture execution"
+            )

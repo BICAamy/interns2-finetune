@@ -1,22 +1,34 @@
-"""CLI for InternS2 parsing and Step 8 deterministic mock orchestration."""
+"""CLI for parsing and the Step 10 service-backed minimum execution chain."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import time
 from typing import Sequence
 
 from .config import AgentSettings
-from .core import AgentTaskState, OrchestrationPolicy, SurgicalTaskOrchestrator
+from .core import (
+    AgentTaskState,
+    OrchestrationPolicy,
+    SurgicalTaskOrchestrator,
+    build_runtime_events,
+)
 from .parsing import CommandParsingError
 from .runtime import InternS2Agent
-from .tools.puncture_planner import FakePuncturePlannerClient
-from .tools.robot import FakeRobotController
+from .tools.puncture_planner import (
+    FakePuncturePlannerClient,
+    PlannerAdapterHTTPClient,
+)
+from .tools.robot import FakeRobotController, RobotSimulationHTTPController
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Parse text and an optional image into a safe ParsedCommand."
+        description=(
+            "Parse text and an optional image into a safe ParsedCommand. "
+            "Without a mode flag, execute it through the simulation services."
+        )
     )
     parser.add_argument("--prompt", required=True, help="User request")
     parser.add_argument("--image", default=None, help="Optional path to a local image")
@@ -42,13 +54,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    if not args.parse_only and not args.mock_execute:
-        raise SystemExit(
-            "Choose --parse-only or --mock-execute. Mock execution never connects to a real robot."
-        )
-
+    parse_started_ms = time.time_ns() // 1_000_000
     try:
         settings = AgentSettings.from_env(args.env_file)
+        if not args.parse_only and settings.runtime_mode.value != "simulation":
+            raise SystemExit(
+                "CLI execution requires RUNTIME_MODE=simulation; "
+                "real robot control is not implemented"
+            )
         parsed = InternS2Agent(settings).parse_command(
             args.prompt,
             image_path=args.image,
@@ -65,11 +78,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(f"解析失败 [{error.error_code.value}]：{error}")
         return 2
+    parse_finished_ms = time.time_ns() // 1_000_000
 
     orchestration = None
     if args.mock_execute:
-        if settings.runtime_mode.value != "simulation":
-            raise SystemExit("--mock-execute requires RUNTIME_MODE=simulation")
         orchestration = SurgicalTaskOrchestrator(
             FakeRobotController(),
             FakePuncturePlannerClient(),
@@ -81,9 +93,47 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_runtime_mode=settings.runtime_mode,
             ),
         ).execute(parsed.command)
+    elif not args.parse_only:
+        with RobotSimulationHTTPController(
+            settings.robot_simulation_base_url,
+            http_timeout_s=settings.robot_simulation_http_timeout,
+            command_timeout_s=settings.robot_simulation_command_timeout,
+            poll_interval_s=settings.robot_simulation_poll_interval,
+        ) as robot, PlannerAdapterHTTPClient(
+            settings.planner_adapter_base_url,
+            timeout_s=settings.planner_adapter_timeout,
+        ) as planner:
+            orchestration = SurgicalTaskOrchestrator(
+                robot,
+                planner,
+                policy=OrchestrationPolicy(
+                    entry_tolerance_mm=settings.entry_tolerance_mm,
+                    max_relative_translation_mm=(
+                        settings.max_relative_translation_mm
+                    ),
+                    move_speed_mm_s=settings.robot_move_speed_mm_s,
+                    max_speed_mm_s=settings.max_robot_speed_mm_s,
+                    expected_runtime_mode=settings.runtime_mode,
+                ),
+            ).execute(parsed.command)
 
     if args.json:
         envelope = parsed.as_dict()
+        envelope["execution_mode"] = (
+            "parse_only"
+            if args.parse_only
+            else "mock"
+            if args.mock_execute
+            else "services"
+        )
+        envelope["execution_events"] = [
+            event.as_dict()
+            for event in build_runtime_events(
+                parse_started_ms=parse_started_ms,
+                parse_finished_ms=parse_finished_ms,
+                orchestration=orchestration,
+            )
+        ]
         if orchestration is not None:
             envelope["orchestration"] = orchestration.as_dict()
         print(json.dumps(envelope, ensure_ascii=False, indent=2))
