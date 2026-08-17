@@ -64,6 +64,10 @@ class AgentSettings:
     default_coordinate_frame: CoordinateFrame = CoordinateFrame.ROBOT_BASE
     default_distance_unit: DistanceUnit = DistanceUnit.MILLIMETER
     default_relative_step_mm: float = 5.0
+    entry_tolerance_mm: float = 1.0
+    max_relative_translation_mm: float = 20.0
+    robot_move_speed_mm_s: float = 5.0
+    max_robot_speed_mm_s: float = 10.0
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> "AgentSettings":
@@ -95,6 +99,13 @@ class AgentSettings:
                 ).strip()
             ),
             default_relative_step_mm=_as_float("DEFAULT_RELATIVE_STEP_MM", 5.0),
+            entry_tolerance_mm=_as_float("ENTRY_TOLERANCE_MM", 1.0),
+            max_relative_translation_mm=_as_float(
+                "MAX_TRANSLATION_PER_COMMAND_MM",
+                20.0,
+            ),
+            robot_move_speed_mm_s=_as_float("ROBOT_MOVE_SPEED_MM_S", 5.0),
+            max_robot_speed_mm_s=_as_float("MAX_ROBOT_SPEED_MM_S", 10.0),
         )
         settings.validate()
         return settings
@@ -124,3 +135,13 @@ class AgentSettings:
             )
         if self.default_relative_step_mm <= 0:
             raise ValueError("DEFAULT_RELATIVE_STEP_MM must be greater than zero")
+        if self.entry_tolerance_mm <= 0:
+            raise ValueError("ENTRY_TOLERANCE_MM must be greater than zero")
+        if self.max_relative_translation_mm <= 0:
+            raise ValueError("MAX_TRANSLATION_PER_COMMAND_MM must be greater than zero")
+        if self.robot_move_speed_mm_s <= 0:
+            raise ValueError("ROBOT_MOVE_SPEED_MM_S must be greater than zero")
+        if self.max_robot_speed_mm_s <= 0:
+            raise ValueError("MAX_ROBOT_SPEED_MM_S must be greater than zero")
+        if self.robot_move_speed_mm_s > self.max_robot_speed_mm_s:
+            raise ValueError("ROBOT_MOVE_SPEED_MM_S cannot exceed MAX_ROBOT_SPEED_MM_S")

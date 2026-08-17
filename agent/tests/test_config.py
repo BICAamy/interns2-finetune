@@ -27,6 +27,8 @@ class AgentSettingsTests(unittest.TestCase):
         value.validate()
         self.assertEqual(value.default_relative_step_mm, 5.0)
         self.assertEqual(value.default_coordinate_frame, CoordinateFrame.ROBOT_BASE)
+        self.assertEqual(value.entry_tolerance_mm, 1.0)
+        self.assertEqual(value.max_relative_translation_mm, 20.0)
 
     def test_first_version_rejects_a_non_base_default_frame(self):
         value = replace(
@@ -34,6 +36,15 @@ class AgentSettingsTests(unittest.TestCase):
             default_coordinate_frame=CoordinateFrame.SCENE_CAMERA,
         )
         with self.assertRaisesRegex(ValueError, "must be robot_base"):
+            value.validate()
+
+    def test_move_speed_cannot_exceed_safety_limit(self):
+        value = replace(
+            settings(),
+            robot_move_speed_mm_s=11.0,
+            max_robot_speed_mm_s=10.0,
+        )
+        with self.assertRaisesRegex(ValueError, "cannot exceed"):
             value.validate()
 
 

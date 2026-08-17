@@ -1,8 +1,9 @@
 # InternS2 手术机械臂智能体
 
-当前完成到 Step 7：InternS2 通过 LMDeploy 的 OpenAI-compatible API，将文本和
-可选图片解析成统一 `ParsedCommand`。本阶段只解析，不调用机械臂、不调用路径规划，
-也不执行穿刺。
+当前完成到 Step 8：InternS2 通过 LMDeploy 的 OpenAI-compatible API，将文本和
+可选图片解析成统一 `ParsedCommand`；确定性状态机再决定是否调用机械臂与路径规划。
+Step 8 仅提供内存 Mock 工具验收入口，尚未连接 Step 6 的仿真 HTTP 服务，更不会
+连接真实机械臂或执行穿刺。
 
 ## Step 7 解析边界
 
@@ -32,8 +33,36 @@ submit_surgical_task
 - 无 tool call、多个/未知 tool call、非法 JSON、超时和服务不可用都有稳定错误码；
 - 图片是可选输入，二维像素不能直接成为三维机械臂坐标。
 
-`clarify`、非法输出和模型调用错误都不会触发任何工具。Step 8 才会实现确定性的
-任务状态机与工具编排。
+`clarify`、非法输出和模型调用错误都不会触发任何工具。InternS2 只能生成上述高层
+任务，不能选择或重排底层工具。
+
+## Step 8 编排边界
+
+状态机固定执行以下顺序：
+
+```text
+IDLE → PARSING → VALIDATING
+  ├→ CLARIFICATION_REQUIRED
+  ├→ EXECUTING_RELATIVE → COMPLETED
+  └→ MOVING_TO_ENTRY → AT_ENTRY
+       ├→ COMPLETED
+       └→ PATH_PLANNING → PLAN_READY / PLAN_FAILED / PLANNER_UNAVAILABLE
+```
+
+关键安全规则：
+
+- 普通运动前读取机械臂状态，急停、模式不匹配或已有运动时拒绝执行；
+- 相对运动只能调用 `robot.move_relative`，且受单次位移和速度上限约束；
+- 到达入点后重新调用 `robot.get_state`，按最终 TCP 独立计算误差，不能只相信
+  `move_to_entry` 返回的 `reached=true`；
+- 完整任务只有在到点复核通过后才能调用 planner；定位失败、误差超限、停止和急停
+  都会阻断 planner；
+- planner 返回的数据被固定为 `executable=false`，`PLAN_READY` 只表示规划结果就绪，
+  不表示穿刺完成；
+- 同一进程内缓存已完成普通任务的 `command_id`，重复请求直接返回原结果，不产生
+  第二次运动；停止/急停始终允许重复下发；
+- 同一时刻只允许一条普通命令，停止和急停可以中断活动命令；
+- 每次状态变化和工具调用都有结构化事件记录。
 
 ## 配置
 
@@ -43,7 +72,7 @@ submit_surgical_task
 cp .env.example .env
 ```
 
-Step 7 使用的主要配置：
+Step 7/8 使用的主要配置：
 
 ```dotenv
 INTERNS2_BASE_URL=http://127.0.0.1:23333/v1
@@ -59,6 +88,10 @@ RUNTIME_MODE=simulation
 DEFAULT_COORDINATE_FRAME=robot_base
 DEFAULT_DISTANCE_UNIT=mm
 DEFAULT_RELATIVE_STEP_MM=5
+ENTRY_TOLERANCE_MM=1
+MAX_TRANSLATION_PER_COMMAND_MM=20
+ROBOT_MOVE_SPEED_MM_S=5
+MAX_ROBOT_SPEED_MM_S=10
 ```
 
 `RUNTIME_MODE=simulation` 时，用户缺失单位/坐标系可以采用页面以后会明确展示的
@@ -74,8 +107,9 @@ python3 -m pip install -r agent/requirements.txt
 python3 -m pytest agent/tests tests/unit -q
 ```
 
-伪造 OpenAI 响应的测试不需要 GPU 或正在运行的 InternS2，覆盖 tool schema、
-可选图片、默认值、可信 ID、缺字段澄清和错误处理。
+伪造 OpenAI 响应和 Mock 工具测试不需要 GPU 或正在运行的 InternS2，覆盖 tool
+schema、可选图片、默认值、可信 ID、缺字段澄清，以及 Step 8 的工具顺序、到点
+复核、幂等、并发拒绝、停止和急停。
 
 ## 启动 InternS2
 
@@ -168,3 +202,30 @@ python3 -m agent.evals.run_step7_eval
 
 全部通过时输出 `"status": "ok"`、`"passed": 13`、`"total": 13`。评测失败
 只表示解析结果不符合固定预期，不会调用机械臂或 planner。
+
+## Step 8 Mock 编排冒烟测试
+
+先启动 InternS2，然后用显式的 `--mock-execute` 将解析结果交给内存 Fake 工具：
+
+```bash
+python3 -m agent.main \
+  --prompt '入点为基座坐标系下(20,35,80)毫米，靶点为(24,38,120)毫米，请准备穿刺' \
+  --mock-execute \
+  --json
+```
+
+期望 `orchestration.final_state` 为 `plan_ready`，工具事件顺序为读取状态、移动到
+入点、再次读取状态、调用路径规划，且消息明确包含“未执行穿刺”。这里的机械臂和
+planner 都是进程内 Fake；Step 10 才会把相同编排器连接到真实的仿真服务适配器。
+
+相对移动：
+
+```bash
+python3 -m agent.main \
+  --prompt '机械臂沿基座坐标系 Z 轴正方向移动 8 毫米' \
+  --mock-execute \
+  --json
+```
+
+期望终态为 `completed`，只出现 `robot.get_state` 和 `robot.move_relative`，planner
+调用次数为零。

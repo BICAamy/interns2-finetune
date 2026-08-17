@@ -35,6 +35,8 @@ class FakeRobotController:
         initial_position: Point3D | None = None,
         move_to_entry_outcome: FakeRobotOutcome = FakeRobotOutcome.SUCCESS,
         move_relative_outcome: FakeRobotOutcome = FakeRobotOutcome.SUCCESS,
+        post_move_state_offset_mm: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        report_requested_entry_on_success: bool = False,
     ) -> None:
         self._position = initial_position or Point3D(
             x=0.0,
@@ -47,6 +49,8 @@ class FakeRobotController:
         self._estop = False
         self.move_to_entry_outcome = move_to_entry_outcome
         self.move_relative_outcome = move_relative_outcome
+        self.post_move_state_offset_mm = post_move_state_offset_mm
+        self.report_requested_entry_on_success = report_requested_entry_on_success
         self.move_to_entry_calls: list[MoveToEntryRequest] = []
         self.move_relative_calls: list[MoveRelativeRequest] = []
         self.stop_calls = 0
@@ -93,17 +97,23 @@ class FakeRobotController:
 
         self._motion_state = MotionState.MOVING
         if self.move_to_entry_outcome == FakeRobotOutcome.SUCCESS:
-            self._position = request.entry_point.model_copy(
+            requested_position = request.entry_point.model_copy(
                 update={"source": CoordinateSource.SIMULATION},
                 deep=True,
             )
+            self._position = requested_position.translated(self.post_move_state_offset_mm)
             self._motion_state = MotionState.AT_ENTRY
+            reported_position = (
+                requested_position
+                if self.report_requested_entry_on_success
+                else self._position
+            )
             return MoveToEntryResult(
                 command_id=request.command_id,
                 status=ToolStatus.SUCCESS,
                 reached=True,
-                final_tcp_position=self._position,
-                position_error_mm=0.0,
+                final_tcp_position=reported_position,
+                position_error_mm=reported_position.distance_to(request.entry_point),
                 trajectory_id=self._next_trajectory_id(),
                 message="Fake robot reached the entry point",
             )
