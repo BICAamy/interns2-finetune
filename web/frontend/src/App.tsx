@@ -308,14 +308,14 @@ export default function App() {
     if (drag.mode === "orbit") {
       void updateCamera({
         action: "orbit",
-        yaw_delta_deg: Math.max(-30, Math.min(30, deltaX * 0.3)),
-        pitch_delta_deg: Math.max(-30, Math.min(30, -deltaY * 0.3)),
+        yaw_delta_deg: Math.max(-30, Math.min(30, -deltaX * 0.3)),
+        pitch_delta_deg: Math.max(-30, Math.min(30, deltaY * 0.3)),
       });
     } else {
       void updateCamera({
         action: "pan",
-        pan_right_delta_m: Math.max(-0.2, Math.min(0.2, -deltaX * 0.0015)),
-        pan_up_delta_m: Math.max(-0.2, Math.min(0.2, deltaY * 0.0015)),
+        pan_right_delta_m: Math.max(-0.2, Math.min(0.2, deltaX * 0.0015)),
+        pan_up_delta_m: Math.max(-0.2, Math.min(0.2, -deltaY * 0.0015)),
       });
     }
   }
