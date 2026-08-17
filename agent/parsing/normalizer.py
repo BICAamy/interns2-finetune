@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from math import isfinite
 from typing import Any, Callable
@@ -38,6 +39,8 @@ TOP_LEVEL_FIELDS = {
 IGNORED_MODEL_FIELDS = {"command_id", "schema_version"}
 POINT_FIELDS = {"x", "y", "z", "unit", "frame", "source"}
 RELATIVE_FIELDS = {"axis", "direction", "distance_mm", "frame", "distance_source"}
+MAX_EMBEDDED_JSON_CHARS = 32_768
+MAX_EMBEDDED_JSON_DEPTH = 2
 
 FRAME_ALIASES = {
     "robot_base": CoordinateFrame.ROBOT_BASE,
@@ -112,13 +115,16 @@ class CommandNormalizer:
             "target_point": None,
             "relative_motion": None,
             "missing_fields": missing,
-            "needs_confirmation": bool(raw.get("needs_confirmation", False)),
-            "confidence": raw.get("confidence", 0.0),
+            "needs_confirmation": self._boolean_parameter(
+                raw.get("needs_confirmation", False),
+                "needs_confirmation",
+            ),
+            "confidence": self._confidence_parameter(raw.get("confidence", 0.0)),
             "summary": str(raw.get("summary") or "").strip(),
         }
 
         for name in ("entry_point", "target_point"):
-            value = raw.get(name)
+            value = self._embedded_json_parameter(raw.get(name), name)
             if value is None:
                 continue
             point, point_missing = self._normalize_point(value, name, input_source)
@@ -127,7 +133,10 @@ class CommandNormalizer:
             else:
                 normalized[name] = point
 
-        relative = raw.get("relative_motion")
+        relative = self._embedded_json_parameter(
+            raw.get("relative_motion"),
+            "relative_motion",
+        )
         if relative is not None:
             motion, motion_missing = self._normalize_relative(relative)
             if motion_missing:
@@ -177,7 +186,10 @@ class CommandNormalizer:
         input_source: CoordinateSource,
     ) -> tuple[dict[str, Any] | None, list[str]]:
         if not isinstance(value, dict):
-            raise self._invalid(f"{name} must be an object or null")
+            raise self._invalid(
+                f"{name} must be an object or null",
+                details={"field": name, "received_type": type(value).__name__},
+            )
         unknown = set(value) - POINT_FIELDS
         if unknown:
             raise self._invalid(
@@ -254,7 +266,13 @@ class CommandNormalizer:
         value: Any,
     ) -> tuple[dict[str, Any] | None, list[str]]:
         if not isinstance(value, dict):
-            raise self._invalid("relative_motion must be an object or null")
+            raise self._invalid(
+                "relative_motion must be an object or null",
+                details={
+                    "field": "relative_motion",
+                    "received_type": type(value).__name__,
+                },
+            )
         unknown = set(value) - RELATIVE_FIELDS
         if unknown:
             raise self._invalid(
@@ -348,22 +366,85 @@ class CommandNormalizer:
             normalized["target_point"] = None
             normalized["relative_motion"] = None
 
-    @staticmethod
-    def _missing_fields(value: Any) -> list[str]:
+    @classmethod
+    def _missing_fields(cls, value: Any) -> list[str]:
+        value = cls._embedded_json_parameter(value, "missing_fields")
         if value is None:
             return []
         if not isinstance(value, list):
-            raise CommandNormalizer._invalid("missing_fields must be an array")
+            raise cls._invalid("missing_fields must be an array")
         result: list[str] = []
         for field in value:
             if not isinstance(field, str) or not field.strip():
-                raise CommandNormalizer._invalid(
+                raise cls._invalid(
                     "missing_fields must contain non-empty strings"
                 )
             stripped = field.strip()
             if stripped not in result:
                 result.append(stripped)
         return result
+
+    @classmethod
+    def _embedded_json_parameter(cls, value: Any, name: str) -> Any:
+        """Decode JSON values stringified by LMDeploy's XML tool parser.
+
+        InternS2 emits each XML ``<parameter>`` independently. LMDeploy 0.14
+        may therefore preserve objects, arrays, booleans and null as strings
+        inside the otherwise valid top-level arguments object. Decode only the
+        fields whose schema is non-string, with a small depth and size bound.
+        """
+
+        if not isinstance(value, str):
+            return value
+        candidate = value.strip()
+        if not candidate:
+            raise cls._invalid(f"{name} must not be an empty JSON value")
+        if len(candidate) > MAX_EMBEDDED_JSON_CHARS:
+            raise cls._invalid(
+                f"{name} embedded JSON is too large",
+                details={"max_chars": MAX_EMBEDDED_JSON_CHARS},
+            )
+
+        decoded: Any = candidate
+        for _ in range(MAX_EMBEDDED_JSON_DEPTH):
+            if not isinstance(decoded, str):
+                return decoded
+            candidate = decoded.strip()
+            try:
+                decoded = json.loads(candidate)
+            except json.JSONDecodeError as error:
+                raise cls._invalid(
+                    f"{name} must contain valid JSON",
+                    details={
+                        "field": name,
+                        "line": error.lineno,
+                        "column": error.colno,
+                        "reason": error.msg,
+                    },
+                ) from error
+        return decoded
+
+    @classmethod
+    def _boolean_parameter(cls, value: Any, name: str) -> bool:
+        value = cls._embedded_json_parameter(value, name)
+        if not isinstance(value, bool):
+            raise cls._invalid(f"{name} must be a boolean")
+        return value
+
+    @classmethod
+    def _confidence_parameter(cls, value: Any) -> float:
+        value = cls._embedded_json_parameter(value, "confidence")
+        if isinstance(value, bool):
+            raise cls._invalid("confidence must be a finite number from 0 to 1")
+        try:
+            confidence = float(value)
+        except (TypeError, ValueError) as error:
+            raise cls._invalid(
+                "confidence must be a finite number from 0 to 1"
+            ) from error
+        if not isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+            raise cls._invalid("confidence must be a finite number from 0 to 1")
+        return confidence
 
     def _trusted_command_id(self) -> str:
         command_id = self._command_id_factory()

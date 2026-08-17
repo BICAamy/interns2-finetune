@@ -19,6 +19,8 @@ submit_surgical_task
 
 - 运行时重新生成 `command_id`，忽略模型生成的 ID；
 - JSON 解码后再用 Pydantic `ParsedCommand` 二次校验；
+- 兼容 LMDeploy 0.14 XML tool parser 将对象、数组、布尔值或 `null` 二次编码为
+  JSON 字符串的响应，但不接受 Python 字面量或任意文本；
 - 对外距离统一为 `mm`；仿真模式缺失坐标系时使用 `robot_base`；
 - “往上抬一点”规范化为 `robot_base +Z 5 mm`，5 mm 来自配置；
 - 完整穿刺缺入点或靶点、三维坐标不完整、坐标顺序含糊时降级为 `clarify`；

@@ -123,6 +123,64 @@ class InternS2AgentTests(unittest.TestCase):
             request["tools"][0]["function"]["parameters"]["properties"],
         )
 
+    def test_lmdeploy_stringified_nested_parameters_are_decoded(self):
+        arguments = base_arguments(
+            "puncture",
+            entry_point=json.dumps(
+                {
+                    "x": 20,
+                    "y": 35,
+                    "z": 80,
+                    "unit": "mm",
+                    "frame": "robot_base",
+                }
+            ),
+            target_point=json.dumps(
+                {
+                    "x": 24,
+                    "y": 38,
+                    "z": 120,
+                    "unit": "mm",
+                    "frame": "robot_base",
+                }
+            ),
+            relative_motion="null",
+            missing_fields="[]",
+            needs_confirmation="false",
+            confidence="0.98",
+        )
+        agent, _client = make_agent(arguments)
+
+        command = agent.parse_command("请准备穿刺").command
+
+        self.assertEqual(command.intent, CommandIntent.PUNCTURE)
+        self.assertEqual(command.entry_point.as_tuple(), (20.0, 35.0, 80.0))
+        self.assertEqual(command.target_point.as_tuple(), (24.0, 38.0, 120.0))
+        self.assertIsNone(command.relative_motion)
+        self.assertEqual(command.confidence, 0.98)
+        # The safety normalizer, rather than string truthiness, forces this true.
+        self.assertTrue(command.needs_confirmation)
+
+    def test_lmdeploy_string_false_is_not_treated_as_true(self):
+        arguments = base_arguments(
+            "move_relative",
+            entry_point="null",
+            target_point="null",
+            relative_motion=json.dumps(
+                {"axis": "z", "direction": "positive"}
+            ),
+            missing_fields="[]",
+            needs_confirmation="false",
+            confidence="0.9",
+        )
+        agent, _client = make_agent(arguments)
+
+        command = agent.parse_command("机械臂往上抬一点").command
+
+        self.assertEqual(command.intent, CommandIntent.MOVE_RELATIVE)
+        self.assertFalse(command.needs_confirmation)
+        self.assertEqual(command.relative_motion.distance_mm, 5.0)
+
     def test_vague_up_motion_uses_runtime_default(self):
         arguments = base_arguments(
             "move_relative",
@@ -297,6 +355,19 @@ class InternS2AgentTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.error_code, ErrorCode.MODEL_INVALID_OUTPUT)
         self.assertIn("line", raised.exception.details)
+
+    def test_invalid_embedded_json_has_stable_error(self):
+        arguments = base_arguments(
+            "move_to_entry",
+            entry_point="{not-json",
+        )
+        agent, _client = make_agent(arguments)
+
+        with self.assertRaises(CommandParsingError) as raised:
+            agent.parse_command("移动到入点")
+
+        self.assertEqual(raised.exception.error_code, ErrorCode.MODEL_INVALID_OUTPUT)
+        self.assertEqual(raised.exception.details["field"], "entry_point")
 
     def test_unknown_or_multiple_tool_calls_are_rejected(self):
         agent, _client = make_agent(base_arguments("stop"), name="move_robot")

@@ -16,12 +16,16 @@ class OpenAICompatibilityTests(unittest.TestCase):
         requests: list[dict] = []
         arguments = {
             "intent": "move_relative",
-            "entry_point": None,
-            "target_point": None,
-            "relative_motion": {"axis": "z", "direction": "positive"},
-            "missing_fields": [],
-            "needs_confirmation": False,
-            "confidence": 0.99,
+            # LMDeploy 0.14's XML parser can stringify each non-string
+            # parameter even though the top-level arguments are valid JSON.
+            "entry_point": "null",
+            "target_point": "null",
+            "relative_motion": json.dumps(
+                {"axis": "z", "direction": "positive"}
+            ),
+            "missing_fields": "[]",
+            "needs_confirmation": "false",
+            "confidence": "0.99",
             "summary": "机械臂往上抬一点",
         }
 
@@ -94,6 +98,7 @@ class OpenAICompatibilityTests(unittest.TestCase):
         self.assertEqual(result.command.intent, CommandIntent.MOVE_RELATIVE)
         self.assertEqual(result.command.command_id, "cmd-openai-sdk")
         self.assertEqual(result.command.relative_motion.distance_mm, 5.0)
+        self.assertFalse(result.command.needs_confirmation)
         self.assertEqual(
             requests[0]["tools"][0]["function"]["name"],
             "submit_surgical_task",
