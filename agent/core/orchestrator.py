@@ -109,6 +109,7 @@ class SurgicalTaskOrchestrator:
         *,
         policy: OrchestrationPolicy | None = None,
         clock_ms: Callable[[], int] | None = None,
+        event_sink: Callable[[ToolEvent], None] | None = None,
     ) -> None:
         self.robot = robot
         self.planner = planner
@@ -116,6 +117,7 @@ class SurgicalTaskOrchestrator:
         self._lock = RLock()
         self._clock_source_ms = clock_ms or (lambda: time.time_ns() // 1_000_000)
         self._last_timestamp_ms = -1
+        self._event_sink = event_sink
         self._active_command_id: str | None = None
         self._interrupts: dict[str, AgentTaskState] = {}
         self._fingerprints: dict[str, str] = {}
@@ -788,7 +790,8 @@ class SurgicalTaskOrchestrator:
         events: list[ToolEvent],
     ) -> ToolResult:
         arguments_dict = _json_value(arguments) or {}
-        events.append(
+        self._emit_tool_event(
+            events,
             ToolEvent(
                 event_id=self._event_id(command_id, len(events) + 1),
                 command_id=command_id,
@@ -796,12 +799,13 @@ class SurgicalTaskOrchestrator:
                 tool=tool,
                 phase=EventPhase.STARTED,
                 arguments=arguments_dict,
-            )
+            ),
         )
         try:
             result = operation()
         except Exception as exc:
-            events.append(
+            self._emit_tool_event(
+                events,
                 ToolEvent(
                     event_id=self._event_id(command_id, len(events) + 1),
                     command_id=command_id,
@@ -813,14 +817,15 @@ class SurgicalTaskOrchestrator:
                         "exception_type": type(exc).__name__,
                         "message": str(exc),
                     },
-                )
+                ),
             )
             raise
 
         status = getattr(result, "status", None)
         status_value = status.value if isinstance(status, Enum) else status
         phase = EventPhase.COMPLETED if status_value in {None, "success"} else EventPhase.FAILED
-        events.append(
+        self._emit_tool_event(
+            events,
             ToolEvent(
                 event_id=self._event_id(command_id, len(events) + 1),
                 command_id=command_id,
@@ -829,9 +834,19 @@ class SurgicalTaskOrchestrator:
                 phase=phase,
                 arguments=arguments_dict,
                 result=_json_value(result),
-            )
+            ),
         )
         return result
+
+    def _emit_tool_event(self, events: list[ToolEvent], event: ToolEvent) -> None:
+        events.append(event)
+        if self._event_sink is None:
+            return
+        try:
+            self._event_sink(event)
+        except Exception:
+            # Observability must never change robot/planner execution semantics.
+            return
 
     def _remember(
         self,

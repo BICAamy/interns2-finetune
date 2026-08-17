@@ -33,6 +33,7 @@ class ParsedCommandResponse:
     command: ParsedCommand
     model: str
     tool_call_id: str | None = None
+    raw_arguments: dict[str, Any] | None = None
 
     @property
     def clarification(self) -> str | None:
@@ -44,6 +45,15 @@ class ParsedCommandResponse:
         return {
             "status": "ok",
             "model": self.model,
+            "raw_model_output": (
+                {
+                    "tool_call_id": self.tool_call_id,
+                    "function": SUBMIT_SURGICAL_TASK_NAME,
+                    "arguments": self.raw_arguments,
+                }
+                if self.raw_arguments is not None
+                else None
+            ),
             "parsed_command": self.command.model_dump(mode="json"),
             "clarification": self.clarification,
         }
@@ -205,6 +215,7 @@ class InternS2Agent:
             command=command,
             model=self.model,
             tool_call_id=getattr(tool_call, "id", None),
+            raw_arguments=arguments,
         )
 
     # Step 7 keeps run() as a compatibility alias, but its meaning is now

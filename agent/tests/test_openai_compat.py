@@ -4,7 +4,10 @@ import json
 import unittest
 
 import httpx
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except ImportError:  # Standalone agent-web intentionally uses its HTTP facade.
+    OpenAI = None
 
 from agent.config import AgentSettings
 from agent.runtime import InternS2Agent
@@ -12,6 +15,7 @@ from surgical_contracts import CommandIntent
 
 
 class OpenAICompatibilityTests(unittest.TestCase):
+    @unittest.skipIf(OpenAI is None, "official OpenAI SDK is not installed")
     def test_real_sdk_serializes_tool_and_decodes_lmdeploy_shape(self):
         requests: list[dict] = []
         arguments = {

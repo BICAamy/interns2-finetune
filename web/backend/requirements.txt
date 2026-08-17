@@ -1,0 +1,9 @@
+# Standalone agent-web dependencies. The offline image reuses the already
+# verified Step 6 Python image, which contains these exact versions.
+anyio==4.8.0
+fastapi==0.115.8
+httpx==0.28.1
+pydantic==2.10.6
+starlette==0.45.3
+uvicorn==0.34.0
+websockets==14.2

@@ -49,14 +49,19 @@ def _as_bool(name: str, default: bool) -> bool:
 def load_environment(env_file: str | Path | None = None) -> Path:
     """Load the project .env without overriding explicitly exported variables."""
 
+    path = Path(env_file).expanduser().resolve() if env_file else PROJECT_ROOT / ".env"
+
     try:
         from dotenv import load_dotenv
     except ImportError as exc:  # pragma: no cover - depends on deployment environment
+        if not path.is_file():
+            # Container deployments inject configuration through environment
+            # variables and intentionally do not copy a .env file.
+            return path
         raise RuntimeError(
             "python-dotenv is not installed; run `pip install -r agent/requirements.txt`"
         ) from exc
 
-    path = Path(env_file).expanduser().resolve() if env_file else PROJECT_ROOT / ".env"
     load_dotenv(path, override=False)
     return path
 

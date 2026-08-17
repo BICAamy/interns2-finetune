@@ -1,0 +1,351 @@
+import { useEffect, useMemo, useState } from "react";
+import { api, fileToDataUrl, openSessionSocket } from "./api";
+import type { SessionSnapshot } from "./types";
+
+const SESSION_KEY = "interns2-surgical-session";
+const DEFAULT_PROMPT =
+  "入点为基座坐标系下(X=500,Y=0,Z=500)毫米，靶点为(X=500,Y=0,Z=550)毫米，请准备穿刺";
+
+const busyStatuses = new Set([
+  "parsing",
+  "executing",
+  "moving_to_entry",
+  "verifying_entry",
+  "moving_relative",
+  "planning",
+  "stopping",
+]);
+
+function JsonPanel({ value, empty }: { value: unknown; empty: string }) {
+  return (
+    <pre className="json-panel">
+      {value ? JSON.stringify(value, null, 2) : empty}
+    </pre>
+  );
+}
+
+function CoordinateCard({ title, point }: { title: string; point: any }) {
+  return (
+    <div className="coordinate-card">
+      <span>{title}</span>
+      {point ? (
+        <strong>
+          X {Number(point.x).toFixed(2)} · Y {Number(point.y).toFixed(2)} · Z{" "}
+          {Number(point.z).toFixed(2)} <small>{point.unit ?? "mm"}</small>
+        </strong>
+      ) : (
+        <strong className="muted">未提供</strong>
+      )}
+      <small>{point?.frame ?? "—"}</small>
+    </div>
+  );
+}
+
+function Timeline({ events }: { events: Array<Record<string, any>> }) {
+  if (!events.length) {
+    return <div className="empty-state">提交任务后，这里会显示工具调用时间线。</div>;
+  }
+  return (
+    <ol className="timeline">
+      {events.map((event, index) => {
+        const name = event.event ?? `${event.tool}.${event.phase}`;
+        const status = event.status ?? event.phase;
+        return (
+          <li key={`${name}-${event.sequence ?? index}-${event.timestamp_ms}`}>
+            <span className={`timeline-dot ${status}`} />
+            <div>
+              <strong>{name}</strong>
+              <span>
+                {event.timestamp_ms ? new Date(event.timestamp_ms).toLocaleTimeString() : ""}
+                {event.duration_ms !== undefined ? ` · ${event.duration_ms} ms` : ""}
+              </span>
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+export default function App() {
+  const [session, setSession] = useState<SessionSnapshot | null>(null);
+  const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const [image, setImage] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [connected, setConnected] = useState(false);
+  const [requestError, setRequestError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function initialize() {
+      const existing = sessionStorage.getItem(SESSION_KEY);
+      try {
+        const snapshot = existing
+          ? await api.getSession(existing).catch(() => api.createSession())
+          : await api.createSession();
+        if (!cancelled) {
+          sessionStorage.setItem(SESSION_KEY, snapshot.session_id);
+          setSession(snapshot);
+        }
+      } catch (error) {
+        if (!cancelled) setRequestError(String(error));
+      }
+    }
+    initialize();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!session?.session_id) return;
+    const socket = openSessionSocket(session.session_id, setSession, setConnected);
+    return () => socket.close();
+  }, [session?.session_id]);
+
+  const command = session?.normalized_command;
+  const isBusy = session ? busyStatuses.has(session.status) : true;
+  const canSubmit = Boolean(session && prompt.trim() && !isBusy && !session.pending_confirmation);
+  const entry = command?.entry_point;
+  const target = command?.target_point;
+
+  const statusTone = useMemo(() => {
+    if (!session) return "neutral";
+    if (session.status === "estop" || session.status === "failed") return "danger";
+    if (session.status === "plan_ready" || session.status === "completed") return "success";
+    if (isBusy) return "active";
+    return "neutral";
+  }, [session, isBusy]);
+
+  async function run(action: () => Promise<SessionSnapshot>) {
+    setRequestError(null);
+    try {
+      setSession(await action());
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function submit() {
+    if (!session || !canSubmit) return;
+    setRequestError(null);
+    try {
+      let imageDataUrl: string | undefined;
+      if (image) imageDataUrl = await fileToDataUrl(image);
+      await run(() =>
+        api.submitText(session.session_id, {
+          prompt: prompt.trim(),
+          image_data_url: imageDataUrl,
+          image_name: image?.name,
+        }),
+      );
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function selectImage(file: File | null) {
+    if (file && file.size > 10 * 1024 * 1024) {
+      setRequestError("图像不能超过 10 MiB");
+      return;
+    }
+    setImage(file);
+    if (imagePreview) URL.revokeObjectURL(imagePreview);
+    setImagePreview(file ? URL.createObjectURL(file) : null);
+  }
+
+  return (
+    <div className="app-shell">
+      <header className="topbar">
+        <div className="brand">
+          <div className="brand-mark">IS</div>
+          <div>
+            <h1>InternS2 手术导航控制台</h1>
+            <p>E05-Pro 仿真定位 · 人工确认模式</p>
+          </div>
+        </div>
+        <div className="topbar-actions">
+          <span className={`connection ${connected ? "online" : "offline"}`}>
+            {connected ? "实时连接" : "正在连接"}
+          </span>
+          <button
+            className="button stop"
+            disabled={!session}
+            onClick={() => session && run(() => api.action(session.session_id, "stop"))}
+          >
+            停止
+          </button>
+          <button
+            className="button estop"
+            disabled={!session}
+            onClick={() => session && run(() => api.action(session.session_id, "estop"))}
+          >
+            紧急停止
+          </button>
+        </div>
+      </header>
+
+      <main>
+        <section className={`status-banner ${statusTone}`}>
+          <div className="status-pulse" />
+          <div>
+            <span>当前状态</span>
+            <strong>{session?.status_label ?? "正在创建安全会话"}</strong>
+            {session?.message && <p className="operation-message">{session.message}</p>}
+          </div>
+          <div className="session-meta">
+            <span>仿真模式</span>
+            <code>{session?.session_id.slice(-10) ?? "—"}</code>
+          </div>
+        </section>
+
+        {(requestError || session?.error) && (
+          <section className="error-banner">
+            <strong>{requestError ?? String(session?.error?.code ?? "任务错误")}</strong>
+            <span>{String(session?.error?.message ?? "")}</span>
+          </section>
+        )}
+
+        <div className="dashboard-grid">
+          <section className="panel command-panel">
+            <div className="panel-heading">
+              <div>
+                <span className="eyebrow">01 · 指令输入</span>
+                <h2>医生任务</h2>
+              </div>
+              <span className="step-badge">文本 + 可选图像</span>
+            </div>
+            <textarea
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              disabled={isBusy}
+              aria-label="手术导航文本指令"
+            />
+            <div className="example-row">
+              <button className="text-button" onClick={() => setPrompt(DEFAULT_PROMPT)}>
+                填入点/靶点示例
+              </button>
+              <button
+                className="text-button"
+                onClick={() => setPrompt("机械臂沿基座坐标系 Z 轴正方向移动 8 毫米")}
+              >
+                填相对移动示例
+              </button>
+            </div>
+            <label className="upload-zone">
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={(event) => selectImage(event.target.files?.[0] ?? null)}
+              />
+              {imagePreview ? (
+                <img src={imagePreview} alt="待提交医学图像预览" />
+              ) : (
+                <div>
+                  <strong>添加视觉图像</strong>
+                  <span>JPEG / PNG / WebP，最大 10 MiB</span>
+                </div>
+              )}
+            </label>
+            <div className="button-row">
+              <button className="button primary" disabled={!canSubmit} onClick={submit}>
+                {session?.status === "parsing" ? "正在解析…" : "解析任务"}
+              </button>
+              <button
+                className="button confirm"
+                disabled={!session?.pending_confirmation}
+                onClick={() => session && run(() => api.action(session.session_id, "confirm"))}
+              >
+                确认并执行
+              </button>
+              <button
+                className="button secondary"
+                disabled={!session?.pending_confirmation}
+                onClick={() => session && run(() => api.action(session.session_id, "cancel"))}
+              >
+                取消
+              </button>
+              <button
+                className="button secondary"
+                disabled={session?.status !== "estop"}
+                onClick={() => session && run(() => api.action(session.session_id, "reset-estop"))}
+              >
+                复位急停
+              </button>
+            </div>
+            <div className="safety-note">
+              <strong>执行边界</strong>
+              <span>确认只会移动机械臂并请求不可执行的路径预览，当前版本不会执行穿刺。</span>
+            </div>
+          </section>
+
+          <section className="panel coordinates-panel">
+            <div className="panel-heading">
+              <div>
+                <span className="eyebrow">02 · 任务预览</span>
+                <h2>坐标与 TCP</h2>
+              </div>
+              <span className="step-badge">单位：mm</span>
+            </div>
+            <CoordinateCard title="入点" point={entry} />
+            <CoordinateCard title="靶点" point={target} />
+            <CoordinateCard title="当前针尖 TCP" point={session?.current_tcp} />
+            {command?.relative_motion && (
+              <div className="relative-card">
+                <span>相对运动</span>
+                <strong>
+                  {String(command.relative_motion.axis).toUpperCase()} 轴 · {command.relative_motion.direction === "positive" ? "+" : "−"}
+                  {command.relative_motion.distance_mm} mm
+                </strong>
+              </div>
+            )}
+            <div className="simulation-placeholder">
+              <div className="arm-glyph">
+                <span />
+                <span />
+                <span />
+              </div>
+              <strong>仿真画面将在 Step 12 接入</strong>
+              <small>本阶段已显示实时任务状态和 TCP 数据</small>
+            </div>
+          </section>
+
+          <section className="panel timeline-panel">
+            <div className="panel-heading">
+              <div>
+                <span className="eyebrow">03 · 确定性编排</span>
+                <h2>工具调用时间线</h2>
+              </div>
+              <span className="step-badge">revision {session?.revision ?? 0}</span>
+            </div>
+            <Timeline events={session?.execution_events ?? []} />
+          </section>
+
+          <section className="panel json-grid-panel">
+            <div className="panel-heading">
+              <div>
+                <span className="eyebrow">04 · 可审计数据</span>
+                <h2>InternS2 与规范化结果</h2>
+              </div>
+            </div>
+            <div className="json-grid">
+              <div>
+                <h3>InternS2 原始工具参数</h3>
+                <JsonPanel value={session?.raw_model_output} empty="等待模型解析" />
+              </div>
+              <div>
+                <h3>规范化 ParsedCommand</h3>
+                <JsonPanel value={session?.normalized_command} empty="等待结构化任务" />
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+
+      <footer>
+        <span>InternS2 Surgical Navigation · Simulation Only</span>
+        <strong>当前版本未执行穿刺</strong>
+      </footer>
+    </div>
+  );
+}

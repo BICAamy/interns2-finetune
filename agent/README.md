@@ -257,11 +257,41 @@ lmdeploy serve api_server \
 ```
 #### 2. 启动路径规划服务
 ```bash
-docker start interns2-planner-adapter
+docker run --rm -d \
+  --name interns2-planner-adapter \
+  --network surgical-nav-net \
+  -p 127.0.0.1:8002:8002 \
+  -e PLANNER_PROVIDER=mock \
+  -e PLANNER_MOCK_OUTCOME=success \
+  interns2-planner-adapter:dev
+```
+#### 3. 仿真服务
+```bash
+docker run --rm -d \ 
+--name robot-simulation-test \ 
+--network surgical-nav-net \ 
+-p 127.0.0.1:8001:8001 \ 
+interns2-robot-simulation:dev
 ```
 #### 3. 进入CLI
 ```bash
 docker exec -it xl_interns2_lmdeploy bash
+```
+
+#### 网络结构
+```bash
+                 surgical-nav-net
+                       │
+        ┌──────────────┼────────────────┐
+        │              │                │
+        ▼              ▼                ▼
+xl_interns2_lmdeploy   robot-simulation-test   interns2-planner-adapter
+        │                  :8001                   :8002
+        │
+        ├── http://robot-simulation-test:8001
+        │
+        └── http://interns2-planner-adapter:8002
+
 ```
 
 ### 容器网络

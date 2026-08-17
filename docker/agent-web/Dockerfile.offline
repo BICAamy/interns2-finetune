@@ -1,0 +1,30 @@
+# Laboratory-server build. React assets are built and committed on the
+# connected development machine; Python dependencies are reused from the
+# already validated Step 6 simulation image.
+ARG BASE_IMAGE=interns2-robot-simulation:dev
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="InternS2 surgical navigation agent-web (offline)"
+LABEL org.opencontainers.image.description="Offline FastAPI and React console built from the validated Step 6 image"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/workspace/packages/surgical_contracts:/workspace
+
+WORKDIR /workspace
+
+COPY packages/surgical_contracts /workspace/packages/surgical_contracts
+COPY agent /workspace/agent
+COPY web /workspace/web
+COPY tests /workspace/tests
+
+RUN python3 -m compileall -q /workspace/agent /workspace/web/backend \
+    && python3 -c "import fastapi, httpx, pydantic, uvicorn" \
+    && test -s /workspace/web/frontend/dist/index.html
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["python3", "-m", "web.backend.healthcheck"]
+
+CMD ["python3", "-m", "web.backend.main"]

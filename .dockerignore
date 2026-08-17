@@ -18,3 +18,4 @@ third_party/sofa_env/docs/
 third_party/sofa_env/tests/
 web/node_modules/
 web/dist/
+web/frontend/node_modules/
