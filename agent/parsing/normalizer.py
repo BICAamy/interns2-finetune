@@ -39,6 +39,36 @@ TOP_LEVEL_FIELDS = {
 IGNORED_MODEL_FIELDS = {"command_id", "schema_version"}
 POINT_FIELDS = {"x", "y", "z", "unit", "frame", "source"}
 RELATIVE_FIELDS = {"axis", "direction", "distance_mm", "frame", "distance_source"}
+ALLOWED_MISSING_FIELDS = {
+    "intent",
+    "entry_point",
+    "target_point",
+    "relative_motion",
+    "coordinate_order",
+    "entry_point.x",
+    "entry_point.y",
+    "entry_point.z",
+    "entry_point.unit",
+    "entry_point.frame",
+    "entry_point.coordinate_transform",
+    "target_point.x",
+    "target_point.y",
+    "target_point.z",
+    "target_point.unit",
+    "target_point.frame",
+    "target_point.coordinate_transform",
+    "relative_motion.axis",
+    "relative_motion.direction",
+    "relative_motion.frame",
+    "entry_point_3d",
+}
+MISSING_FIELD_ALIASES = {
+    "coordinate_labels": "coordinate_order",
+    "entry_point.coordinate_labels": "coordinate_order",
+    "entry_point.coordinate_order": "coordinate_order",
+    "target_point.coordinate_labels": "coordinate_order",
+    "target_point.coordinate_order": "coordinate_order",
+}
 MAX_EMBEDDED_JSON_CHARS = 32_768
 MAX_EMBEDDED_JSON_DEPTH = 2
 
@@ -93,12 +123,6 @@ class CommandNormalizer:
             raise self._invalid("Tool arguments must be a JSON object")
 
         raw = deepcopy(arguments)
-        unknown = set(raw) - TOP_LEVEL_FIELDS - IGNORED_MODEL_FIELDS
-        if unknown:
-            raise self._invalid(
-                "Tool arguments contain unsupported fields",
-                details={"fields": sorted(unknown)},
-            )
         for field in IGNORED_MODEL_FIELDS:
             raw.pop(field, None)
 
@@ -106,6 +130,14 @@ class CommandNormalizer:
             intent = CommandIntent(raw.get("intent"))
         except (TypeError, ValueError) as error:
             raise self._invalid("Tool arguments contain an invalid intent") from error
+
+        self._repair_flattened_relative_motion(raw, intent)
+        unknown = set(raw) - TOP_LEVEL_FIELDS
+        if unknown:
+            raise self._invalid(
+                "Tool arguments contain unsupported fields",
+                details={"fields": sorted(unknown)},
+            )
 
         missing = self._missing_fields(raw.get("missing_fields", []))
         normalized: dict[str, Any] = {
@@ -341,6 +373,59 @@ class CommandNormalizer:
             [],
         )
 
+    @classmethod
+    def _repair_flattened_relative_motion(
+        cls,
+        raw: dict[str, Any],
+        intent: CommandIntent,
+    ) -> None:
+        """Repair one observed InternS2/LMDeploy XML nesting deviation.
+
+        An explicit relative distance can be emitted with ``axis`` inside
+        ``relative_motion`` but the remaining relative fields at tool-argument
+        top level. Only the exact RelativeMotion field set is eligible, only
+        for a move_relative intent, and conflicts are rejected.
+        """
+
+        flattened_fields = set(raw) & RELATIVE_FIELDS
+        if not flattened_fields:
+            return
+        if intent != CommandIntent.MOVE_RELATIVE:
+            raise cls._invalid(
+                "Tool arguments contain unsupported fields",
+                details={"fields": sorted(flattened_fields)},
+            )
+
+        relative = cls._embedded_json_parameter(
+            raw.get("relative_motion"),
+            "relative_motion",
+        )
+        if relative is None:
+            relative = {}
+        if not isinstance(relative, dict):
+            raise cls._invalid(
+                "relative_motion must be an object or null",
+                details={
+                    "field": "relative_motion",
+                    "received_type": type(relative).__name__,
+                },
+            )
+
+        conflicts = [
+            field
+            for field in flattened_fields
+            if field in relative and relative[field] != raw[field]
+        ]
+        if conflicts:
+            raise cls._invalid(
+                "Flattened relative motion conflicts with relative_motion",
+                details={"fields": sorted(conflicts)},
+            )
+
+        for field in flattened_fields:
+            relative[field] = raw.pop(field)
+        raw["relative_motion"] = relative
+
     @staticmethod
     def _append_intent_requirements(
         intent: CommandIntent,
@@ -379,7 +464,12 @@ class CommandNormalizer:
                 raise cls._invalid(
                     "missing_fields must contain non-empty strings"
                 )
-            stripped = field.strip()
+            stripped = MISSING_FIELD_ALIASES.get(field.strip(), field.strip())
+            if stripped not in ALLOWED_MISSING_FIELDS:
+                raise cls._invalid(
+                    "missing_fields contains an unsupported field",
+                    details={"field": stripped},
+                )
             if stripped not in result:
                 result.append(stripped)
         return result

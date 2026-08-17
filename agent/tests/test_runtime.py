@@ -181,6 +181,50 @@ class InternS2AgentTests(unittest.TestCase):
         self.assertFalse(command.needs_confirmation)
         self.assertEqual(command.relative_motion.distance_mm, 5.0)
 
+    def test_flattened_explicit_relative_fields_are_repaired(self):
+        arguments = base_arguments(
+            "move_relative",
+            relative_motion=json.dumps({"axis": "z"}),
+            direction="positive",
+            distance_mm=8,
+            frame="robot_base",
+            distance_source="user_provided",
+        )
+        agent, _client = make_agent(arguments)
+
+        command = agent.parse_command(
+            "机械臂沿基座坐标系Z轴正方向移动8毫米"
+        ).command
+
+        self.assertEqual(command.intent, CommandIntent.MOVE_RELATIVE)
+        self.assertEqual(command.relative_motion.translation_mm(), (0.0, 0.0, 8.0))
+        self.assertEqual(
+            command.relative_motion.distance_source,
+            DistanceSource.USER_PROVIDED,
+        )
+
+    def test_flattened_relative_fields_are_rejected_for_other_intents(self):
+        arguments = base_arguments("stop", direction="positive")
+        agent, _client = make_agent(arguments)
+
+        with self.assertRaises(CommandParsingError) as raised:
+            agent.parse_command("停止")
+
+        self.assertEqual(raised.exception.details["fields"], ["direction"])
+
+    def test_conflicting_flattened_relative_fields_are_rejected(self):
+        arguments = base_arguments(
+            "move_relative",
+            relative_motion={"axis": "z", "direction": "negative"},
+            direction="positive",
+        )
+        agent, _client = make_agent(arguments)
+
+        with self.assertRaises(CommandParsingError) as raised:
+            agent.parse_command("向上移动")
+
+        self.assertIn("conflicts", str(raised.exception))
+
     def test_vague_up_motion_uses_runtime_default(self):
         arguments = base_arguments(
             "move_relative",
@@ -309,6 +353,21 @@ class InternS2AgentTests(unittest.TestCase):
 
         self.assertEqual(result.command.intent, CommandIntent.CLARIFY)
         self.assertEqual(result.clarification, "请确认三个数值是否依次为 X、Y、Z。")
+
+    def test_coordinate_label_alias_is_canonicalized_to_coordinate_order(self):
+        arguments = base_arguments(
+            "clarify",
+            entry_point={"x": 20, "y": 35, "z": 80},
+            missing_fields=["entry_point.coordinate_labels"],
+            needs_confirmation=True,
+            summary="请确认三个数值分别对应哪个坐标轴。",
+        )
+        agent, _client = make_agent(arguments)
+
+        command = agent.parse_command("入点的三个数是20、35、80").command
+
+        self.assertEqual(command.intent, CommandIntent.CLARIFY)
+        self.assertEqual(command.missing_fields, ["coordinate_order"])
 
     def test_optional_image_is_encoded_as_a_data_url(self):
         arguments = base_arguments(

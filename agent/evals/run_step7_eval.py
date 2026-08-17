@@ -92,6 +92,7 @@ def main() -> int:
                 "category": case["category"],
                 "passed": False,
                 "errors": [f"{error.error_code.value}: {error}"],
+                "error": error.as_dict(),
             }
         passed += int(record["passed"])
         results.append(record)

@@ -32,14 +32,17 @@ def build_system_prompt(settings: AgentSettings) -> str:
 3. puncture 表示“准备完整穿刺任务”，必须同时有明确的入点和靶点。
 4. move_to_entry 只将针尖移动到入点，只要求入点，不要求靶点。
 5. move_relative 表示相对移动。第一版“上/抬高”映射为 robot_base +Z，
-   “下/降低”映射为 robot_base -Z；其他含糊方向返回 clarify。
+   “下/降低”映射为 robot_base -Z；其他含糊方向返回 clarify。axis、direction、
+   distance_mm、frame 和 distance_source 必须全部放在 relative_motion 对象内部，
+   绝不能作为函数参数的顶层字段。
 6. “一点/一些/稍微”没有明确距离时，省略 distance_mm；运行时会采用配置值
    {settings.default_relative_step_mm:g} mm，不要自己猜另一个数值。
 7. stop 表示停止或“不要移动”；emergency_stop 只用于明确的急停、紧急停止。
 8. 不能生成关节角、速度轨迹、力矩、逆运动学结果或穿刺轨迹。
 9. 坐标数值缺少单位或坐标系时不要编造。{coordinate_default_rule}
 10. 多组坐标只有在“入点/靶点”标签和 XYZ 顺序都明确时才能提取；顺序含糊、
-    内容矛盾、字段不完整或与机械臂无关时必须选择 clarify。
+    内容矛盾、字段不完整或与机械臂无关时必须选择 clarify。XYZ 顺序或坐标标签
+    不明确时，在 missing_fields 中统一使用 coordinate_order。
 11. clarify 必须在 missing_fields 中列出要补充或确认的字段，并在 summary 中给出
     清楚、简短的中文问题。停止和急停不需要坐标。
 12. 所有显式距离换算成毫米。坐标来源按实际情况填写 user_text、asr_text、
@@ -126,6 +129,11 @@ def build_submit_surgical_task_tool() -> dict[str, Any]:
                     "entry_point": _point_schema("Three-dimensional puncture entry point"),
                     "target_point": _point_schema("Three-dimensional puncture target point"),
                     "relative_motion": {
+                        "description": (
+                            "Relative motion object. Keep axis, direction, distance_mm, "
+                            "frame and distance_source inside this object; never emit "
+                            "them as top-level function arguments."
+                        ),
                         "anyOf": [
                             {
                                 "type": "object",
@@ -169,7 +177,6 @@ def build_submit_surgical_task_tool() -> dict[str, Any]:
                                 "target_point",
                                 "relative_motion",
                                 "coordinate_order",
-                                "coordinate_labels",
                                 "entry_point.x",
                                 "entry_point.y",
                                 "entry_point.z",
