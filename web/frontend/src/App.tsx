@@ -1,6 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type {
+  PointerEvent as ReactPointerEvent,
+  WheelEvent as ReactWheelEvent,
+} from "react";
 import { api, fileToDataUrl, openSessionSocket } from "./api";
-import type { Point3D, SessionSnapshot, SimulationTelemetry } from "./types";
+import type {
+  CameraControlPayload,
+  CameraPreset,
+  Point3D,
+  SessionSnapshot,
+  SimulationCameraState,
+  SimulationTelemetry,
+} from "./types";
 
 const SESSION_KEY = "interns2-surgical-session";
 const DEFAULT_PROMPT =
@@ -15,6 +26,14 @@ const busyStatuses = new Set([
   "planning",
   "stopping",
 ]);
+
+const cameraPresets: Array<{ id: CameraPreset; label: string }> = [
+  { id: "front", label: "正视" },
+  { id: "left", label: "左视" },
+  { id: "right", label: "右视" },
+  { id: "top", label: "俯视" },
+  { id: "isometric", label: "等轴测" },
+];
 
 function JsonPanel({ value, empty }: { value: unknown; empty: string }) {
   return (
@@ -128,7 +147,18 @@ export default function App() {
   const [videoConnected, setVideoConnected] = useState(false);
   const [videoFailed, setVideoFailed] = useState(false);
   const [videoAttempt, setVideoAttempt] = useState(0);
+  const [camera, setCamera] = useState<SimulationCameraState | null>(null);
+  const [cameraDragging, setCameraDragging] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
+  const cameraDrag = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    mode: "orbit" | "pan";
+  } | null>(null);
+  const cameraRequestInFlight = useRef(false);
+  const lastCameraSendAt = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -185,6 +215,24 @@ export default function App() {
   }, [session?.session_id]);
 
   useEffect(() => {
+    if (!session?.session_id) return;
+    let cancelled = false;
+    api.camera(session.session_id)
+      .then((state) => {
+        if (!cancelled) {
+          setCamera(state);
+          setCameraError(null);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) setCameraError(String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.session_id]);
+
+  useEffect(() => {
     if (!videoFailed) return;
     const timer = window.setTimeout(() => {
       setVideoAttempt((value) => value + 1);
@@ -216,6 +264,78 @@ export default function App() {
     } catch (error) {
       setRequestError(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  async function updateCamera(payload: CameraControlPayload) {
+    if (!session || cameraRequestInFlight.current) return;
+    cameraRequestInFlight.current = true;
+    try {
+      setCamera(await api.controlCamera(session.session_id, payload));
+      setCameraError(null);
+    } catch (error) {
+      setCameraError(error instanceof Error ? error.message : String(error));
+    } finally {
+      cameraRequestInFlight.current = false;
+    }
+  }
+
+  function beginCameraDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 && event.button !== 2) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    cameraDrag.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      mode: event.button === 2 ? "pan" : "orbit",
+    };
+    lastCameraSendAt.current = 0;
+    setCameraDragging(true);
+  }
+
+  function moveCamera(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = cameraDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const now = performance.now();
+    if (cameraRequestInFlight.current || now - lastCameraSendAt.current < 50) return;
+    const deltaX = event.clientX - drag.x;
+    const deltaY = event.clientY - drag.y;
+    if (Math.abs(deltaX) + Math.abs(deltaY) < 1) return;
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+    lastCameraSendAt.current = now;
+    if (drag.mode === "orbit") {
+      void updateCamera({
+        action: "orbit",
+        yaw_delta_deg: Math.max(-30, Math.min(30, deltaX * 0.3)),
+        pitch_delta_deg: Math.max(-30, Math.min(30, -deltaY * 0.3)),
+      });
+    } else {
+      void updateCamera({
+        action: "pan",
+        pan_right_delta_m: Math.max(-0.2, Math.min(0.2, -deltaX * 0.0015)),
+        pan_up_delta_m: Math.max(-0.2, Math.min(0.2, deltaY * 0.0015)),
+      });
+    }
+  }
+
+  function endCameraDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (cameraDrag.current?.pointerId !== event.pointerId) return;
+    cameraDrag.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setCameraDragging(false);
+  }
+
+  function zoomCamera(event: ReactWheelEvent<HTMLDivElement>) {
+    event.preventDefault();
+    if (cameraRequestInFlight.current) return;
+    void updateCamera({
+      action: "zoom",
+      distance_delta_m: event.deltaY > 0 ? 0.14 : -0.14,
+    });
   }
 
   async function submit() {
@@ -407,12 +527,23 @@ export default function App() {
               </span>
             </div>
             <div className="simulation-layout">
-              <div className="video-stage">
+              <div
+                className={`video-stage ${cameraDragging ? "dragging" : ""}`}
+                onPointerDown={beginCameraDrag}
+                onPointerMove={moveCamera}
+                onPointerUp={endCameraDrag}
+                onPointerCancel={endCameraDrag}
+                onWheel={zoomCamera}
+                onDoubleClick={() => void updateCamera({ action: "preset", preset: "front" })}
+                onContextMenu={(event) => event.preventDefault()}
+                aria-label="可交互的远程 SOFA 相机画面"
+              >
                 {videoUrl && (
                   <img
                     key={videoUrl}
                     src={videoUrl}
                     alt="远程 SOFA E05-Pro 仿真画面"
+                    draggable={false}
                     onLoad={() => {
                       setVideoConnected(true);
                       setVideoFailed(false);
@@ -430,12 +561,36 @@ export default function App() {
                 <div className="video-overlay bottom-right">
                   frame {telemetry?.frame_sequence ?? 0}
                 </div>
+                <div className="camera-hint">
+                  左键旋转 · 右键平移 · 滚轮缩放 · 双击复位
+                </div>
+                <div className="camera-state">
+                  {camera
+                    ? `方位 ${camera.yaw_deg.toFixed(0)}° · 俯仰 ${camera.pitch_deg.toFixed(0)}° · ${camera.distance_m.toFixed(2)} m`
+                    : "正在读取相机状态"}
+                </div>
+                <div
+                  className="camera-presets"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onDoubleClick={(event) => event.stopPropagation()}
+                >
+                  {cameraPresets.map((preset) => (
+                    <button
+                      key={preset.id}
+                      className={camera?.preset === preset.id ? "active" : ""}
+                      onClick={() => void updateCamera({ action: "preset", preset: preset.id })}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
                 {videoFailed && (
                   <div className="video-fallback">
                     <strong>仿真视频暂时不可用</strong>
                     <span>系统将在 2 秒后自动重连，机械臂控制线程不受影响。</span>
                   </div>
                 )}
+                {cameraError && <div className="camera-error">{cameraError}</div>}
               </div>
 
               <aside className="telemetry-board">

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass, field
 import json
 import os
+from queue import Empty, Queue
 from threading import Condition, Event, Lock, Thread
 import time
 from typing import Any, Protocol
@@ -25,6 +27,8 @@ from surgical_contracts import (
     RobotCommandRecord,
     RobotState,
     SimulationEvent,
+    SimulationCameraControlRequest,
+    SimulationCameraState,
     SimulationHealth,
     SimulationTelemetry,
     ToolStatus,
@@ -70,7 +74,21 @@ class SimulationEnvironment(Protocol):
     def get_state(self) -> RobotState: ...
     def stop(self) -> RobotState: ...
     def emergency_stop(self) -> RobotState: ...
+    def get_camera_state(self) -> SimulationCameraState: ...
+    def control_camera(
+        self,
+        request: SimulationCameraControlRequest,
+    ) -> SimulationCameraState: ...
+    def refresh_observation(self) -> Any: ...
     def close(self) -> None: ...
+
+
+@dataclass
+class PendingCameraControl:
+    request: SimulationCameraControlRequest
+    completed: Event = field(default_factory=Event)
+    result: SimulationCameraState | None = None
+    error: Exception | None = None
 
 
 def create_sofa_environment() -> SimulationEnvironment:
@@ -102,6 +120,7 @@ class SimulationWorker:
             else pause_on_no_clients
         )
         self._queue = SimulationCommandQueue()
+        self._camera_queue: Queue[PendingCameraControl] = Queue()
         self._lock = Lock()
         self._event_condition = Condition(self._lock)
         self._frame_condition = Condition(self._lock)
@@ -114,6 +133,7 @@ class SimulationWorker:
         self._events: deque[SimulationEvent] = deque(maxlen=event_history_limit)
         self._event_sequence = 0
         self._telemetry: SimulationTelemetry | None = None
+        self._camera_state: SimulationCameraState | None = None
         self._latest_frame: Any | None = None
         self._frame_sequence = 0
         self._active_command: QueuedCommand | None = None
@@ -156,6 +176,7 @@ class SimulationWorker:
             observation = environment.reset(seed=0)
             with self._lock:
                 self._environment = environment
+                self._camera_state = environment.get_camera_state()
                 self._capture_locked(observation)
                 self._last_heartbeat_ms = _now_ms()
                 self._emit_locked("worker_ready", state=self._telemetry.state)
@@ -180,6 +201,14 @@ class SimulationWorker:
                 with self._lock:
                     active = self._active_command
                     paused = self._pause_on_no_clients and self._client_count == 0
+
+                camera_control = self._get_camera_nowait()
+                if camera_control is not None:
+                    self._execute_camera(
+                        environment,
+                        camera_control,
+                        render_immediately=active is None or paused,
+                    )
 
                 if active is None:
                     command = self._queue.get_normal_nowait()
@@ -210,6 +239,42 @@ class SimulationWorker:
                 self._environment = None
                 self._event_condition.notify_all()
                 self._frame_condition.notify_all()
+            self._fail_pending_camera_controls()
+
+    def _get_camera_nowait(self) -> PendingCameraControl | None:
+        try:
+            return self._camera_queue.get_nowait()
+        except Empty:
+            return None
+
+    def _execute_camera(
+        self,
+        environment: SimulationEnvironment,
+        pending: PendingCameraControl,
+        *,
+        render_immediately: bool,
+    ) -> None:
+        try:
+            result = environment.control_camera(pending.request)
+            if render_immediately:
+                observation = environment.refresh_observation()
+                with self._lock:
+                    self._capture_locked(observation)
+            with self._lock:
+                self._camera_state = result
+            pending.result = result.model_copy(deep=True)
+        except Exception as error:
+            pending.error = error
+        finally:
+            pending.completed.set()
+
+    def _fail_pending_camera_controls(self) -> None:
+        while True:
+            pending = self._get_camera_nowait()
+            if pending is None:
+                return
+            pending.error = WorkerUnavailableError("simulation worker stopped")
+            pending.completed.set()
 
     def _execute_normal(
         self,
@@ -524,6 +589,33 @@ class SimulationWorker:
                 raise WorkerUnavailableError("simulation telemetry is not ready")
             return self._telemetry.model_copy(deep=True)
 
+    def get_camera_state(self) -> SimulationCameraState:
+        with self._lock:
+            if self._camera_state is None:
+                raise WorkerUnavailableError("simulation camera is not ready")
+            return self._camera_state.model_copy(deep=True)
+
+    def control_camera(
+        self,
+        request: SimulationCameraControlRequest,
+        *,
+        timeout_s: float = 3.0,
+    ) -> SimulationCameraState:
+        with self._lock:
+            if self._initialization_error is not None:
+                raise WorkerUnavailableError(self._initialization_error)
+            if self._thread is None or not self._thread.is_alive() or not self._ready_event.is_set():
+                raise WorkerUnavailableError("simulation worker is not ready")
+        pending = PendingCameraControl(request=request)
+        self._camera_queue.put(pending)
+        if not pending.completed.wait(timeout_s):
+            raise WorkerUnavailableError("simulation camera update timed out")
+        if pending.error is not None:
+            raise pending.error
+        if pending.result is None:  # pragma: no cover - defensive boundary
+            raise WorkerUnavailableError("simulation camera returned no state")
+        return pending.result.model_copy(deep=True)
+
     def health(self) -> SimulationHealth:
         with self._lock:
             alive = self._thread is not None and self._thread.is_alive()
@@ -540,7 +632,7 @@ class SimulationWorker:
                 worker_alive=alive,
                 initialized=initialized,
                 ready=ready,
-                queue_depth=self._queue.depth,
+                queue_depth=self._queue.depth + self._camera_queue.qsize(),
                 active_command_id=(
                     self._active_command.command_id
                     if self._active_command is not None

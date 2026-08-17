@@ -13,8 +13,14 @@ from scipy.spatial.transform import Rotation
 
 from sofa_env.base import RenderFramework, RenderMode, SofaEnv
 
-from surgical_contracts import Point3D, RobotState
+from surgical_contracts import (
+    Point3D,
+    RobotState,
+    SimulationCameraControlRequest,
+    SimulationCameraState,
+)
 
+from .camera_controller import OrbitCameraController
 from .config import DEFAULT_CONFIG_PATH, EntryPointEnvConfig
 from .controller import ContinuousTrajectoryController, SimulationStep
 from .kinematics import KinematicSnapshot
@@ -49,6 +55,7 @@ class EntryPointReachEnv(SofaEnv):
     ) -> None:
         self.config = config or EntryPointEnvConfig.from_yaml(config_path)
         self.controller = ContinuousTrajectoryController(self.config)
+        self.camera_controller = OrbitCameraController()
         self._trajectory_renderer = TrajectoryRenderer()
         self._last_step = self.controller.snapshot()
         resolved_model_dir = Path(
@@ -114,11 +121,13 @@ class EntryPointReachEnv(SofaEnv):
 
     def _init_sim(self) -> None:
         super()._init_sim()
+        self._camera = self.scene_creation_result["camera"]
         interactive = self.scene_creation_result["interactive_objects"]
         self._robot_links = interactive["links"]
         self._needle = interactive["needle"]
         self._tcp_marker = interactive["tcp_marker"]
         self._visual_entry = interactive["visual_target"]
+        self._apply_camera_pose()
 
     def reset(
         self,
@@ -128,6 +137,7 @@ class EntryPointReachEnv(SofaEnv):
         numeric_seed = None if isinstance(seed, np.random.SeedSequence) else seed
         self.controller.reset(seed=numeric_seed)
         super().reset(seed=seed, options=options)
+        self._apply_camera_pose()
         self._apply_controller_pose()
         self._sync_entry_marker()
         self._last_step = self.controller.snapshot()
@@ -193,6 +203,29 @@ class EntryPointReachEnv(SofaEnv):
 
     def emergency_stop(self) -> RobotState:
         return self.controller.emergency_stop()
+
+    def get_camera_state(self) -> SimulationCameraState:
+        return self.camera_controller.state()
+
+    def control_camera(
+        self,
+        request: SimulationCameraControlRequest,
+    ) -> SimulationCameraState:
+        state = self.camera_controller.apply(request)
+        self._apply_camera_pose()
+        return state
+
+    def refresh_observation(self) -> EntryPointObservation:
+        """Render the changed view without advancing robot simulation time."""
+
+        return self._observation(self._maybe_update_rgb_buffer())
+
+    def _apply_camera_pose(self) -> None:
+        if not self._initialized:
+            return
+        state = self.camera_controller.state()
+        self._camera.set_pose(self.camera_controller.pose)
+        self._camera.set_look_at(np.asarray(state.target_m, dtype=np.float64))
 
     def render(self, mode: str | None = None) -> np.ndarray:
         return self._render_overlay(super().render(mode=mode))

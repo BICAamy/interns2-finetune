@@ -10,6 +10,8 @@
 - 原始 InternS2 工具参数、规范化命令、坐标、TCP 和时间线；
 - 取消待确认任务、停止、急停和复位；
 - 同源代理 SOFA MJPEG，浏览器不接触仿真服务地址；
+- 默认 Z-up 正视相机，支持左键旋转、右键平移、滚轮缩放和双击回正；
+- 提供正视、左视、右视、俯视、等轴测五个确定性预设视角；
 - 每 100 ms 接收 TCP、入点、误差、进度、关节角、FPS 和当前工具；
 - 轨迹在服务端下采样到最多 160 点，网页显示 X–Z 轨迹；
 - 只移动到入点或执行有限相对移动；
@@ -29,6 +31,8 @@ POST /api/sessions/{session_id}/stop
 POST /api/sessions/{session_id}/estop
 POST /api/sessions/{session_id}/reset-estop
 GET  /api/sessions/{session_id}/simulation/telemetry
+GET  /api/sessions/{session_id}/simulation/camera
+PUT  /api/sessions/{session_id}/simulation/camera
 GET  /api/sessions/{session_id}/simulation/stream.mjpeg
 WS   /ws/sessions/{session_id}
 ```
@@ -50,6 +54,11 @@ docker build \
 
 前端 `dist` 已在联网开发机生成并纳入 Git。服务器不需要 Node/npm，也不会下载
 Python 包，而是复用已经验收的 Step 6 镜像：
+
+本版本的交互相机同时修改了 `robot-simulation`，所以必须先按照
+`simulation/README.md` 使用 `Dockerfile.offline` 重建
+`interns2-robot-simulation:dev`，再构建本网页镜像；只重建网页不会改变 SOFA
+默认视角。
 
 ```bash
 cd ~/interns2-finetune
@@ -120,7 +129,7 @@ curl -sS http://127.0.0.1:8000/health
 docker logs --tail 100 interns2-agent-web
 ```
 
-先执行只读视频和遥测检查：
+先执行视频、遥测、默认正视相机和五个预设视角检查：
 
 ```bash
 docker exec interns2-agent-web \
@@ -170,11 +179,14 @@ docker run --rm \
 
 API 测试覆盖人工确认、刷新不重放、取消、相对运动、入点定位、Mock planner、
 WebSocket、临时图像清理、停止、急停、复位、禁止 planner 直通、遥测下采样、
-MJPEG 代理及浏览器断开后的上游流清理。
+MJPEG 代理、Z-up 轨道相机、五个预设视角及浏览器断开后的上游流清理。
 
 ## Step 12 数据与断连语义
 
 - MJPEG 由 `agent-web` 流式转发，不把整帧缓存在会话 JSON 中；
+- 相机请求是有边界的观察操作，经 `agent-web` 代理并在 SOFA worker 线程串行
+  执行；它不进入 InternS2 工具编排，也不能改变机械臂状态；
+- 相机为仿真实例共享视角，当前单医生演示下网页拖动会更新服务器 MJPEG 画面；
 - 页面 WebSocket 在仿真序列变化时推送遥测，空闲和错误时最多每秒一次；
 - 页面只接收最多 160 个下采样轨迹点，不高频传输完整历史；
 - 浏览器关闭 MJPEG 后，`agent-web` 会关闭上游响应，仿真服务随即注销客户端；

@@ -8,7 +8,11 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from simulation.entry_point_env import ContinuousTrajectoryController, EntryPointEnvConfig
+from simulation.entry_point_env import (
+    ContinuousTrajectoryController,
+    EntryPointEnvConfig,
+    OrbitCameraController,
+)
 from simulation.server.api import create_app
 from simulation.server.simulation_worker import SimulationWorker
 from simulation.server.video_stream import encode_jpeg, mjpeg_chunk
@@ -37,6 +41,7 @@ class ControllerEnvironment:
     def __init__(self) -> None:
         self.config = CONFIG
         self.controller = ContinuousTrajectoryController(CONFIG)
+        self.camera_controller = OrbitCameraController()
         self.owner_thread_ids: set[int] = set()
         self.closed = False
         self._frame = np.zeros(CONFIG.image_shape + (3,), dtype=np.uint8)
@@ -77,6 +82,22 @@ class ControllerEnvironment:
     def emergency_stop(self):
         self._owned()
         return self.controller.emergency_stop()
+
+    def get_camera_state(self):
+        self._owned()
+        return self.camera_controller.state()
+
+    def control_camera(self, request):
+        self._owned()
+        return self.camera_controller.apply(request)
+
+    def refresh_observation(self):
+        self._owned()
+        return FakeObservation(
+            state=self.controller.get_state(),
+            joint_positions_deg=self.controller.joint_positions_deg,
+            rgb=self._frame.copy(),
+        )
 
     def close(self):
         self._owned()
@@ -130,6 +151,43 @@ def test_health_state_and_single_environment_owner(service):
     assert state.json()["state"]["mode"] == "simulation"
     assert state.json()["state"]["tcp"] == "needle_tip"
     assert len(state.json()["joint_positions_deg"]) == 6
+    assert len(environment.owner_thread_ids) == 1
+
+
+def test_camera_defaults_upright_and_view_controls_render_on_worker_thread(service):
+    client, _worker, environment = service
+    before = client.get("/v1/state").json()["frame_sequence"]
+    initial = client.get("/v1/camera")
+    assert initial.status_code == 200
+    assert initial.json()["preset"] == "front"
+    assert initial.json()["position_m"] == pytest.approx([0.35, -1.65, 0.42])
+
+    orbit = client.put(
+        "/v1/camera",
+        json={
+            "action": "orbit",
+            "yaw_delta_deg": 12.0,
+            "pitch_delta_deg": 8.0,
+        },
+    )
+    assert orbit.status_code == 200
+    assert orbit.json()["preset"] == "custom"
+    assert orbit.json()["yaw_deg"] == 12.0
+    assert client.get("/v1/state").json()["frame_sequence"] > before
+
+    for preset in ("front", "left", "right", "top", "isometric"):
+        response = client.put(
+            "/v1/camera",
+            json={"action": "preset", "preset": preset},
+        )
+        assert response.status_code == 200
+        assert response.json()["preset"] == preset
+
+    invalid = client.put(
+        "/v1/camera",
+        json={"action": "orbit", "yaw_delta_deg": 1000.0},
+    )
+    assert invalid.status_code == 422
     assert len(environment.owner_thread_ids) == 1
 
 

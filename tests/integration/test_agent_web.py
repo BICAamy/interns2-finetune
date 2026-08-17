@@ -18,6 +18,8 @@ from surgical_contracts import (
     ParsedCommand,
     Point3D,
     RelativeMotion,
+    SimulationCameraControlRequest,
+    SimulationCameraState,
     SimulationTelemetry,
 )
 from web.backend.main import create_app
@@ -118,6 +120,16 @@ class StubSimulationObserver:
         self.frame_sequence = 0
         self.trajectory: list[tuple[float, float, float]] | None = None
         self.last_stream: StubMJPEGStream | None = None
+        self.camera_state = SimulationCameraState(
+            preset="front",
+            yaw_deg=0.0,
+            pitch_deg=0.0,
+            distance_m=1.65,
+            target_m=(0.35, 0.0, 0.42),
+            position_m=(0.35, -1.65, 0.42),
+            updated_at_ms=int(time.time() * 1000),
+        )
+        self.camera_calls: list[SimulationCameraControlRequest] = []
         self.closed = False
 
     def get_telemetry(self) -> SimulationTelemetry:
@@ -140,6 +152,27 @@ class StubSimulationObserver:
     async def open_mjpeg(self) -> StubMJPEGStream:
         self.last_stream = StubMJPEGStream()
         return self.last_stream
+
+    def get_camera_state(self) -> SimulationCameraState:
+        return self.camera_state.model_copy(deep=True)
+
+    def control_camera(
+        self,
+        request: SimulationCameraControlRequest,
+    ) -> SimulationCameraState:
+        self.camera_calls.append(request)
+        updates: dict[str, object] = {
+            "preset": request.preset or "custom",
+            "updated_at_ms": int(time.time() * 1000),
+        }
+        if request.yaw_delta_deg is not None:
+            updates["yaw_deg"] = self.camera_state.yaw_deg + request.yaw_delta_deg
+        if request.pitch_delta_deg is not None:
+            updates["pitch_deg"] = (
+                self.camera_state.pitch_deg + request.pitch_delta_deg
+            )
+        self.camera_state = self.camera_state.model_copy(update=updates)
+        return self.camera_state.model_copy(deep=True)
 
     def close(self) -> None:
         self.closed = True
@@ -392,3 +425,42 @@ def test_mjpeg_is_proxied_and_upstream_is_closed_after_browser_disconnect():
             "/api/sessions/unknown/simulation/stream.mjpeg"
         )
         assert missing.status_code == 404
+
+
+def test_camera_state_and_bounded_view_controls_are_proxied_by_session():
+    client, _parser, _robot, _planner, observer = make_client(relative_command())
+    with client:
+        session_id = create_session(client)["session_id"]
+        initial = client.get(
+            f"/api/sessions/{session_id}/simulation/camera"
+        )
+        assert initial.status_code == 200
+        assert initial.json()["preset"] == "front"
+
+        orbit = client.put(
+            f"/api/sessions/{session_id}/simulation/camera",
+            json={
+                "action": "orbit",
+                "yaw_delta_deg": 9.0,
+                "pitch_delta_deg": -3.0,
+            },
+        )
+        assert orbit.status_code == 200
+        assert orbit.json()["preset"] == "custom"
+        assert orbit.json()["yaw_deg"] == 9.0
+        assert orbit.json()["pitch_deg"] == -3.0
+        assert len(observer.camera_calls) == 1
+
+        invalid = client.put(
+            f"/api/sessions/{session_id}/simulation/camera",
+            json={"action": "zoom", "distance_delta_m": 99.0},
+        )
+        assert invalid.status_code == 422
+        assert len(observer.camera_calls) == 1
+
+        missing = client.put(
+            "/api/sessions/unknown/simulation/camera",
+            json={"action": "preset", "preset": "front"},
+        )
+        assert missing.status_code == 404
+        assert len(observer.camera_calls) == 1

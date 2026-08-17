@@ -31,6 +31,8 @@ from .robot import (
     ToolStatus,
 )
 from .simulation import (
+    CameraControlAction,
+    CameraPreset,
     CommandExecutionStatus,
     ResetSimulationRequest,
     RobotActionRequest,
@@ -40,6 +42,8 @@ from .simulation import (
     SimulationEvent,
     SimulationHealth,
     SimulationHeartbeat,
+    SimulationCameraControlRequest,
+    SimulationCameraState,
     SimulationTelemetry,
 )
 
@@ -48,6 +52,8 @@ __all__ = [
     "SchemaVersion",
     "ContractModel",
     "Axis",
+    "CameraControlAction",
+    "CameraPreset",
     "CommandIntent",
     "CommandExecutionStatus",
     "CoordinateFrame",
@@ -80,6 +86,8 @@ __all__ = [
     "SimulationEvent",
     "SimulationHealth",
     "SimulationHeartbeat",
+    "SimulationCameraControlRequest",
+    "SimulationCameraState",
     "SimulationTelemetry",
     "ToolEvent",
     "ToolName",

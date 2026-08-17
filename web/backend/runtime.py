@@ -12,7 +12,14 @@ import time
 from typing import Any, Protocol
 from uuid import uuid4
 
-from surgical_contracts import CommandIntent, ParsedCommand, Point3D, ToolEvent
+from surgical_contracts import (
+    CommandIntent,
+    ParsedCommand,
+    Point3D,
+    SimulationCameraControlRequest,
+    SimulationCameraState,
+    ToolEvent,
+)
 
 from agent.config import AgentSettings
 from agent.core import (
@@ -246,6 +253,18 @@ class WebRuntime:
     async def open_simulation_video(self, session_id: str) -> MJPEGStream:
         self.store.snapshot(session_id)
         return await self.simulation_observer.open_mjpeg()
+
+    def get_simulation_camera(self, session_id: str) -> SimulationCameraState:
+        self.store.snapshot(session_id)
+        return self.simulation_observer.get_camera_state()
+
+    def control_simulation_camera(
+        self,
+        session_id: str,
+        request: SimulationCameraControlRequest,
+    ) -> SimulationCameraState:
+        self.store.snapshot(session_id)
+        return self.simulation_observer.control_camera(request)
 
     def health(self) -> HealthResponse:
         return HealthResponse(

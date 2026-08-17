@@ -334,6 +334,8 @@ docker run --rm \
 ```text
 GET  /health
 GET  /v1/state
+GET  /v1/camera
+PUT  /v1/camera
 POST /v1/reset
 POST /v1/commands/move-to-entry
 POST /v1/commands/move-relative
@@ -347,6 +349,10 @@ WS   /v1/events
 所有 JSON 请求、响应和事件都使用 `surgical_contracts` 的 `schema_version=1.0`
 模型。运动 POST 返回 HTTP 202 和命令记录，客户端通过命令查询或 WebSocket
 观察 `queued → running → succeeded/failed/rejected/cancelled`。
+
+相机初始为 Z-up 正视角。`PUT /v1/camera` 仅接受有边界的 `orbit`、`zoom`、
+`pan` 和五个 `preset` 观察操作，并与所有 SOFA/OpenGL 调用一样只在 worker
+线程执行；它不会提交机械臂命令或改变机器人状态。
 
 ### 无 SOFA API/并发测试
 
@@ -417,7 +423,8 @@ docker stop robot-simulation-test
 
 ## Step 12 网页接入
 
-最终浏览器不直接访问本服务。`agent-web` 代理 `/v1/stream.mjpeg`，并将
-`/v1/state` 转换为下采样遥测后，通过同源 WebSocket 推送给网页。网页演示启动
+最终浏览器不直接访问本服务。`agent-web` 代理 `/v1/stream.mjpeg` 和有边界的
+`/v1/camera` 观察接口，并将 `/v1/state` 转换为下采样遥测后，通过同源
+WebSocket 推送给网页。网页演示启动
 本服务时设置 `SIMULATION_PAUSE_ON_NO_CLIENTS=1`；代理视频断开会正常触发
 `mjpeg_stream()` 的 `finally`，注销客户端且不影响 worker 控制线程。

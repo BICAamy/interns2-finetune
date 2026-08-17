@@ -7,6 +7,11 @@ import asyncio
 from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from surgical_contracts import (
+    SimulationCameraControlRequest,
+    SimulationCameraState,
+)
+
 from ..models import (
     HealthResponse,
     SessionSnapshot,
@@ -110,6 +115,56 @@ async def simulation_telemetry(session_id: str, request: Request):
                 session_id,
                 error,
             ).model_dump(mode="json"),
+        )
+
+
+@router.get(
+    "/api/sessions/{session_id}/simulation/camera",
+    response_model=SimulationCameraState,
+)
+async def simulation_camera_state(
+    session_id: str,
+    request: Request,
+) -> SimulationCameraState:
+    try:
+        return await asyncio.to_thread(
+            _runtime(request).get_simulation_camera,
+            session_id,
+        )
+    except SimulationProxyError as error:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "code": "SIMULATION_CAMERA_UNAVAILABLE",
+                "message": str(error),
+                "details": {},
+            },
+        )
+
+
+@router.put(
+    "/api/sessions/{session_id}/simulation/camera",
+    response_model=SimulationCameraState,
+)
+async def control_simulation_camera(
+    session_id: str,
+    camera: SimulationCameraControlRequest,
+    request: Request,
+) -> SimulationCameraState:
+    try:
+        return await asyncio.to_thread(
+            _runtime(request).control_simulation_camera,
+            session_id,
+            camera,
+        )
+    except SimulationProxyError as error:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "code": "SIMULATION_CAMERA_UNAVAILABLE",
+                "message": str(error),
+                "details": {},
+            },
         )
 
 

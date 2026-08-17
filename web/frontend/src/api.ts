@@ -1,5 +1,7 @@
 import type {
+  CameraControlPayload,
   SessionSnapshot,
+  SimulationCameraState,
   SimulationTelemetry,
   TextCommandPayload,
 } from "./types";
@@ -36,6 +38,18 @@ export const api = {
   telemetry: (sessionId: string) =>
     request<SimulationTelemetry>(
       `/api/sessions/${sessionId}/simulation/telemetry`,
+    ),
+  camera: (sessionId: string) =>
+    request<SimulationCameraState>(
+      `/api/sessions/${sessionId}/simulation/camera`,
+    ),
+  controlCamera: (sessionId: string, payload: CameraControlPayload) =>
+    request<SimulationCameraState>(
+      `/api/sessions/${sessionId}/simulation/camera`,
+      {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      },
     ),
   videoUrl: (sessionId: string, attempt = 0) =>
     `/api/sessions/${sessionId}/simulation/stream.mjpeg?attempt=${attempt}`,

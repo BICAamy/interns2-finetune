@@ -22,6 +22,8 @@ from surgical_contracts import (
     RobotCommandKind,
     RobotCommandRecord,
     SimulationHeartbeat,
+    SimulationCameraControlRequest,
+    SimulationCameraState,
     SimulationHealth,
     SimulationTelemetry,
 )
@@ -108,6 +110,16 @@ def create_app(
     @router.get("/v1/state", response_model=SimulationTelemetry)
     def state() -> SimulationTelemetry:
         return simulation_worker.get_telemetry()
+
+    @router.get("/v1/camera", response_model=SimulationCameraState)
+    def camera_state() -> SimulationCameraState:
+        return simulation_worker.get_camera_state()
+
+    @router.put("/v1/camera", response_model=SimulationCameraState)
+    def control_camera(
+        request: SimulationCameraControlRequest,
+    ) -> SimulationCameraState:
+        return simulation_worker.control_camera(request)
 
     @router.post("/v1/reset", response_model=RobotCommandRecord, status_code=202)
     def reset(request: ResetSimulationRequest) -> RobotCommandRecord:

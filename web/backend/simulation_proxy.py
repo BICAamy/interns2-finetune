@@ -1,4 +1,4 @@
-"""Read-only robot-simulation telemetry and MJPEG proxy client."""
+"""Robot-simulation telemetry, MJPEG, and view-only camera proxy client."""
 
 from __future__ import annotations
 
@@ -8,7 +8,11 @@ from typing import Any, Callable, Protocol
 import httpx
 from pydantic import ValidationError
 
-from surgical_contracts import SimulationTelemetry
+from surgical_contracts import (
+    SimulationCameraControlRequest,
+    SimulationCameraState,
+    SimulationTelemetry,
+)
 
 
 class SimulationProxyError(ConnectionError):
@@ -54,13 +58,20 @@ class _HTTPXMJPEGStream:
 class SimulationObserver(Protocol):
     def get_telemetry(self) -> SimulationTelemetry: ...
 
+    def get_camera_state(self) -> SimulationCameraState: ...
+
+    def control_camera(
+        self,
+        request: SimulationCameraControlRequest,
+    ) -> SimulationCameraState: ...
+
     async def open_mjpeg(self) -> MJPEGStream: ...
 
     def close(self) -> None: ...
 
 
 class RobotSimulationObservabilityHTTPClient:
-    """Access only the simulation's read-only state and video endpoints."""
+    """Access telemetry/video plus bounded, view-only camera controls."""
 
     def __init__(
         self,
@@ -101,6 +112,32 @@ class RobotSimulationObservabilityHTTPClient:
         except (httpx.HTTPError, ValueError, ValidationError) as error:
             raise SimulationProxyError(
                 "无法读取 robot-simulation 遥测"
+            ) from error
+
+    def get_camera_state(self) -> SimulationCameraState:
+        try:
+            response = self._client.get("/v1/camera")
+            response.raise_for_status()
+            return SimulationCameraState.model_validate(response.json())
+        except (httpx.HTTPError, ValueError, ValidationError) as error:
+            raise SimulationProxyError(
+                "无法读取 robot-simulation 相机状态"
+            ) from error
+
+    def control_camera(
+        self,
+        request: SimulationCameraControlRequest,
+    ) -> SimulationCameraState:
+        try:
+            response = self._client.put(
+                "/v1/camera",
+                json=request.model_dump(mode="json"),
+            )
+            response.raise_for_status()
+            return SimulationCameraState.model_validate(response.json())
+        except (httpx.HTTPError, ValueError, ValidationError) as error:
+            raise SimulationProxyError(
+                "无法更新 robot-simulation 相机"
             ) from error
 
     async def open_mjpeg(self) -> MJPEGStream:

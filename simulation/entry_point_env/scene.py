@@ -25,6 +25,13 @@ from sofa_env.sofa_templates.scene_header import (
 )
 from sofa_env.sofa_templates.visual import VISUAL_PLUGIN_LIST, add_visual_model
 
+from simulation.entry_point_env.camera_controller import (
+    DEFAULT_CAMERA_DISTANCE_M,
+    DEFAULT_CAMERA_TARGET_M,
+    camera_pose,
+    camera_position,
+)
+
 
 PLUGIN_LIST = list(
     dict.fromkeys(
@@ -48,6 +55,17 @@ UNIT_SPHERE_PATH = (
     / "meshes"
     / "models"
     / "unit_sphere.stl"
+)
+
+_DEFAULT_CAMERA_POSITION = camera_position(
+    DEFAULT_CAMERA_TARGET_M,
+    yaw_deg=0.0,
+    pitch_deg=0.0,
+    distance_m=DEFAULT_CAMERA_DISTANCE_M,
+)
+_DEFAULT_CAMERA_POSE = camera_pose(
+    _DEFAULT_CAMERA_POSITION,
+    DEFAULT_CAMERA_TARGET_M,
 )
 
 
@@ -110,8 +128,11 @@ def createScene(
     camera = Camera(
         root_node=root_node,
         placement_kwargs={
-            "position": (1.45, -1.45, 1.15),
-            "lookAt": (0.35, 0.0, 0.48),
+            # Front view: world +Z is screen-up, so the installed robot is
+            # upright instead of inheriting SOFA's default oblique roll.
+            "position": tuple(float(value) for value in _DEFAULT_CAMERA_POSITION),
+            "orientation": tuple(float(value) for value in _DEFAULT_CAMERA_POSE[3:]),
+            "lookAt": tuple(float(value) for value in DEFAULT_CAMERA_TARGET_M),
         },
         z_near=0.05,
         z_far=4.0,

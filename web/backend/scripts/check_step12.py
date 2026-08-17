@@ -110,6 +110,36 @@ def main() -> int:
     if len(telemetry_before.get("joint_positions_deg", [])) != 6:
         raise RuntimeError("telemetry did not contain six E05-Pro joints")
 
+    checked_presets: list[str] = []
+    for preset in ("front", "left", "right", "top", "isometric", "front"):
+        camera = request_json(
+            args.base_url,
+            f"/api/sessions/{session_id}/simulation/camera",
+            method="PUT",
+            payload={"action": "preset", "preset": preset},
+            timeout_s=10.0,
+        )
+        if camera.get("preset") != preset:
+            raise RuntimeError(f"camera preset {preset!r} was not applied")
+        checked_presets.append(preset)
+    if float(camera.get("yaw_deg", 1.0)) != 0.0 or float(
+        camera.get("pitch_deg", 1.0)
+    ) != 0.0:
+        raise RuntimeError("front camera is not the expected upright orbit state")
+    target = camera.get("target_m", [])
+    position = camera.get("position_m", [])
+    if len(target) != 3 or len(position) != 3 or abs(float(position[2]) - float(target[2])) > 1e-6:
+        raise RuntimeError("front camera does not keep world Z upright")
+    telemetry_after_camera = request_json(
+        args.base_url,
+        f"/api/sessions/{session_id}/simulation/telemetry",
+        timeout_s=10.0,
+    )
+    if int(telemetry_after_camera.get("frame_sequence", 0)) <= int(
+        telemetry_before.get("frame_sequence", 0)
+    ):
+        raise RuntimeError("camera controls did not render a new frame")
+
     video, jpeg_bytes = open_video(
         args.base_url,
         session_id,
@@ -121,10 +151,12 @@ def main() -> int:
         "jpeg_bytes": jpeg_bytes,
         "telemetry_sequence": telemetry_before.get("sequence"),
         "frame_sequence": telemetry_before.get("frame_sequence"),
+        "camera_presets": checked_presets,
+        "camera_frame_sequence": telemetry_after_camera.get("frame_sequence"),
     }
     try:
         if args.execute_relative:
-            before = telemetry_before["current_tcp"]
+            before = telemetry_after_camera["current_tcp"]
             preview = request_json(
                 args.base_url,
                 f"/api/sessions/{session_id}/commands/text",
@@ -168,7 +200,7 @@ def main() -> int:
             if abs(delta[0]) > 0.1 or abs(delta[1]) > 0.1 or abs(delta[2] - 8.0) > 0.1:
                 raise RuntimeError(f"unexpected TCP delta: {delta}")
             if int(after.get("frame_sequence", 0)) <= int(
-                telemetry_before.get("frame_sequence", 0)
+                telemetry_after_camera.get("frame_sequence", 0)
             ):
                 raise RuntimeError("video frame sequence did not advance during motion")
             result.update(

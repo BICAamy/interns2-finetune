@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -39,6 +40,34 @@ def test_real_sofa_worker_through_http_and_rgb_frame():
         health = client.get("/health")
         assert health.status_code == 200
         assert health.json()["status"] == "healthy"
+
+        camera = client.get("/v1/camera")
+        assert camera.status_code == 200
+        assert camera.json()["preset"] == "front"
+        assert camera.json()["position_m"][2] == pytest.approx(
+            camera.json()["target_m"][2]
+        )
+        worker = client.app.state.simulation_worker
+        front_sequence, front_frame = worker.wait_for_frame(-1, timeout_s=2.0)
+        assert front_frame is not None
+
+        isometric = client.put(
+            "/v1/camera",
+            json={"action": "preset", "preset": "isometric"},
+        )
+        assert isometric.status_code == 200
+        assert isometric.json()["preset"] == "isometric"
+        isometric_sequence, isometric_frame = worker.wait_for_frame(
+            front_sequence,
+            timeout_s=2.0,
+        )
+        assert isometric_sequence > front_sequence
+        assert isometric_frame is not None
+        assert not np.array_equal(front_frame, isometric_frame)
+        assert client.put(
+            "/v1/camera",
+            json={"action": "preset", "preset": "front"},
+        ).status_code == 200
 
         move = client.post(
             "/v1/commands/move-to-entry",
@@ -77,7 +106,6 @@ def test_real_sofa_worker_through_http_and_rgb_frame():
         assert abs(position["z"] - 505.0) <= 0.5
         assert telemetry["frame_sequence"] > 0
 
-        worker = client.app.state.simulation_worker
         _sequence, frame = worker.wait_for_frame(-1, timeout_s=2.0)
         assert frame is not None
         jpeg = encode_jpeg(frame)

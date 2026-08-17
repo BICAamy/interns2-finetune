@@ -5,6 +5,8 @@ SOFA installation. ``EntryPointReachEnv`` is loaded lazily because SofaPython3
 is only available inside the simulation image.
 """
 
+from .camera_controller import OrbitCameraController, camera_pose, camera_position
+
 from .config import (
     DEFAULT_CONFIG_PATH,
     E05ProRobotConfig,
@@ -22,6 +24,9 @@ from .controller import (
 from .kinematics import E05ProKinematics, InverseKinematicsError
 
 __all__ = [
+    "OrbitCameraController",
+    "camera_pose",
+    "camera_position",
     "DEFAULT_CONFIG_PATH",
     "ContinuousTrajectoryController",
     "E05ProKinematics",

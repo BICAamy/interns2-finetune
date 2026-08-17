@@ -76,3 +76,36 @@ export interface SimulationTelemetry {
   simulation_fps: number | null;
   error: Record<string, any> | null;
 }
+
+export type CameraPreset = "front" | "left" | "right" | "top" | "isometric";
+
+export interface SimulationCameraState {
+  schema_version: "1.0";
+  preset: CameraPreset | "custom";
+  yaw_deg: number;
+  pitch_deg: number;
+  distance_m: number;
+  target_m: [number, number, number];
+  position_m: [number, number, number];
+  updated_at_ms: number;
+}
+
+export type CameraControlPayload =
+  | {
+      action: "orbit";
+      yaw_delta_deg: number;
+      pitch_delta_deg: number;
+    }
+  | {
+      action: "zoom";
+      distance_delta_m: number;
+    }
+  | {
+      action: "pan";
+      pan_right_delta_m: number;
+      pan_up_delta_m: number;
+    }
+  | {
+      action: "preset";
+      preset: CameraPreset;
+    };
