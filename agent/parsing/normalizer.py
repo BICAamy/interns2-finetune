@@ -396,10 +396,19 @@ class CommandNormalizer:
                 details={"fields": sorted(flattened_fields)},
             )
 
-        relative = cls._embedded_json_parameter(
-            raw.get("relative_motion"),
-            "relative_motion",
-        )
+        relative_value = raw.get("relative_motion")
+        if (
+            isinstance(relative_value, str)
+            and relative_value.strip().lower() in {axis.value for axis in Axis}
+        ):
+            # InternS2 can emit <parameter=relative_motion>z</parameter>
+            # followed by direction/distance/frame as sibling parameters.
+            relative = {"axis": relative_value.strip().lower()}
+        else:
+            relative = cls._embedded_json_parameter(
+                relative_value,
+                "relative_motion",
+            )
         if relative is None:
             relative = {}
         if not isinstance(relative, dict):

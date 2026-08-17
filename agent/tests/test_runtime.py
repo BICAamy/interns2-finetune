@@ -184,7 +184,7 @@ class InternS2AgentTests(unittest.TestCase):
     def test_flattened_explicit_relative_fields_are_repaired(self):
         arguments = base_arguments(
             "move_relative",
-            relative_motion=json.dumps({"axis": "z"}),
+            relative_motion="z",
             direction="positive",
             distance_mm=8,
             frame="robot_base",
