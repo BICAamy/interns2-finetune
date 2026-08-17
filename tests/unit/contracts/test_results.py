@@ -8,6 +8,7 @@ from surgical_contracts import (
     ErrorCode,
     MoveToEntryResult,
     PlanPunctureResult,
+    PlannerHealth,
     PlannerStatus,
     Point3D,
     ToolStatus,
@@ -60,6 +61,40 @@ class ResultContractTests(unittest.TestCase):
         )
 
         self.assertFalse(result.executable)
+
+    def test_successful_planner_result_requires_nonempty_preview_metadata(self):
+        with self.assertRaisesRegex(ValidationError, "requires control_mode"):
+            PlanPunctureResult(
+                request_id="plan-1",
+                status=PlannerStatus.SUCCESS,
+                planner_name="mock",
+                planner_version="mock-v1",
+                output_schema_version="preview-v1",
+                message="incomplete",
+            )
+
+    def test_planner_health_can_never_advertise_executable_output(self):
+        with self.assertRaises(ValidationError):
+            PlannerHealth(
+                status="healthy",
+                ready=True,
+                provider="mock",
+                planner_version="mock-v1",
+                output_schema_version="preview-v1",
+                executable=True,
+                message="unsafe",
+            )
+
+    def test_planner_health_status_must_match_readiness(self):
+        with self.assertRaisesRegex(ValidationError, "must agree"):
+            PlannerHealth(
+                status="healthy",
+                ready=False,
+                provider="external",
+                planner_version="unconfigured",
+                output_schema_version="preview-v1",
+                message="not ready",
+            )
 
 
 if __name__ == "__main__":

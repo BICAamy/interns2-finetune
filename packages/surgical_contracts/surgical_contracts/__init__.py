@@ -14,7 +14,12 @@ from .coordinates import (
 )
 from .errors import ErrorCode, ErrorResponse
 from .events import EventPhase, ToolEvent, ToolName
-from .planner import PlanPunctureRequest, PlanPunctureResult, PlannerStatus
+from .planner import (
+    PlannerHealth,
+    PlannerStatus,
+    PlanPunctureRequest,
+    PlanPunctureResult,
+)
 from .robot import (
     MotionState,
     MoveRelativeRequest,
@@ -61,6 +66,7 @@ __all__ = [
     "ParsedCommand",
     "PlanPunctureRequest",
     "PlanPunctureResult",
+    "PlannerHealth",
     "PlannerStatus",
     "Point3D",
     "RelativeMotion",

@@ -1,0 +1,26 @@
+# Laboratory-server build that reuses the validated local Step 6 image. The
+# resulting service is logically independent but intentionally not size-optimized.
+ARG BASE_IMAGE=interns2-robot-simulation:dev
+FROM ${BASE_IMAGE}
+
+LABEL org.opencontainers.image.title="InternS2 puncture planner adapter (offline)"
+LABEL org.opencontainers.image.description="Offline Step 9 adapter built from an existing Python/FastAPI image"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/workspace/packages/surgical_contracts:/workspace
+
+WORKDIR /workspace
+
+COPY packages/surgical_contracts /workspace/packages/surgical_contracts
+COPY planner_adapter /workspace/planner_adapter
+
+RUN python3 -m compileall -q /workspace/planner_adapter \
+    && python3 -c "from planner_adapter.main import app; assert app.state.planner_adapter.health().ready"
+
+EXPOSE 8002
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["python3", "-m", "planner_adapter.healthcheck"]
+
+CMD ["python3", "-m", "planner_adapter.main"]

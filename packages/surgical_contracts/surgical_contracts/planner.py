@@ -54,6 +54,31 @@ class PlanPunctureResult(ContractModel):
     def validate_status(self) -> "PlanPunctureResult":
         if self.status == PlannerStatus.SUCCESS and self.error_code is not None:
             raise ValueError("successful planner result cannot contain error_code")
+        if self.status == PlannerStatus.SUCCESS and not self.control_mode:
+            raise ValueError("successful planner result requires control_mode")
+        if self.status == PlannerStatus.SUCCESS and not self.control_payload:
+            raise ValueError("successful planner result requires control_payload")
         if self.status != PlannerStatus.SUCCESS and self.error_code is None:
             raise ValueError("non-success planner result requires error_code")
+        return self
+
+
+class PlannerHealth(ContractModel):
+    """Stable health response exposed by the planner-adapter service."""
+
+    schema_version: SchemaVersion = SCHEMA_VERSION
+    service: Literal["planner-adapter"] = "planner-adapter"
+    status: Literal["healthy", "unhealthy"]
+    ready: bool
+    provider: str = Field(min_length=1)
+    planner_version: str = Field(min_length=1)
+    output_schema_version: str = Field(min_length=1)
+    executable: Literal[False] = False
+    message: str = Field(min_length=1)
+    details: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_readiness(self) -> "PlannerHealth":
+        if self.ready != (self.status == "healthy"):
+            raise ValueError("healthy status and ready must agree")
         return self
