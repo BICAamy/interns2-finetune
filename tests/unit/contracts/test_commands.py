@@ -80,9 +80,36 @@ class ParsedCommandTests(unittest.TestCase):
             intent=CommandIntent.CLARIFY,
             entry_point=point(1, 2, 3),
             missing_fields=["target_point"],
+            needs_confirmation=True,
+            summary="Please provide the target point",
         )
 
         self.assertEqual(command.entry_point, point(1, 2, 3))
+
+    def test_clarify_requires_a_question_and_missing_fields(self):
+        with self.assertRaisesRegex(ValidationError, "requires at least one"):
+            ParsedCommand(
+                command_id="cmd-empty-clarify",
+                intent=CommandIntent.CLARIFY,
+                needs_confirmation=True,
+                summary="What is missing?",
+            )
+        with self.assertRaisesRegex(ValidationError, "needs_confirmation=true"):
+            ParsedCommand(
+                command_id="cmd-unconfirmed-clarify",
+                intent=CommandIntent.CLARIFY,
+                missing_fields=["target_point"],
+                summary="Please provide the target point",
+            )
+
+    def test_executable_command_cannot_claim_missing_fields(self):
+        with self.assertRaisesRegex(ValidationError, "cannot contain missing_fields"):
+            ParsedCommand(
+                command_id="cmd-invalid-missing",
+                intent=CommandIntent.MOVE_TO_ENTRY,
+                entry_point=point(1, 2, 3),
+                missing_fields=["target_point"],
+            )
 
     def test_models_reject_unknown_fields_and_non_finite_coordinates(self):
         with self.assertRaises(ValidationError):

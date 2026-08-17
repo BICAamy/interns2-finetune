@@ -1,0 +1,121 @@
+[
+  {
+    "id": "puncture_explicit",
+    "category": "明确入点和靶点",
+    "prompt": "入点为基座坐标系下(20,35,80)毫米，靶点为(24,38,120)毫米，请准备穿刺。",
+    "expected": {
+      "intent": "puncture",
+      "entry_point_mm": [20, 35, 80],
+      "target_point_mm": [24, 38, 120]
+    }
+  },
+  {
+    "id": "entry_only",
+    "category": "只有入点",
+    "prompt": "请把针尖移动到基座坐标系入点(500,0,500)毫米，仅做入点定位，不进行路径规划。",
+    "expected": {
+      "intent": "move_to_entry",
+      "entry_point_mm": [500, 0, 500]
+    }
+  },
+  {
+    "id": "relative_explicit",
+    "category": "方向和明确距离",
+    "prompt": "机械臂沿基座坐标系Z轴正方向移动8毫米。",
+    "expected": {
+      "intent": "move_relative",
+      "axis": "z",
+      "direction": "positive",
+      "distance_mm": 8,
+      "distance_source": "user_provided"
+    }
+  },
+  {
+    "id": "relative_vague",
+    "category": "方向和模糊一点",
+    "prompt": "机械臂往上抬一点。",
+    "expected": {
+      "intent": "move_relative",
+      "axis": "z",
+      "direction": "positive",
+      "distance_mm": 5,
+      "distance_source": "configured_default"
+    }
+  },
+  {
+    "id": "missing_unit_simulation_default",
+    "category": "缺失单位",
+    "prompt": "在仿真中移动到基座坐标系入点(500,0,500)。",
+    "expected": {
+      "intent": "move_to_entry",
+      "entry_point_mm": [500, 0, 500]
+    }
+  },
+  {
+    "id": "missing_frame_simulation_default",
+    "category": "缺失坐标系",
+    "prompt": "在仿真中移动到入点(500,0,500)毫米。",
+    "expected": {
+      "intent": "move_to_entry",
+      "entry_point_mm": [500, 0, 500]
+    }
+  },
+  {
+    "id": "ambiguous_coordinate_order",
+    "category": "坐标顺序含糊",
+    "prompt": "入点的三个数是20、35、80，但我没说明它们的坐标顺序，请判断信息是否足够。",
+    "expected": {
+      "intent": "clarify",
+      "missing_contains": ["coordinate_order"]
+    }
+  },
+  {
+    "id": "multiple_unlabelled_coordinates",
+    "category": "同一句多组坐标",
+    "prompt": "病历中写了(20,35,80)、(24,38,120)和(30,40,150)，但没有标明哪组是入点或靶点，请处理。",
+    "expected": {
+      "intent": "clarify"
+    }
+  },
+  {
+    "id": "negated_motion",
+    "category": "否定句",
+    "prompt": "不要移动机械臂，保持停止。",
+    "expected": {
+      "intent": "stop"
+    }
+  },
+  {
+    "id": "normal_stop",
+    "category": "停止",
+    "prompt": "停止机械臂当前运动。",
+    "expected": {
+      "intent": "stop"
+    }
+  },
+  {
+    "id": "emergency_stop",
+    "category": "急停",
+    "prompt": "紧急停止！立即急停机械臂！",
+    "expected": {
+      "intent": "emergency_stop"
+    }
+  },
+  {
+    "id": "unrelated_question",
+    "category": "与机械臂无关",
+    "prompt": "今天天气怎么样？",
+    "expected": {
+      "intent": "clarify"
+    }
+  },
+  {
+    "id": "puncture_missing_target",
+    "category": "完整任务缺少靶点",
+    "prompt": "从基座坐标系入点(500,0,500)毫米开始穿刺，但我还没有提供靶点。",
+    "expected": {
+      "intent": "clarify",
+      "missing_contains": ["target_point"]
+    }
+  }
+]

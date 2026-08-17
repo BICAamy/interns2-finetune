@@ -34,6 +34,8 @@ class ParsedCommand(ContractModel):
     @field_validator("missing_fields")
     @classmethod
     def reject_duplicate_missing_fields(cls, value: list[str]) -> list[str]:
+        if any(not field.strip() for field in value):
+            raise ValueError("missing_fields cannot contain empty values")
         if len(value) != len(set(value)):
             raise ValueError("missing_fields cannot contain duplicates")
         return value
@@ -71,7 +73,17 @@ class ParsedCommand(ContractModel):
             ):
                 raise ValueError(f"{self.intent.value} cannot contain a motion payload")
 
-        elif self.intent == CommandIntent.CLARIFY and self.relative_motion is not None:
-            raise ValueError("clarify cannot contain an executable relative motion")
+        elif self.intent == CommandIntent.CLARIFY:
+            if self.relative_motion is not None:
+                raise ValueError("clarify cannot contain an executable relative motion")
+            if not self.missing_fields:
+                raise ValueError("clarify requires at least one missing_fields entry")
+            if not self.needs_confirmation:
+                raise ValueError("clarify requires needs_confirmation=true")
+            if not self.summary.strip():
+                raise ValueError("clarify requires a non-empty summary")
+
+        if self.intent != CommandIntent.CLARIFY and self.missing_fields:
+            raise ValueError("executable commands cannot contain missing_fields")
 
         return self

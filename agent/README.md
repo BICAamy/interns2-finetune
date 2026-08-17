@@ -1,65 +1,84 @@
 # InternS2 手术机械臂智能体
 
-当前仓库已移除旧的离散导航代码。InternS2 作为多模态基底模型，通过 LMDeploy 提供的 OpenAI-compatible API 接收文本和可选图片。
+当前完成到 Step 7：InternS2 通过 LMDeploy 的 OpenAI-compatible API，将文本和
+可选图片解析成统一 `ParsedCommand`。本阶段只解析，不调用机械臂、不调用路径规划，
+也不执行穿刺。
 
-目前处于接口和 Mock 阶段：
+## Step 7 解析边界
 
-- 已保留 InternS2 客户端、模型发现和多模态输入；
-- 已建立 `surgical_contracts` 共享数据契约；
-- 已建立机械臂与路径规划抽象接口；
-- 已提供不连接硬件和仿真器的内存 Fake；
-- 尚未接入机械臂仿真工具；
-- 尚未接入学长的真实穿刺路径规划工具；
-- 当前回复不能代表机械臂已经移动或已经完成穿刺。
-
-共享契约是一个独立的可安装包：
+InternS2 只看到一个高层函数：
 
 ```text
-packages/surgical_contracts
+submit_surgical_task
 ```
 
-Mock 编排严格保证：定位失败、相对移动或仅移动到入点时不调用路径规划；完整穿刺任务只有在 Fake 机械臂成功到达入点后才会调用 Fake planner，并且 planner 结果始终为 `executable=false`。
+函数参数包括任务意图、入点、靶点、相对移动、缺失字段、置信度和摘要。模型不会
+获得 `robot-simulation`、planner 地址或任何底层控制函数。
+
+模型返回的参数还要经过确定性代码处理：
+
+- 运行时重新生成 `command_id`，忽略模型生成的 ID；
+- JSON 解码后再用 Pydantic `ParsedCommand` 二次校验；
+- 对外距离统一为 `mm`；仿真模式缺失坐标系时使用 `robot_base`；
+- “往上抬一点”规范化为 `robot_base +Z 5 mm`，5 mm 来自配置；
+- 完整穿刺缺入点或靶点、三维坐标不完整、坐标顺序含糊时降级为 `clarify`；
+- 其他坐标系在尚无确定性变换时只能澄清，不能直接运动；
+- 无 tool call、多个/未知 tool call、非法 JSON、超时和服务不可用都有稳定错误码；
+- 图片是可选输入，二维像素不能直接成为三维机械臂坐标。
+
+`clarify`、非法输出和模型调用错误都不会触发任何工具。Step 8 才会实现确定性的
+任务状态机与工具编排。
 
 ## 配置
 
-在仓库根目录执行：
+在仓库根目录复制配置示例：
 
 ```bash
 cp .env.example .env
 ```
 
-本地或服务器端运行 agent 时可配置：
+Step 7 使用的主要配置：
 
 ```dotenv
 INTERNS2_BASE_URL=http://127.0.0.1:23333/v1
 INTERNS2_API_KEY=EMPTY
 INTERNS2_MODEL=/home/xl/interns2-finetune/models/Intern-S2-Preview
+INTERNS2_TIMEOUT=300
+INTERNS2_MAX_RETRIES=2
+INTERNS2_MAX_TOKENS=2048
+INTERNS2_TEMPERATURE=0
+INTERNS2_TOP_P=0.95
+
+RUNTIME_MODE=simulation
+DEFAULT_COORDINATE_FRAME=robot_base
+DEFAULT_DISTANCE_UNIT=mm
+DEFAULT_RELATIVE_STEP_MM=5
 ```
 
-`.env` 已被根目录 `.gitignore` 忽略，不会随 Git 推送；`.env.example` 会被提交，用于在服务器上复制。
+`RUNTIME_MODE=simulation` 时，用户缺失单位/坐标系可以采用页面以后会明确展示的
+默认值。`RUNTIME_MODE=real` 时，缺失单位或坐标系必须返回澄清。当前项目仍禁止
+连接真实机械臂。
 
-## 安装
+## 安装与离线单元测试
 
-安装最小依赖：
+`surgical_contracts` 由 requirements 以 editable 方式安装：
 
 ```bash
 python3 -m pip install -r agent/requirements.txt
+python3 -m pytest agent/tests tests/unit -q
 ```
 
-运行离线测试：
+伪造 OpenAI 响应的测试不需要 GPU 或正在运行的 InternS2，覆盖 tool schema、
+可选图片、默认值、可信 ID、缺字段澄清和错误处理。
 
-```bash
-python3 -m unittest discover -s agent/tests -v
-python3 -m unittest discover -s tests -v
-```
+## 启动 InternS2
 
-## 启动 InternS2 服务
-
-在服务器容器中开一个终端启动 LMDeploy（标准 BF16 模型需要约 70GB 权重，示例使用两卡 TP）：
+在服务器的 LMDeploy 容器中使用两张指定 GPU：
 
 ```bash
 cd /home/xl/interns2-finetune
 export CUDA_VISIBLE_DEVICES=2,3
+
 lmdeploy serve api_server \
   /home/xl/interns2-finetune/models/Intern-S2-Preview \
   --trust-remote-code \
@@ -70,22 +89,76 @@ lmdeploy serve api_server \
   --tool-call-parser interns2-preview
 ```
 
-保持服务运行，在容器的第二个终端执行文本调用：
+必须保留 `--tool-call-parser interns2-preview`，否则 OpenAI 响应中可能没有可读取的
+`message.tool_calls`。
+
+## 真实解析冒烟测试
+
+保持 LMDeploy 运行，在容器的另一个终端执行。完整坐标任务：
 
 ```bash
 cd /home/xl/interns2-finetune
+
 python3 -m agent.main \
-  --prompt "请确认当前 InternS2 服务已经可以正常响应" \
+  --prompt '入点为基座坐标系下(20,35,80)毫米，靶点为(24,38,120)毫米，请准备穿刺' \
+  --parse-only \
   --json
 ```
 
-可选图片输入：
+期望 `parsed_command.intent` 为 `puncture`，并包含两组三维坐标。
+
+相对移动：
+
+```bash
+python3 -m agent.main \
+  --prompt '机械臂往上抬一点' \
+  --parse-only \
+  --json
+```
+
+期望结果包含：
+
+```json
+{
+  "intent": "move_relative",
+  "relative_motion": {
+    "axis": "z",
+    "direction": "positive",
+    "distance_mm": 5.0,
+    "frame": "robot_base",
+    "distance_source": "configured_default"
+  }
+}
+```
+
+可选图片：
 
 ```bash
 python3 -m agent.main \
   --image /path/to/image.jpg \
-  --prompt "请描述这张图片" \
+  --prompt '请结合图片判断任务；如果没有经过标定的三维入点，请要求我补充' \
+  --parse-only \
   --json
 ```
 
-`--json` 输出回答和实际模型 ID；去掉时只输出回答。
+## 固定语料评测
+
+固定测试集位于 `agent/evals/step7_cases.json`，涵盖明确/缺失坐标、相对移动、
+默认值、含糊顺序、多组坐标、否定、停止、急停和无关问题。
+
+先运行两个核心用例：
+
+```bash
+python3 -m agent.evals.run_step7_eval \
+  --case puncture_explicit \
+  --case relative_vague
+```
+
+再运行全部用例：
+
+```bash
+python3 -m agent.evals.run_step7_eval
+```
+
+全部通过时输出 `"status": "ok"`、`"passed": 13`、`"total": 13`。评测失败
+只表示解析结果不符合固定预期，不会调用机械臂或 planner。

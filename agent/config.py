@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from surgical_contracts import CoordinateFrame, DistanceUnit, RuntimeMode
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -58,6 +60,10 @@ class AgentSettings:
     temperature: float
     top_p: float
     max_tool_rounds: int
+    runtime_mode: RuntimeMode = RuntimeMode.SIMULATION
+    default_coordinate_frame: CoordinateFrame = CoordinateFrame.ROBOT_BASE
+    default_distance_unit: DistanceUnit = DistanceUnit.MILLIMETER
+    default_relative_step_mm: float = 5.0
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> "AgentSettings":
@@ -70,9 +76,25 @@ class AgentSettings:
             timeout=_as_float("INTERNS2_TIMEOUT", 300.0),
             max_retries=_as_int("INTERNS2_MAX_RETRIES", 2),
             max_tokens=_as_int("INTERNS2_MAX_TOKENS", 2048),
-            temperature=_as_float("INTERNS2_TEMPERATURE", 0.2),
+            temperature=_as_float("INTERNS2_TEMPERATURE", 0.0),
             top_p=_as_float("INTERNS2_TOP_P", 0.95),
             max_tool_rounds=_as_int("INTERNS2_MAX_TOOL_ROUNDS", 3),
+            runtime_mode=RuntimeMode(
+                os.getenv("RUNTIME_MODE", RuntimeMode.SIMULATION.value).strip()
+            ),
+            default_coordinate_frame=CoordinateFrame(
+                os.getenv(
+                    "DEFAULT_COORDINATE_FRAME",
+                    CoordinateFrame.ROBOT_BASE.value,
+                ).strip()
+            ),
+            default_distance_unit=DistanceUnit(
+                os.getenv(
+                    "DEFAULT_DISTANCE_UNIT",
+                    DistanceUnit.MILLIMETER.value,
+                ).strip()
+            ),
+            default_relative_step_mm=_as_float("DEFAULT_RELATIVE_STEP_MM", 5.0),
         )
         settings.validate()
         return settings
@@ -88,5 +110,17 @@ class AgentSettings:
             raise ValueError("INTERNS2_MAX_RETRIES cannot be negative")
         if self.max_tokens <= 0:
             raise ValueError("INTERNS2_MAX_TOKENS must be greater than zero")
+        if not 0 <= self.temperature <= 2:
+            raise ValueError("INTERNS2_TEMPERATURE must be between 0 and 2")
+        if not 0 < self.top_p <= 1:
+            raise ValueError("INTERNS2_TOP_P must be greater than 0 and at most 1")
         if self.max_tool_rounds <= 0:
             raise ValueError("INTERNS2_MAX_TOOL_ROUNDS must be greater than zero")
+        if self.default_distance_unit != DistanceUnit.MILLIMETER:
+            raise ValueError("DEFAULT_DISTANCE_UNIT must be mm in schema version 1.0")
+        if self.default_coordinate_frame != CoordinateFrame.ROBOT_BASE:
+            raise ValueError(
+                "DEFAULT_COORDINATE_FRAME must be robot_base in the first implementation"
+            )
+        if self.default_relative_step_mm <= 0:
+            raise ValueError("DEFAULT_RELATIVE_STEP_MM must be greater than zero")

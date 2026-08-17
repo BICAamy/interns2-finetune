@@ -12,8 +12,21 @@ def candidate(
     source: CommandSource,
     received_at_ms: int,
 ) -> CommandCandidate:
+    clarification = (
+        {
+            "missing_fields": ["intent"],
+            "needs_confirmation": True,
+            "summary": "Clarification required",
+        }
+        if intent == CommandIntent.CLARIFY
+        else {}
+    )
     return CommandCandidate(
-        command=ParsedCommand(command_id=command_id, intent=intent),
+        command=ParsedCommand(
+            command_id=command_id,
+            intent=intent,
+            **clarification,
+        ),
         source=source,
         received_at_ms=received_at_ms,
     )

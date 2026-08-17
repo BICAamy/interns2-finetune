@@ -105,6 +105,8 @@ class OrchestratorInvariantTests(unittest.TestCase):
             intent=CommandIntent.CLARIFY,
             entry_point=Point3D(x=10, y=20, z=30),
             missing_fields=["target_point"],
+            needs_confirmation=True,
+            summary="Please provide the target point",
         )
 
         result = SurgicalTaskOrchestrator(robot, planner).execute(command)
