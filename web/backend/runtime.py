@@ -7,11 +7,12 @@ import base64
 import binascii
 from pathlib import Path
 import tempfile
+from threading import RLock
 import time
 from typing import Any, Protocol
 from uuid import uuid4
 
-from surgical_contracts import CommandIntent, ParsedCommand, ToolEvent
+from surgical_contracts import CommandIntent, ParsedCommand, Point3D, ToolEvent
 
 from agent.config import AgentSettings
 from agent.core import (
@@ -26,7 +27,18 @@ from agent.runtime import InternS2Agent, ParsedCommandResponse
 from agent.tools.puncture_planner import PlannerAdapterHTTPClient
 from agent.tools.robot import RobotSimulationHTTPController
 
-from .models import HealthResponse, SessionSnapshot, SessionStatus, TextCommandRequest
+from .models import (
+    HealthResponse,
+    SessionSnapshot,
+    SessionStatus,
+    SimulationTelemetryView,
+    TextCommandRequest,
+)
+from .simulation_proxy import (
+    MJPEGStream,
+    RobotSimulationObservabilityHTTPClient,
+    SimulationObserver,
+)
 from .sessions import SessionConflict, SessionStore
 
 
@@ -55,6 +67,17 @@ _IMAGE_SUFFIXES = {
     "image/webp": ".webp",
 }
 
+_CURRENT_TOOLS = {
+    SessionStatus.MOVING_TO_ENTRY: "robot.move_to_entry",
+    SessionStatus.VERIFYING_ENTRY: "robot.get_state",
+    SessionStatus.MOVING_RELATIVE: "robot.move_relative",
+    SessionStatus.PLANNING: "planner.plan_puncture",
+    SessionStatus.STOPPING: "robot.stop",
+    SessionStatus.ESTOP: "robot.emergency_stop",
+}
+
+_TELEMETRY_TRAJECTORY_LIMIT = 160
+
 
 class WebRuntime:
     def __init__(
@@ -65,6 +88,7 @@ class WebRuntime:
         robot: Any | None = None,
         planner: Any | None = None,
         store: SessionStore | None = None,
+        simulation_observer: SimulationObserver | None = None,
     ) -> None:
         settings.validate()
         if settings.runtime_mode.value != "simulation":
@@ -74,6 +98,7 @@ class WebRuntime:
         self._model_http: OpenAICompatibleHTTPClient | None = None
         self._owns_robot = robot is None
         self._owns_planner = planner is None
+        self._owns_simulation_observer = simulation_observer is None
         if parser is None:
             self._model_http = OpenAICompatibleHTTPClient(settings)
             parser = InternS2Agent(settings, client=self._model_http)
@@ -88,6 +113,13 @@ class WebRuntime:
             settings.planner_adapter_base_url,
             timeout_s=settings.planner_adapter_timeout,
         )
+        self.simulation_observer = (
+            simulation_observer
+            or RobotSimulationObservabilityHTTPClient(
+                settings.robot_simulation_base_url,
+                timeout_s=min(settings.robot_simulation_http_timeout, 2.0),
+            )
+        )
         self.orchestrator = SurgicalTaskOrchestrator(
             self.robot,
             self.planner,
@@ -101,6 +133,10 @@ class WebRuntime:
             event_sink=self._on_tool_event,
         )
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._motion_origins: dict[str, Point3D] = {}
+        self._fps_samples: dict[str, tuple[int, float, float]] = {}
+        self._telemetry_lock = RLock()
+        self.telemetry_interval_s = 0.1
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> "WebRuntime":
@@ -113,6 +149,8 @@ class WebRuntime:
             self.robot.close()
         if self._owns_planner and hasattr(self.planner, "close"):
             self.planner.close()
+        if self._owns_simulation_observer:
+            self.simulation_observer.close()
 
     async def create_session(self) -> SessionSnapshot:
         snapshot = self.store.create()
@@ -134,6 +172,80 @@ class WebRuntime:
 
     def get_session(self, session_id: str) -> SessionSnapshot:
         return self.store.snapshot(session_id)
+
+    def get_simulation_telemetry(self, session_id: str) -> SimulationTelemetryView:
+        session = self.store.snapshot(session_id)
+        telemetry = self.simulation_observer.get_telemetry()
+        command = session.normalized_command or {}
+        entry_point = _point_from_payload(command.get("entry_point"))
+        target_point = _point_from_payload(command.get("target_point"))
+        current_tcp = telemetry.state.tcp_position
+        position_error = (
+            current_tcp.distance_to(entry_point)
+            if entry_point is not None and current_tcp.frame == entry_point.frame
+            else None
+        )
+        motion_target = entry_point
+        origin = self._motion_origins.get(session_id)
+        relative = command.get("relative_motion")
+        if motion_target is None and origin is not None and isinstance(relative, dict):
+            motion_target = _relative_target(origin, relative)
+        progress = _motion_progress(origin, motion_target, current_tcp)
+        trajectory = [tuple(float(value) for value in point) for point in telemetry.trajectory_mm]
+        return SimulationTelemetryView(
+            connected=True,
+            sequence=telemetry.sequence,
+            received_at_ms=_now_ms(),
+            source_updated_at_ms=telemetry.updated_at_ms,
+            state_machine_state=session.status.value,
+            current_tool=_CURRENT_TOOLS.get(session.status),
+            motion_state=telemetry.state.motion_state.value,
+            estop=telemetry.state.estop,
+            active_command_id=telemetry.state.active_command_id,
+            current_tcp=current_tcp,
+            entry_point=entry_point,
+            target_point=target_point,
+            position_error_mm=(round(position_error, 4) if position_error is not None else None),
+            motion_progress_percent=progress,
+            joint_positions_deg=[float(value) for value in telemetry.joint_positions_deg],
+            trajectory_mm=_downsample_trajectory(
+                trajectory,
+                _TELEMETRY_TRAJECTORY_LIMIT,
+            ),
+            trajectory_total_points=len(trajectory),
+            frame_sequence=telemetry.frame_sequence,
+            simulation_fps=self._update_fps(
+                session_id,
+                telemetry.frame_sequence,
+            ),
+            error=session.error,
+        )
+
+    def simulation_telemetry_error(
+        self,
+        session_id: str,
+        error: Exception,
+    ) -> SimulationTelemetryView:
+        session = self.store.snapshot(session_id)
+        command = session.normalized_command or {}
+        return SimulationTelemetryView(
+            connected=False,
+            sequence=0,
+            received_at_ms=_now_ms(),
+            state_machine_state=session.status.value,
+            current_tool=_CURRENT_TOOLS.get(session.status),
+            entry_point=_point_from_payload(command.get("entry_point")),
+            target_point=_point_from_payload(command.get("target_point")),
+            error={
+                "code": "SIMULATION_TELEMETRY_UNAVAILABLE",
+                "message": str(error) or type(error).__name__,
+                "details": {},
+            },
+        )
+
+    async def open_simulation_video(self, session_id: str) -> MJPEGStream:
+        self.store.snapshot(session_id)
+        return await self.simulation_observer.open_mjpeg()
 
     def health(self) -> HealthResponse:
         return HealthResponse(
@@ -244,6 +356,7 @@ class WebRuntime:
             selected["command"] = command
             selected["parse_started_ms"] = record.parse_started_ms
             selected["parse_finished_ms"] = record.parse_finished_ms
+            selected["motion_origin"] = record.current_tcp
             record.pending_command = None
             record.active_command_id = command.command_id
             record.status = SessionStatus.EXECUTING
@@ -253,6 +366,9 @@ class WebRuntime:
 
         snapshot = self.store.mutate(session_id, begin)
         command: ParsedCommand = selected["command"]
+        origin = _point_from_payload(selected.get("motion_origin"))
+        if origin is not None:
+            self._motion_origins[session_id] = origin
         self.store.bind_command(session_id, command.command_id)
         task = asyncio.create_task(
             self._execute_confirmed(
@@ -390,6 +506,31 @@ class WebRuntime:
     def _on_tool_event(self, event: ToolEvent) -> None:
         self.store.add_tool_event(event)
 
+    def _update_fps(self, session_id: str, frame_sequence: int) -> float:
+        now = time.monotonic()
+        with self._telemetry_lock:
+            previous = self._fps_samples.get(session_id)
+            if previous is None:
+                fps = 0.0
+            else:
+                old_sequence, old_time, old_fps = previous
+                elapsed = now - old_time
+                if frame_sequence > old_sequence and elapsed > 0:
+                    instantaneous = (frame_sequence - old_sequence) / elapsed
+                    fps = instantaneous if old_fps <= 0 else old_fps * 0.65 + instantaneous * 0.35
+                    sample_time = now
+                elif elapsed >= 1.0:
+                    fps = 0.0
+                    sample_time = old_time
+                else:
+                    fps = old_fps
+                    sample_time = old_time
+            if previous is None:
+                sample_time = now
+            fps = round(max(0.0, min(fps, 240.0)), 1)
+            self._fps_samples[session_id] = (frame_sequence, sample_time, fps)
+            return fps
+
     def _record_parse_error(
         self,
         session_id: str,
@@ -466,3 +607,63 @@ class WebRuntime:
 
 def _now_ms() -> int:
     return time.time_ns() // 1_000_000
+
+
+def _point_from_payload(value: Any) -> Point3D | None:
+    if value is None:
+        return None
+    if isinstance(value, Point3D):
+        return value
+    if not isinstance(value, dict):
+        return None
+    try:
+        return Point3D.model_validate(value)
+    except Exception:
+        return None
+
+
+def _relative_target(origin: Point3D, relative: dict[str, Any]) -> Point3D | None:
+    axis = relative.get("axis")
+    direction = relative.get("direction")
+    distance = relative.get("distance_mm")
+    if axis not in {"x", "y", "z"} or direction not in {"positive", "negative"}:
+        return None
+    try:
+        signed = float(distance) * (1.0 if direction == "positive" else -1.0)
+    except (TypeError, ValueError):
+        return None
+    delta = {
+        "x": (signed, 0.0, 0.0),
+        "y": (0.0, signed, 0.0),
+        "z": (0.0, 0.0, signed),
+    }[axis]
+    return origin.translated(delta)
+
+
+def _motion_progress(
+    origin: Point3D | None,
+    target: Point3D | None,
+    current: Point3D,
+) -> float | None:
+    if origin is None or target is None:
+        return None
+    if origin.frame != target.frame or current.frame != target.frame:
+        return None
+    total = origin.distance_to(target)
+    if total <= 1e-9:
+        return 100.0
+    remaining = current.distance_to(target)
+    return round(max(0.0, min(100.0, (1.0 - remaining / total) * 100.0)), 1)
+
+
+def _downsample_trajectory(
+    points: list[tuple[float, float, float]],
+    limit: int,
+) -> list[tuple[float, float, float]]:
+    if len(points) <= limit:
+        return points
+    if limit < 2:
+        return [points[-1]]
+    last_index = len(points) - 1
+    indices = [round(index * last_index / (limit - 1)) for index in range(limit)]
+    return [points[index] for index in indices]

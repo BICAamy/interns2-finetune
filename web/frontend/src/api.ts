@@ -1,4 +1,8 @@
-import type { SessionSnapshot, TextCommandPayload } from "./types";
+import type {
+  SessionSnapshot,
+  SimulationTelemetry,
+  TextCommandPayload,
+} from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -29,11 +33,18 @@ export const api = {
     request<SessionSnapshot>(`/api/sessions/${sessionId}/${action}`, {
       method: "POST",
     }),
+  telemetry: (sessionId: string) =>
+    request<SimulationTelemetry>(
+      `/api/sessions/${sessionId}/simulation/telemetry`,
+    ),
+  videoUrl: (sessionId: string, attempt = 0) =>
+    `/api/sessions/${sessionId}/simulation/stream.mjpeg?attempt=${attempt}`,
 };
 
 export function openSessionSocket(
   sessionId: string,
   onSnapshot: (snapshot: SessionSnapshot) => void,
+  onTelemetry: (telemetry: SimulationTelemetry) => void,
   onConnection: (connected: boolean) => void,
 ): WebSocket {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -42,8 +53,12 @@ export function openSessionSocket(
   );
   socket.onopen = () => onConnection(true);
   socket.onclose = () => onConnection(false);
-  socket.onerror = () => onConnection(false);
-  socket.onmessage = (event) => onSnapshot(JSON.parse(event.data));
+  socket.onerror = () => socket.close();
+  socket.onmessage = (event) => {
+    const payload = JSON.parse(event.data);
+    if (payload?.type === "telemetry") onTelemetry(payload);
+    else onSnapshot(payload);
+  };
   return socket;
 }
 

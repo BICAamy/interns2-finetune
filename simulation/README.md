@@ -395,7 +395,8 @@ python3 simulation/scripts/check_simulation_service.py \
 
 验收脚本会通过真实 HTTP 依次 reset、移动到 `[500,0,500] mm`、相对移动
 `+Z 5 mm`，校验最终 TCP、轨迹和一帧 MJPEG。成功输出包含
-`"status": "ok"`。浏览器/后续网页可直接使用：
+`"status": "ok"`。以下地址只用于 Step 6 服务诊断，并作为 Step 12
+`agent-web` 的上游；最终浏览器不直接访问：
 
 ```text
 http://127.0.0.1:8001/v1/stream.mjpeg
@@ -413,3 +414,10 @@ docker stop robot-simulation-test
 以下各项全部通过才算完成：无 SOFA API 测试、真实 SOFA worker HTTP 测试、
 独立服务 `/health`、HTTP 绝对/相对运动、状态/轨迹、MJPEG、幂等与冲突、
 普通命令串行、停止/急停抢占和可配置断连暂停。
+
+## Step 12 网页接入
+
+最终浏览器不直接访问本服务。`agent-web` 代理 `/v1/stream.mjpeg`，并将
+`/v1/state` 转换为下采样遥测后，通过同源 WebSocket 推送给网页。网页演示启动
+本服务时设置 `SIMULATION_PAUSE_ON_NO_CLIENTS=1`；代理视频断开会正常触发
+`mjpeg_stream()` 的 `finally`，注销客户端且不影响 worker 控制线程。

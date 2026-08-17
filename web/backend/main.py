@@ -1,4 +1,4 @@
-"""FastAPI application and React static-file host for Step 11."""
+"""FastAPI application, React host, and simulation proxy for Steps 11-12."""
 
 from __future__ import annotations
 

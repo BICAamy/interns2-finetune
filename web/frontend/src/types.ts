@@ -42,3 +42,37 @@ export interface TextCommandPayload {
   image_data_url?: string;
   image_name?: string;
 }
+
+export interface Point3D {
+  x: number;
+  y: number;
+  z: number;
+  unit: "mm";
+  frame: string;
+  source?: string | null;
+}
+
+export interface SimulationTelemetry {
+  schema_version: "1.0";
+  type: "telemetry";
+  connected: boolean;
+  sequence: number;
+  received_at_ms: number;
+  source_updated_at_ms: number | null;
+  state_machine_state: string;
+  current_tool: string | null;
+  motion_state: string | null;
+  estop: boolean;
+  active_command_id: string | null;
+  current_tcp: Point3D | null;
+  entry_point: Point3D | null;
+  target_point: Point3D | null;
+  position_error_mm: number | null;
+  motion_progress_percent: number | null;
+  joint_positions_deg: number[];
+  trajectory_mm: [number, number, number][];
+  trajectory_total_points: number;
+  frame_sequence: number;
+  simulation_fps: number | null;
+  error: Record<string, any> | null;
+}

@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request, status
+import asyncio
 
-from ..models import HealthResponse, SessionSnapshot, TextCommandRequest
+from fastapi import APIRouter, Request, status
+from fastapi.responses import JSONResponse, StreamingResponse
+
+from ..models import (
+    HealthResponse,
+    SessionSnapshot,
+    SimulationTelemetryView,
+    TextCommandRequest,
+)
 from ..runtime import WebRuntime
+from ..simulation_proxy import SimulationProxyError
 
 
 router = APIRouter()
@@ -81,3 +90,57 @@ async def estop(session_id: str, request: Request) -> SessionSnapshot:
 )
 async def reset_estop(session_id: str, request: Request) -> SessionSnapshot:
     return await _runtime(request).reset_estop(session_id)
+
+
+@router.get(
+    "/api/sessions/{session_id}/simulation/telemetry",
+    response_model=SimulationTelemetryView,
+)
+async def simulation_telemetry(session_id: str, request: Request):
+    runtime = _runtime(request)
+    try:
+        return await asyncio.to_thread(
+            runtime.get_simulation_telemetry,
+            session_id,
+        )
+    except SimulationProxyError as error:
+        return JSONResponse(
+            status_code=502,
+            content=runtime.simulation_telemetry_error(
+                session_id,
+                error,
+            ).model_dump(mode="json"),
+        )
+
+
+@router.get("/api/sessions/{session_id}/simulation/stream.mjpeg")
+async def simulation_video(session_id: str, request: Request):
+    runtime = _runtime(request)
+    try:
+        upstream = await runtime.open_simulation_video(session_id)
+    except SimulationProxyError as error:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "code": "SIMULATION_VIDEO_UNAVAILABLE",
+                "message": str(error),
+                "details": {},
+            },
+        )
+
+    async def stream_body():
+        try:
+            async for chunk in upstream.iter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+
+    return StreamingResponse(
+        stream_body(),
+        media_type=upstream.content_type,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )

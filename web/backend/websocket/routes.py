@@ -25,6 +25,9 @@ async def session_events(websocket: WebSocket, session_id: str) -> None:
     await websocket.accept()
     last_revision = -1
     last_sent = 0.0
+    last_telemetry_sequence = -1
+    last_telemetry_sent = 0.0
+    next_telemetry_poll = 0.0
     try:
         while True:
             snapshot = runtime.get_session(session_id)
@@ -33,6 +36,25 @@ async def session_events(websocket: WebSocket, session_id: str) -> None:
                 await websocket.send_json(snapshot.model_dump(mode="json"))
                 last_revision = snapshot.revision
                 last_sent = now
-            await asyncio.sleep(0.2)
+            if now >= next_telemetry_poll:
+                try:
+                    telemetry = await asyncio.to_thread(
+                        runtime.get_simulation_telemetry,
+                        session_id,
+                    )
+                except Exception as error:
+                    telemetry = runtime.simulation_telemetry_error(
+                        session_id,
+                        error,
+                    )
+                if (
+                    telemetry.sequence != last_telemetry_sequence
+                    or now - last_telemetry_sent >= 1.0
+                ):
+                    await websocket.send_json(telemetry.model_dump(mode="json"))
+                    last_telemetry_sequence = telemetry.sequence
+                    last_telemetry_sent = now
+                next_telemetry_poll = now + runtime.telemetry_interval_s
+            await asyncio.sleep(0.05)
     except (WebSocketDisconnect, RuntimeError):
         return

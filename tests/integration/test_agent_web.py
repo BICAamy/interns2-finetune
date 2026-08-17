@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import AsyncIterator
 from pathlib import Path
 import time
 
@@ -17,6 +18,7 @@ from surgical_contracts import (
     ParsedCommand,
     Point3D,
     RelativeMotion,
+    SimulationTelemetry,
 )
 from web.backend.main import create_app
 from web.backend.runtime import WebRuntime
@@ -95,17 +97,73 @@ class StubParser:
         )
 
 
+class StubMJPEGStream:
+    content_type = "multipart/x-mixed-replace; boundary=frame"
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def iter_bytes(self) -> AsyncIterator[bytes]:
+        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+        yield b"\xff\xd8step12\xff\xd9\r\n"
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class StubSimulationObserver:
+    def __init__(self, robot: FakeRobotController) -> None:
+        self.robot = robot
+        self.sequence = 0
+        self.frame_sequence = 0
+        self.trajectory: list[tuple[float, float, float]] | None = None
+        self.last_stream: StubMJPEGStream | None = None
+        self.closed = False
+
+    def get_telemetry(self) -> SimulationTelemetry:
+        self.sequence += 1
+        self.frame_sequence += 1
+        state = self.robot.get_state()
+        trajectory = self.trajectory or [
+            (0.0, 0.0, 100.0),
+            state.tcp_position.as_tuple(),
+        ]
+        return SimulationTelemetry(
+            state=state,
+            sequence=self.sequence,
+            joint_positions_deg=(1.0, 2.0, 3.0, 4.0, 5.0, 6.0),
+            trajectory_mm=trajectory,
+            frame_sequence=self.frame_sequence,
+            updated_at_ms=int(time.time() * 1000),
+        )
+
+    async def open_mjpeg(self) -> StubMJPEGStream:
+        self.last_stream = StubMJPEGStream()
+        return self.last_stream
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def make_client(command: ParsedCommand):
     parser = StubParser(command)
     robot = FakeRobotController()
     planner = FakePuncturePlannerClient()
+    observer = StubSimulationObserver(robot)
     runtime = WebRuntime(
         settings(),
         parser=parser,
         robot=robot,
         planner=planner,
+        simulation_observer=observer,
     )
-    return TestClient(create_app(runtime, static_dir="/missing")), parser, robot, planner
+    return (
+        TestClient(create_app(runtime, static_dir="/missing")),
+        parser,
+        robot,
+        planner,
+        observer,
+    )
 
 
 def create_session(client: TestClient) -> dict:
@@ -135,7 +193,7 @@ def wait_for_status(
 
 
 def test_puncture_preview_requires_confirmation_and_never_executes_puncture():
-    client, parser, robot, planner = make_client(puncture_command())
+    client, parser, robot, planner, _observer = make_client(puncture_command())
     with client:
         session = create_session(client)
         session_id = session["session_id"]
@@ -181,7 +239,7 @@ def test_puncture_preview_requires_confirmation_and_never_executes_puncture():
 
 
 def test_relative_motion_cancel_and_image_lifecycle():
-    client, parser, robot, planner = make_client(relative_command())
+    client, parser, robot, planner, _observer = make_client(relative_command())
     with client:
         session_id = create_session(client)["session_id"]
         image = base64.b64encode(b"not-a-decoder-test").decode("ascii")
@@ -210,12 +268,18 @@ def test_relative_motion_cancel_and_image_lifecycle():
 
 
 def test_relative_confirmation_stop_estop_reset_and_websocket():
-    client, _parser, robot, planner = make_client(relative_command("web-relative-2"))
+    client, _parser, robot, planner, _observer = make_client(
+        relative_command("web-relative-2")
+    )
     with client:
         session_id = create_session(client)["session_id"]
         with client.websocket_connect(f"/ws/sessions/{session_id}") as websocket:
             initial = websocket.receive_json()
             assert initial["session_id"] == session_id
+            telemetry = websocket.receive_json()
+            assert telemetry["type"] == "telemetry"
+            assert telemetry["connected"] is True
+            assert telemetry["joint_positions_deg"] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 
         preview = client.post(
             f"/api/sessions/{session_id}/commands/text",
@@ -246,7 +310,7 @@ def test_relative_confirmation_stop_estop_reset_and_websocket():
 
 
 def test_unknown_session_never_calls_reset_tool():
-    client, _parser, robot, _planner = make_client(relative_command())
+    client, _parser, robot, _planner, _observer = make_client(relative_command())
     with client:
         response = client.post("/api/sessions/unknown/reset-estop")
         assert response.status_code == 404
@@ -259,9 +323,72 @@ def test_built_react_application_is_served_from_the_same_origin():
         parser=StubParser(relative_command()),
         robot=FakeRobotController(),
         planner=FakePuncturePlannerClient(),
+        simulation_observer=StubSimulationObserver(FakeRobotController()),
     )
     app = create_app(runtime)
     with TestClient(app) as static_client:
         response = static_client.get("/")
         assert response.status_code == 200
         assert "InternS2 手术导航控制台" in response.text
+
+
+def test_telemetry_is_enriched_and_trajectory_is_downsampled():
+    client, _parser, robot, planner, observer = make_client(puncture_command())
+    observer.trajectory = [
+        (float(index), 0.0, 100.0 + float(index) / 10.0)
+        for index in range(300)
+    ]
+    with client:
+        session_id = create_session(client)["session_id"]
+        preview = client.post(
+            f"/api/sessions/{session_id}/commands/text",
+            json={"prompt": "入点 10,20,30；靶点 10,20,60"},
+        )
+        assert preview.status_code == 200
+
+        response = client.get(
+            f"/api/sessions/{session_id}/simulation/telemetry"
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["type"] == "telemetry"
+        assert payload["connected"] is True
+        assert payload["entry_point"]["x"] == 10.0
+        assert payload["trajectory_total_points"] == 300
+        assert len(payload["trajectory_mm"]) == 160
+        assert payload["trajectory_mm"][0] == [0.0, 0.0, 100.0]
+        assert payload["trajectory_mm"][-1] == [299.0, 0.0, 129.9]
+
+        assert client.post(f"/api/sessions/{session_id}/confirm").status_code == 202
+        completed = wait_for_status(client, session_id, {"plan_ready", "failed"})
+        assert completed["status"] == "plan_ready"
+        assert planner.call_count == 1
+        final_telemetry = client.get(
+            f"/api/sessions/{session_id}/simulation/telemetry"
+        ).json()
+        assert final_telemetry["position_error_mm"] == 0.0
+        assert final_telemetry["motion_progress_percent"] == 100.0
+        assert robot.get_state().tcp_position.as_tuple() == (10.0, 20.0, 30.0)
+
+
+def test_mjpeg_is_proxied_and_upstream_is_closed_after_browser_disconnect():
+    client, _parser, _robot, _planner, observer = make_client(relative_command())
+    with client:
+        session_id = create_session(client)["session_id"]
+        with client.stream(
+            "GET",
+            f"/api/sessions/{session_id}/simulation/stream.mjpeg",
+        ) as response:
+            body = b"".join(response.iter_bytes())
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith(
+                "multipart/x-mixed-replace"
+            )
+            assert b"\xff\xd8step12\xff\xd9" in body
+        assert observer.last_stream is not None
+        assert observer.last_stream.closed is True
+
+        missing = client.get(
+            "/api/sessions/unknown/simulation/stream.mjpeg"
+        )
+        assert missing.status_code == 404

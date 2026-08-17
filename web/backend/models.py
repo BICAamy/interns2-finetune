@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from surgical_contracts import Point3D
+
 
 class WebModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -85,3 +87,30 @@ class HealthResponse(WebModel):
     puncture_execution_enabled: Literal[False] = False
     sessions: int = Field(ge=0)
     downstream: dict[str, str]
+
+
+class SimulationTelemetryView(WebModel):
+    """Downsampled browser telemetry; never contains control operations."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    type: Literal["telemetry"] = "telemetry"
+    connected: bool
+    sequence: int = Field(ge=0)
+    received_at_ms: int = Field(ge=0)
+    source_updated_at_ms: int | None = Field(default=None, ge=0)
+    state_machine_state: str
+    current_tool: str | None = None
+    motion_state: str | None = None
+    estop: bool = False
+    active_command_id: str | None = None
+    current_tcp: Point3D | None = None
+    entry_point: Point3D | None = None
+    target_point: Point3D | None = None
+    position_error_mm: float | None = Field(default=None, ge=0)
+    motion_progress_percent: float | None = Field(default=None, ge=0, le=100)
+    joint_positions_deg: list[float] = Field(default_factory=list, max_length=6)
+    trajectory_mm: list[tuple[float, float, float]] = Field(default_factory=list)
+    trajectory_total_points: int = Field(default=0, ge=0)
+    frame_sequence: int = Field(default=0, ge=0)
+    simulation_fps: float | None = Field(default=None, ge=0)
+    error: dict[str, Any] | None = None

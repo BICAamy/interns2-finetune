@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, fileToDataUrl, openSessionSocket } from "./api";
-import type { SessionSnapshot } from "./types";
+import type { Point3D, SessionSnapshot, SimulationTelemetry } from "./types";
 
 const SESSION_KEY = "interns2-surgical-session";
 const DEFAULT_PROMPT =
@@ -67,12 +67,67 @@ function Timeline({ events }: { events: Array<Record<string, any>> }) {
   );
 }
 
+function TrajectoryPlot({ telemetry }: { telemetry: SimulationTelemetry | null }) {
+  const trajectory = telemetry?.trajectory_mm ?? [];
+  if (trajectory.length < 2) {
+    return <div className="trajectory-empty">机械臂运动后显示 X–Z 轨迹</div>;
+  }
+  const reference = [
+    ...trajectory,
+    ...(telemetry?.entry_point
+      ? [[telemetry.entry_point.x, telemetry.entry_point.y, telemetry.entry_point.z] as [number, number, number]]
+      : []),
+  ];
+  const xs = reference.map((point) => point[0]);
+  const zs = reference.map((point) => point[2]);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minZ = Math.min(...zs);
+  const maxZ = Math.max(...zs);
+  const rangeX = Math.max(1, maxX - minX);
+  const rangeZ = Math.max(1, maxZ - minZ);
+  const project = (point: [number, number, number]) =>
+    `${12 + ((point[0] - minX) / rangeX) * 216},${108 - ((point[2] - minZ) / rangeZ) * 96}`;
+  const entry = telemetry?.entry_point;
+  const current = telemetry?.current_tcp;
+
+  return (
+    <div className="trajectory-plot">
+      <svg viewBox="0 0 240 120" role="img" aria-label="机械臂 X-Z 平面轨迹">
+        <path className="plot-grid" d="M12 12V108H228M12 60H228M120 12V108" />
+        <polyline points={trajectory.map(project).join(" ")} />
+        {entry && (
+          <circle
+            className="entry-marker"
+            cx={Number(project([entry.x, entry.y, entry.z]).split(",")[0])}
+            cy={Number(project([entry.x, entry.y, entry.z]).split(",")[1])}
+            r="4"
+          />
+        )}
+        {current && (
+          <circle
+            className="tcp-marker"
+            cx={Number(project([current.x, current.y, current.z]).split(",")[0])}
+            cy={Number(project([current.x, current.y, current.z]).split(",")[1])}
+            r="3.5"
+          />
+        )}
+      </svg>
+      <span>X–Z 平面 · 青色 TCP / 橙色入点</span>
+    </div>
+  );
+}
+
 export default function App() {
   const [session, setSession] = useState<SessionSnapshot | null>(null);
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [image, setImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
+  const [telemetry, setTelemetry] = useState<SimulationTelemetry | null>(null);
+  const [videoConnected, setVideoConnected] = useState(false);
+  const [videoFailed, setVideoFailed] = useState(false);
+  const [videoAttempt, setVideoAttempt] = useState(0);
   const [requestError, setRequestError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -99,15 +154,52 @@ export default function App() {
 
   useEffect(() => {
     if (!session?.session_id) return;
-    const socket = openSessionSocket(session.session_id, setSession, setConnected);
-    return () => socket.close();
+    let disposed = false;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+
+    const connect = () => {
+      socket = openSessionSocket(
+        session.session_id,
+        setSession,
+        setTelemetry,
+        (isConnected) => {
+          if (disposed) return;
+          setConnected(isConnected);
+          if (!isConnected && reconnectTimer === null) {
+            reconnectTimer = window.setTimeout(() => {
+              reconnectTimer = null;
+              connect();
+            }, 1500);
+          }
+        },
+      );
+    };
+
+    connect();
+    return () => {
+      disposed = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      socket?.close();
+    };
   }, [session?.session_id]);
+
+  useEffect(() => {
+    if (!videoFailed) return;
+    const timer = window.setTimeout(() => {
+      setVideoAttempt((value) => value + 1);
+      setVideoFailed(false);
+    }, 2000);
+    return () => window.clearTimeout(timer);
+  }, [videoFailed]);
 
   const command = session?.normalized_command;
   const isBusy = session ? busyStatuses.has(session.status) : true;
   const canSubmit = Boolean(session && prompt.trim() && !isBusy && !session.pending_confirmation);
-  const entry = command?.entry_point;
-  const target = command?.target_point;
+  const entry = (command?.entry_point ?? telemetry?.entry_point) as Point3D | undefined;
+  const target = (command?.target_point ?? telemetry?.target_point) as Point3D | undefined;
+  const currentTcp = telemetry?.current_tcp ?? session?.current_tcp;
+  const videoUrl = session ? api.videoUrl(session.session_id, videoAttempt) : "";
 
   const statusTone = useMemo(() => {
     if (!session) return "neutral";
@@ -166,7 +258,10 @@ export default function App() {
         </div>
         <div className="topbar-actions">
           <span className={`connection ${connected ? "online" : "offline"}`}>
-            {connected ? "实时连接" : "正在连接"}
+            {connected ? "状态已连接" : "状态连接中"}
+          </span>
+          <span className={`connection ${videoConnected ? "online" : "offline"}`}>
+            {videoConnected ? "视频已连接" : "视频连接中"}
           </span>
           <button
             className="button stop"
@@ -289,7 +384,7 @@ export default function App() {
             </div>
             <CoordinateCard title="入点" point={entry} />
             <CoordinateCard title="靶点" point={target} />
-            <CoordinateCard title="当前针尖 TCP" point={session?.current_tcp} />
+            <CoordinateCard title="当前针尖 TCP" point={currentTcp} />
             {command?.relative_motion && (
               <div className="relative-card">
                 <span>相对运动</span>
@@ -299,21 +394,78 @@ export default function App() {
                 </strong>
               </div>
             )}
-            <div className="simulation-placeholder">
-              <div className="arm-glyph">
-                <span />
-                <span />
-                <span />
+          </section>
+
+          <section className="panel simulation-panel">
+            <div className="panel-heading">
+              <div>
+                <span className="eyebrow">03 · 远程仿真</span>
+                <h2>E05-Pro 实时画面与遥测</h2>
               </div>
-              <strong>仿真画面将在 Step 12 接入</strong>
-              <small>本阶段已显示实时任务状态和 TCP 数据</small>
+              <span className={`step-badge ${telemetry?.connected ? "live" : ""}`}>
+                {telemetry?.connected ? `${telemetry.simulation_fps ?? 0} FPS` : "遥测断开"}
+              </span>
+            </div>
+            <div className="simulation-layout">
+              <div className="video-stage">
+                {videoUrl && (
+                  <img
+                    key={videoUrl}
+                    src={videoUrl}
+                    alt="远程 SOFA E05-Pro 仿真画面"
+                    onLoad={() => {
+                      setVideoConnected(true);
+                      setVideoFailed(false);
+                    }}
+                    onError={() => {
+                      setVideoConnected(false);
+                      setVideoFailed(true);
+                    }}
+                  />
+                )}
+                <div className="video-overlay top-left">
+                  <span className={videoConnected ? "record-dot live" : "record-dot"} />
+                  {videoConnected ? "REMOTE SIMULATION" : "RECONNECTING"}
+                </div>
+                <div className="video-overlay bottom-right">
+                  frame {telemetry?.frame_sequence ?? 0}
+                </div>
+                {videoFailed && (
+                  <div className="video-fallback">
+                    <strong>仿真视频暂时不可用</strong>
+                    <span>系统将在 2 秒后自动重连，机械臂控制线程不受影响。</span>
+                  </div>
+                )}
+              </div>
+
+              <aside className="telemetry-board">
+                <div className="telemetry-stats">
+                  <div><span>位置误差</span><strong>{telemetry?.position_error_mm != null ? `${telemetry.position_error_mm.toFixed(3)} mm` : "—"}</strong></div>
+                  <div><span>运动状态</span><strong>{telemetry?.motion_state ?? "—"}</strong></div>
+                  <div><span>当前工具</span><strong>{telemetry?.current_tool ?? "空闲"}</strong></div>
+                  <div><span>轨迹点</span><strong>{telemetry?.trajectory_total_points ?? 0}</strong></div>
+                </div>
+                <div className="progress-block">
+                  <div><span>运动进度</span><strong>{telemetry?.motion_progress_percent != null ? `${telemetry.motion_progress_percent.toFixed(1)}%` : "等待任务"}</strong></div>
+                  <div className="progress-track"><i style={{ width: `${telemetry?.motion_progress_percent ?? 0}%` }} /></div>
+                </div>
+                <TrajectoryPlot telemetry={telemetry} />
+                <div className="joint-strip">
+                  {(telemetry?.joint_positions_deg ?? []).map((joint, index) => (
+                    <span key={index}>J{index + 1} <strong>{joint.toFixed(1)}°</strong></span>
+                  ))}
+                </div>
+                {telemetry?.error && (
+                  <div className="telemetry-error">{String(telemetry.error.message ?? "仿真遥测不可用")}</div>
+                )}
+              </aside>
             </div>
           </section>
 
           <section className="panel timeline-panel">
             <div className="panel-heading">
               <div>
-                <span className="eyebrow">03 · 确定性编排</span>
+                <span className="eyebrow">04 · 确定性编排</span>
                 <h2>工具调用时间线</h2>
               </div>
               <span className="step-badge">revision {session?.revision ?? 0}</span>
@@ -324,7 +476,7 @@ export default function App() {
           <section className="panel json-grid-panel">
             <div className="panel-heading">
               <div>
-                <span className="eyebrow">04 · 可审计数据</span>
+                <span className="eyebrow">05 · 可审计数据</span>
                 <h2>InternS2 与规范化结果</h2>
               </div>
             </div>
