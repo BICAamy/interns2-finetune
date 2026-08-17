@@ -348,6 +348,14 @@ class OrchestratorInvariantTests(unittest.TestCase):
             len(result.tool_events),
         )
         self.assertEqual(result.as_dict()["state_events"][0]["timestamp_ms"], 123)
+        combined_timestamps = sorted(
+            [event.timestamp_ms for event in result.state_events]
+            + [event.timestamp_ms for event in result.tool_events]
+        )
+        self.assertEqual(
+            combined_timestamps,
+            list(range(123, 123 + len(combined_timestamps))),
+        )
 
 
 if __name__ == "__main__":

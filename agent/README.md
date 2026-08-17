@@ -240,9 +240,29 @@ python3 -m agent.main \
 
 ## Step 10 三服务 CLI 端到端验收
 
-不带 `--parse-only` 或 `--mock-execute` 时，CLI 会连接真实运行中的
-`robot-simulation` 和 `planner-adapter` 服务。该模式只允许
-`RUNTIME_MODE=simulation`；`PUNCTURE_EXECUTION_ENABLED=true` 会被配置校验直接拒绝。
+### 启动三个服务
+#### 1. 启动模型 interns2 服务
+```bash
+export CUDA_VISIBLE_DEVICES=0
+
+lmdeploy serve api_server \
+  /home/xl/interns2-finetune/models/Intern-S2-Preview \
+  --trust-remote-code \
+  --backend pytorch \
+  --tp 1 \
+  --server-port 23333 \
+  --reasoning-parser default \
+  --tool-call-parser interns2-preview
+
+```
+#### 2. 启动路径规划服务
+```bash
+docker start interns2-planner-adapter
+```
+#### 3. 进入CLI
+```bash
+docker exec -it xl_interns2_lmdeploy bash
+```
 
 ### 容器网络
 

@@ -28,8 +28,8 @@ class RuntimeEvent:
             "status": self.status,
             "details": self.details,
         }
-        if self.duration_ms is not None:
-            value["duration_ms"] = self.duration_ms
+        if self.duration_ms is not None or self.status == "completed":
+            value["duration_ms"] = max(0, self.duration_ms or 0)
         return value
 
 
@@ -86,6 +86,7 @@ def build_runtime_events(
     )
 
     started_at: dict[ToolName, int] = {}
+    last_state_query_started_at: int | None = None
     entry_verified_emitted = False
     for tool_event in orchestration.tool_events:
         if (
@@ -97,6 +98,15 @@ def build_runtime_events(
                 "robot.entry_verified",
                 state_timestamps[AgentTaskState.AT_ENTRY],
                 "completed",
+                duration_ms=max(
+                    0,
+                    state_timestamps[AgentTaskState.AT_ENTRY]
+                    - (
+                        last_state_query_started_at
+                        if last_state_query_started_at is not None
+                        else state_timestamps[AgentTaskState.AT_ENTRY]
+                    ),
+                ),
                 details={
                     "position_error_mm": orchestration.verified_position_error_mm,
                 },
@@ -112,6 +122,8 @@ def build_runtime_events(
         duration_ms = None
         if tool_event.phase == EventPhase.STARTED:
             started_at[tool_event.tool] = tool_event.timestamp_ms
+            if tool_event.tool == ToolName.ROBOT_GET_STATE:
+                last_state_query_started_at = tool_event.timestamp_ms
         else:
             start = started_at.pop(tool_event.tool, None)
             if start is not None:
@@ -137,6 +149,15 @@ def build_runtime_events(
             "robot.entry_verified",
             state_timestamps[AgentTaskState.AT_ENTRY],
             "completed",
+            duration_ms=max(
+                0,
+                state_timestamps[AgentTaskState.AT_ENTRY]
+                - (
+                    last_state_query_started_at
+                    if last_state_query_started_at is not None
+                    else state_timestamps[AgentTaskState.AT_ENTRY]
+                ),
+            ),
             details={"position_error_mm": orchestration.verified_position_error_mm},
         )
 
@@ -157,6 +178,7 @@ def build_runtime_events(
             AgentTaskState.ESTOP,
         }
         else "failed",
+        duration_ms=max(0, final_timestamp - validated_at),
         details={
             "message": orchestration.message,
             "error_code": (

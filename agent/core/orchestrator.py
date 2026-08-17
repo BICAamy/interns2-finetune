@@ -113,8 +113,9 @@ class SurgicalTaskOrchestrator:
         self.robot = robot
         self.planner = planner
         self.policy = policy or OrchestrationPolicy()
-        self._clock_ms = clock_ms or (lambda: time.time_ns() // 1_000_000)
         self._lock = RLock()
+        self._clock_source_ms = clock_ms or (lambda: time.time_ns() // 1_000_000)
+        self._last_timestamp_ms = -1
         self._active_command_id: str | None = None
         self._interrupts: dict[str, AgentTaskState] = {}
         self._fingerprints: dict[str, str] = {}
@@ -124,6 +125,21 @@ class SurgicalTaskOrchestrator:
     def active_command_id(self) -> str | None:
         with self._lock:
             return self._active_command_id
+
+    def _clock_ms(self) -> int:
+        """Return an auditable millisecond timestamp that is strictly increasing.
+
+        Several state changes can legitimately happen within one wall-clock
+        millisecond. Sequence already defines their order, while this logical
+        millisecond projection also makes the ordering unambiguous to clients
+        that compare only ``timestamp_ms``.
+        """
+
+        with self._lock:
+            source_timestamp = int(self._clock_source_ms())
+            timestamp = max(source_timestamp, self._last_timestamp_ms + 1)
+            self._last_timestamp_ms = timestamp
+            return timestamp
 
     def execute(self, command: ParsedCommand) -> OrchestrationResult:
         """Execute one validated command with idempotency and arbitration."""

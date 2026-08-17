@@ -220,7 +220,7 @@ class ContinuousTrajectoryController:
         self._command_kind = kind
         self._active_command_id = command_id
         self._last_command_id = command_id
-        if dist(self._position_mm, target) <= self.config.reach_tolerance_mm:
+        if dist(self._position_mm, target) <= self._completion_tolerance_mm():
             self._finish_motion()
         else:
             self._motion_state = MotionState.MOVING
@@ -239,6 +239,13 @@ class ContinuousTrajectoryController:
         else:
             self._motion_state = MotionState.IDLE
         self._active_command_id = None
+
+    def _completion_tolerance_mm(self) -> float:
+        """Use task tolerance for entry positioning and IK precision for offsets."""
+
+        if self._command_kind == MotionCommandKind.RELATIVE:
+            return self.config.ik_position_tolerance_mm
+        return self.config.reach_tolerance_mm
 
     def _solve_speed_bounded_waypoint(
         self,
@@ -296,7 +303,10 @@ class ContinuousTrajectoryController:
                 self._joint_positions_rad = joints
                 self._position_mm = actual_position
                 self._append_trajectory(actual_position)
-                if dist(self._position_mm, self._target_position_mm) <= self.config.reach_tolerance_mm:
+                if (
+                    dist(self._position_mm, self._target_position_mm)
+                    <= self._completion_tolerance_mm()
+                ):
                     self._finish_motion()
         return self.snapshot()
 

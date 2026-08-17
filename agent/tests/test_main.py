@@ -105,12 +105,35 @@ class AgentMainTests(unittest.TestCase):
 
         payload = json.loads(output.getvalue())
         event_names = [event["event"] for event in payload["execution_events"]]
+        event_timestamps = [
+            event["timestamp_ms"] for event in payload["execution_events"]
+        ]
+        events_by_name = {
+            event["event"]: event for event in payload["execution_events"]
+        }
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["execution_mode"], "services")
         self.assertEqual(payload["orchestration"]["final_state"], "plan_ready")
+        self.assertTrue(
+            all(
+                earlier < later
+                for earlier, later in zip(event_timestamps, event_timestamps[1:])
+            )
+        )
         self.assertLess(
             event_names.index("robot.entry_verified"),
             event_names.index("planner.started"),
+        )
+        self.assertLess(
+            events_by_name["robot.entry_verified"]["timestamp_ms"],
+            events_by_name["planner.started"]["timestamp_ms"],
+        )
+        self.assertTrue(
+            all(
+                "duration_ms" in event
+                for event in payload["execution_events"]
+                if event["status"] == "completed"
+            )
         )
         self.assertEqual(event_names[-1], "task.plan_ready")
         robot_class.assert_called_once_with(

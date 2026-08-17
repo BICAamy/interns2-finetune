@@ -187,6 +187,28 @@ def test_normal_commands_are_serialized_and_telemetry_is_updated(service):
     assert telemetry["frame_sequence"] > 0
 
 
+def test_low_speed_relative_result_preserves_requested_eight_mm(service):
+    client, _worker, _environment = service
+    initial = client.get("/v1/state").json()["state"]["tcp_position"]
+    response = client.post(
+        "/v1/commands/move-relative",
+        json={
+            "command_id": "relative-api-exact-8mm",
+            "translation_mm": [0.0, 0.0, 8.0],
+            "frame": "robot_base",
+            "speed_mm_s": 5.0,
+        },
+    )
+    assert response.status_code == 202
+
+    record = wait_for_terminal(client, "relative-api-exact-8mm")
+    assert record["status"] == "succeeded"
+    final = record["result"]["final_tcp_position"]
+    assert float(final["x"]) == pytest.approx(float(initial["x"]), abs=0.05)
+    assert float(final["y"]) == pytest.approx(float(initial["y"]), abs=0.05)
+    assert float(final["z"]) - float(initial["z"]) == pytest.approx(8.0, abs=0.05)
+
+
 def test_stop_preempts_active_motion(service):
     client, _worker, _environment = service
     moving = client.post(

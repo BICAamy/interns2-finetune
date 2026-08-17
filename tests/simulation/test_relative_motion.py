@@ -48,6 +48,29 @@ class RelativeMotionControllerTests(unittest.TestCase):
         ]
         self.assertLessEqual(max(jumps), maximum_step + 1e-9)
 
+    def test_low_speed_eight_mm_motion_does_not_stop_at_entry_tolerance(self):
+        controller = ContinuousTrajectoryController(CONFIG)
+        controller.move_to_entry(
+            Point3D(x=500.0, y=0.0, z=500.0),
+            speed_mm_s=CONFIG.maximum_speed_mm_s,
+        )
+        run_until_settled(controller)
+        initial = controller.get_state().tcp_position
+
+        controller.move_relative((0.0, 0.0, 8.0), speed_mm_s=5.0)
+        step = run_until_settled(controller)
+
+        self.assertEqual(step.state.motion_state, MotionState.IDLE)
+        self.assertLessEqual(
+            step.position_error_mm,
+            CONFIG.ik_position_tolerance_mm,
+        )
+        self.assertAlmostEqual(
+            float(step.state.tcp_position.z) - float(initial.z),
+            8.0,
+            delta=CONFIG.ik_position_tolerance_mm,
+        )
+
     def test_stop_freezes_position(self):
         controller = ContinuousTrajectoryController(CONFIG)
         controller.move_relative((-20.0, 0.0, 0.0))
