@@ -72,6 +72,15 @@ function currentSessionId(): string | null {
   return sessionStorage.getItem(SESSION_KEY);
 }
 
+function step13VoiceActive(): boolean {
+  const button = document.querySelector<HTMLButtonElement>("button.voice");
+  if (!button) return false;
+  return (
+    button.classList.contains("recording") ||
+    Boolean(button.textContent?.includes("正在转写并解析"))
+  );
+}
+
 export default function GestureOverlay() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -102,16 +111,16 @@ export default function GestureOverlay() {
   useEffect(() => {
     if (!enabled) return;
     const observer = new MutationObserver(() => {
-      const recording = Boolean(document.querySelector("button.voice.recording"));
-      void reportVoiceActivity(recording);
+      void reportVoiceActivity(step13VoiceActive());
     });
     observer.observe(document.body, {
       attributes: true,
       childList: true,
+      characterData: true,
       subtree: true,
-      attributeFilter: ["class"],
+      attributeFilter: ["class", "disabled"],
     });
-    void reportVoiceActivity(Boolean(document.querySelector("button.voice.recording")));
+    void reportVoiceActivity(step13VoiceActive());
     return () => {
       observer.disconnect();
       void reportVoiceActivity(false);
