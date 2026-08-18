@@ -24,6 +24,7 @@ RUN cd /opt/asr-wheelhouse \
 
 COPY packages/surgical_contracts /workspace/packages/surgical_contracts
 COPY agent /workspace/agent
+COPY planner_adapter /workspace/planner_adapter
 COPY web /workspace/web
 COPY tests /workspace/tests
 
