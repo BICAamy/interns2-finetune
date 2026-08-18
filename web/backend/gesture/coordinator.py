@@ -77,8 +77,9 @@ class GestureCoordinator:
         state = self._state(session_id)
         with self._lock:
             state.voice_active = bool(active)
-            if active:
-                state.last_voice_activity_s = now
+            # Record both the start and end edge. After speech/ASR finishes we
+            # preserve the conflict window so a held gesture cannot "catch up".
+            state.last_voice_activity_s = now
         return VoiceActivityResponse(
             active=bool(active),
             observed_at_ms=time.time_ns() // 1_000_000,
@@ -90,22 +91,27 @@ class GestureCoordinator:
             self._states[session_id] = _ArbitrationState()
         return GestureResetResponse()
 
+    def _voice_conflict(self, state: _ArbitrationState, now: float) -> bool:
+        return state.voice_active or (
+            state.last_voice_activity_s >= 0
+            and now - state.last_voice_activity_s
+            <= self.settings.voice_conflict_window_s
+        )
+
+    def _latch(self, state: _ArbitrationState, gesture: GestureName) -> None:
+        state.latched_gesture = gesture
+        state.cooldown_until_s = time.monotonic() + self.settings.cooldown_s
+
     async def submit_frame(
         self,
         session_id: str,
         request: GestureFrameRequest,
     ) -> GestureFrameResponse:
+        # Do not compare browser Date.now() with server wall-clock time: the
+        # browser and remote laboratory server are separate machines and may
+        # legitimately have clock skew. Frames are never queued; hidden pages
+        # stop sampling and reset the server latch instead.
         session = self.runtime.get_session(session_id)
-        now_wall_ms = time.time_ns() // 1_000_000
-        frame_age_ms = now_wall_ms - request.captured_at_ms
-        if frame_age_ms < -2_000 or frame_age_ms > self.settings.maximum_frame_age_s * 1000:
-            return self._response(
-                gesture=GestureName.UNCERTAIN,
-                recognition=None,
-                decision=GestureDecision.IGNORED,
-                message="摄像头帧已过期或时间戳异常，未产生任何命令。",
-            )
-
         recognition = await asyncio.to_thread(
             self.recognizer.recognize,
             request.image_data_url,
@@ -141,12 +147,20 @@ class GestureCoordinator:
                 message=f"手势置信度不足（阈值 {threshold:.2f}），未产生任何命令。",
             )
 
-        # Safety gestures always bypass busy/cooldown/voice arbitration.
+        with self._lock:
+            if state.latched_gesture == gesture:
+                return GestureFrameResponse(
+                    recognition=recognition,
+                    decision=GestureDecision.SUPPRESSED_LATCHED,
+                    message="同一手势仍在保持；必须先松开/离开画面后才能再次触发。",
+                )
+
+        # Safety gestures bypass busy/cooldown/voice arbitration, but still use
+        # the one-shot latch so a held palm/circle does not spam stop requests.
         if gesture == GestureName.ESTOP:
             snapshot = await self.runtime.stop(session_id, emergency=True)
             with self._lock:
-                state.latched_gesture = gesture
-                state.cooldown_until_s = now + self.settings.cooldown_s
+                self._latch(state, gesture)
             return GestureFrameResponse(
                 recognition=recognition,
                 decision=GestureDecision.SAFETY_ESTOP,
@@ -156,8 +170,7 @@ class GestureCoordinator:
         if gesture == GestureName.STOP:
             snapshot = await self.runtime.stop(session_id, emergency=False)
             with self._lock:
-                state.latched_gesture = gesture
-                state.cooldown_until_s = now + self.settings.cooldown_s
+                self._latch(state, gesture)
             return GestureFrameResponse(
                 recognition=recognition,
                 decision=GestureDecision.SAFETY_STOP,
@@ -166,30 +179,25 @@ class GestureCoordinator:
             )
 
         with self._lock:
-            if state.latched_gesture == gesture:
-                return GestureFrameResponse(
-                    recognition=recognition,
-                    decision=GestureDecision.SUPPRESSED_LATCHED,
-                    message="同一手势仍在保持；必须先松开/离开画面后才能再次触发。",
-                )
             if now < state.cooldown_until_s:
+                state.latched_gesture = gesture
                 return GestureFrameResponse(
                     recognition=recognition,
                     decision=GestureDecision.SUPPRESSED_COOLDOWN,
                     message="手势仍在冷却时间内，未重复触发。",
                 )
-            voice_conflict = state.voice_active or (
-                state.last_voice_activity_s >= 0
-                and now - state.last_voice_activity_s
-                <= self.settings.voice_conflict_window_s
-            )
-        if voice_conflict:
-            return GestureFrameResponse(
-                recognition=recognition,
-                decision=GestureDecision.SUPPRESSED_VOICE,
-                message="检测到语音输入，按优先级规则压制普通手势。",
-            )
+            if self._voice_conflict(state, now):
+                # Voice wins this occurrence. Latch it so holding the same hand
+                # pose cannot execute immediately after speech ends.
+                state.latched_gesture = gesture
+                return GestureFrameResponse(
+                    recognition=recognition,
+                    decision=GestureDecision.SUPPRESSED_VOICE,
+                    message="检测到语音输入，按优先级规则压制普通手势。",
+                )
         if session.status in _BUSY_STATUSES or session.pending_confirmation:
+            with self._lock:
+                state.latched_gesture = gesture
             return GestureFrameResponse(
                 recognition=recognition,
                 decision=GestureDecision.SUPPRESSED_BUSY,
@@ -201,21 +209,19 @@ class GestureCoordinator:
         await asyncio.sleep(self.settings.voice_conflict_window_s)
         now = time.monotonic()
         with self._lock:
-            voice_conflict = state.voice_active or (
-                state.last_voice_activity_s >= 0
-                and now - state.last_voice_activity_s
-                <= self.settings.voice_conflict_window_s
-            )
-        if voice_conflict:
-            return GestureFrameResponse(
-                recognition=recognition,
-                decision=GestureDecision.SUPPRESSED_VOICE,
-                message="冲突窗口内出现语音输入，普通手势已被语音压制。",
-            )
+            if self._voice_conflict(state, now):
+                state.latched_gesture = gesture
+                return GestureFrameResponse(
+                    recognition=recognition,
+                    decision=GestureDecision.SUPPRESSED_VOICE,
+                    message="冲突窗口内出现语音输入，普通手势已被语音压制。",
+                )
 
         # Re-read after the wait; another request may have changed the session.
         session = self.runtime.get_session(session_id)
         if session.status in _BUSY_STATUSES or session.pending_confirmation:
+            with self._lock:
+                state.latched_gesture = gesture
             return GestureFrameResponse(
                 recognition=recognition,
                 decision=GestureDecision.SUPPRESSED_BUSY,
@@ -271,6 +277,8 @@ class GestureCoordinator:
         try:
             snapshot = self.runtime.store.mutate(session_id, accept)
         except RuntimeError:
+            with self._lock:
+                state.latched_gesture = gesture
             return GestureFrameResponse(
                 recognition=recognition,
                 decision=GestureDecision.SUPPRESSED_BUSY,
@@ -278,38 +286,13 @@ class GestureCoordinator:
             )
 
         with self._lock:
-            state.latched_gesture = gesture
-            state.cooldown_until_s = time.monotonic() + self.settings.cooldown_s
+            self._latch(state, gesture)
         return GestureFrameResponse(
             recognition=recognition,
             decision=GestureDecision.ACCEPTED,
             message="手势已通过仲裁并形成待确认的相对移动任务。",
             mapped_command=command.model_dump(mode="json"),
             session_snapshot=snapshot.model_dump(mode="json"),
-        )
-
-    @staticmethod
-    def _response(
-        *,
-        gesture: GestureName,
-        recognition: Any,
-        decision: GestureDecision,
-        message: str,
-    ) -> GestureFrameResponse:
-        # Used only before a VLM call has a real model result.
-        from .models import GestureRecognition
-
-        selected = recognition or GestureRecognition(
-            gesture=gesture,
-            confidence=0.0,
-            hand_detected=False,
-            model="not-called",
-            latency_ms=0,
-        )
-        return GestureFrameResponse(
-            recognition=selected,
-            decision=decision,
-            message=message,
         )
 
 
