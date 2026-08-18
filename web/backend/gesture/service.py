@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import base64
 from dataclasses import dataclass
 import json
+import os
 import time
 from typing import Any
 
@@ -77,13 +77,48 @@ def build_gesture_tool() -> dict[str, Any]:
     }
 
 
+def _float_env(name: str, default: float) -> float:
+    value = os.getenv(name, "").strip()
+    return default if not value else float(value)
+
+
+def _int_env(name: str, default: int) -> int:
+    value = os.getenv(name, "").strip()
+    return default if not value else int(value)
+
+
 @dataclass(frozen=True)
 class GestureSettings:
     minimum_confidence: float = 0.85
     safety_minimum_confidence: float = 0.80
+    stable_frames: int = 2
     cooldown_s: float = 1.0
     voice_conflict_window_s: float = 1.5
-    maximum_frame_age_s: float = 2.0
+
+    @classmethod
+    def from_env(cls) -> "GestureSettings":
+        settings = cls(
+            minimum_confidence=_float_env("GESTURE_MIN_CONFIDENCE", 0.85),
+            safety_minimum_confidence=_float_env(
+                "GESTURE_SAFETY_MIN_CONFIDENCE", 0.80
+            ),
+            stable_frames=_int_env("GESTURE_STABLE_FRAMES", 2),
+            cooldown_s=_float_env("GESTURE_COOLDOWN_SECONDS", 1.0),
+            voice_conflict_window_s=_float_env(
+                "GESTURE_VOICE_CONFLICT_WINDOW_SECONDS", 1.5
+            ),
+        )
+        if not 0.0 <= settings.minimum_confidence <= 1.0:
+            raise ValueError("GESTURE_MIN_CONFIDENCE must be between 0 and 1")
+        if not 0.0 <= settings.safety_minimum_confidence <= 1.0:
+            raise ValueError("GESTURE_SAFETY_MIN_CONFIDENCE must be between 0 and 1")
+        if settings.stable_frames < 1:
+            raise ValueError("GESTURE_STABLE_FRAMES must be at least 1")
+        if settings.cooldown_s < 0:
+            raise ValueError("GESTURE_COOLDOWN_SECONDS cannot be negative")
+        if settings.voice_conflict_window_s < 0:
+            raise ValueError("GESTURE_VOICE_CONFLICT_WINDOW_SECONDS cannot be negative")
+        return settings
 
 
 class GestureRecognitionError(RuntimeError):
@@ -158,9 +193,11 @@ class InternS2GestureRecognizer:
         try:
             gesture = GestureName(arguments["gesture"])
             confidence = float(arguments["confidence"])
-            hand_detected = bool(arguments["hand_detected"])
+            hand_detected = arguments["hand_detected"]
         except (KeyError, TypeError, ValueError) as error:
             raise GestureRecognitionError("gesture tool arguments failed validation") from error
+        if not isinstance(hand_detected, bool):
+            raise GestureRecognitionError("gesture hand_detected must be boolean")
         if not 0.0 <= confidence <= 1.0:
             raise GestureRecognitionError("gesture confidence must be between 0 and 1")
         if gesture == GestureName.NONE:
