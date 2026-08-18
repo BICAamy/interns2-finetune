@@ -64,6 +64,7 @@ class TextCommandRequest(WebModel):
 class InputSource(str, Enum):
     TEXT = "text"
     VOICE = "voice"
+    GESTURE = "gesture"
 
 
 class SessionSnapshot(WebModel):
