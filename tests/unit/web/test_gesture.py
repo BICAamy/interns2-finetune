@@ -104,13 +104,13 @@ class GestureMappingTests(unittest.TestCase):
 
 
 class GestureCoordinatorTests(unittest.TestCase):
-    def settings(self) -> GestureSettings:
+    def settings(self, *, stable_frames: int = 1) -> GestureSettings:
         return GestureSettings(
             minimum_confidence=0.85,
             safety_minimum_confidence=0.80,
+            stable_frames=stable_frames,
             cooldown_s=0.0,
             voice_conflict_window_s=0.01,
-            maximum_frame_age_s=10.0,
         )
 
     @staticmethod
@@ -140,6 +140,27 @@ class GestureCoordinatorTests(unittest.TestCase):
         self.assertEqual(snapshot.normalized_command["intent"], "move_relative")
         self.assertEqual(snapshot.normalized_command["relative_motion"]["axis"], "z")
 
+    def test_two_stable_frames_are_required_when_configured(self):
+        runtime = StubRuntime()
+        recognizer = StubRecognizer(
+            recognition(GestureName.RIGHT),
+            recognition(GestureName.RIGHT),
+        )
+        coordinator = GestureCoordinator(
+            runtime,
+            recognizer=recognizer,
+            settings=self.settings(stable_frames=2),
+        )
+        first = asyncio.run(
+            coordinator.submit_frame(runtime.session.session_id, self.frame())
+        )
+        self.assertEqual(first.decision, GestureDecision.IGNORED)
+        self.assertIn("1/2", first.message)
+        second = asyncio.run(
+            coordinator.submit_frame(runtime.session.session_id, self.frame())
+        )
+        self.assertEqual(second.decision, GestureDecision.ACCEPTED)
+
     def test_voice_activity_suppresses_normal_gesture(self):
         runtime = StubRuntime()
         recognizer = StubRecognizer(recognition(GestureName.DOWN))
@@ -163,7 +184,7 @@ class GestureCoordinatorTests(unittest.TestCase):
         coordinator = GestureCoordinator(
             runtime,
             recognizer=recognizer,
-            settings=self.settings(),
+            settings=self.settings(stable_frames=2),
         )
         coordinator.set_voice_activity(runtime.session.session_id, True)
         response = asyncio.run(
@@ -192,6 +213,37 @@ class GestureCoordinatorTests(unittest.TestCase):
             runtime.get_session(runtime.session.session_id).status,
             SessionStatus.READY,
         )
+
+    def test_held_estop_only_calls_fast_path_once_until_release(self):
+        runtime = StubRuntime()
+        recognizer = StubRecognizer(
+            recognition(GestureName.ESTOP),
+            recognition(GestureName.ESTOP),
+            recognition(GestureName.NONE, confidence=1.0, hand_detected=False),
+            recognition(GestureName.ESTOP),
+        )
+        coordinator = GestureCoordinator(
+            runtime,
+            recognizer=recognizer,
+            settings=self.settings(),
+        )
+        first = asyncio.run(
+            coordinator.submit_frame(runtime.session.session_id, self.frame())
+        )
+        held = asyncio.run(
+            coordinator.submit_frame(runtime.session.session_id, self.frame())
+        )
+        release = asyncio.run(
+            coordinator.submit_frame(runtime.session.session_id, self.frame())
+        )
+        again = asyncio.run(
+            coordinator.submit_frame(runtime.session.session_id, self.frame())
+        )
+        self.assertEqual(first.decision, GestureDecision.SAFETY_ESTOP)
+        self.assertEqual(held.decision, GestureDecision.SUPPRESSED_LATCHED)
+        self.assertEqual(release.decision, GestureDecision.IGNORED)
+        self.assertEqual(again.decision, GestureDecision.SAFETY_ESTOP)
+        self.assertEqual(runtime.stop_calls, [True, True])
 
 
 if __name__ == "__main__":
