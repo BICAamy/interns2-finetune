@@ -70,10 +70,12 @@ class GestureMappingTests(unittest.TestCase):
         expected = {
             GestureName.UP: (Axis.Z, Direction.POSITIVE),
             GestureName.DOWN: (Axis.Z, Direction.NEGATIVE),
-            GestureName.LEFT: (Axis.X, Direction.NEGATIVE),
-            GestureName.RIGHT: (Axis.X, Direction.POSITIVE),
-            GestureName.FORWARD: (Axis.Y, Direction.POSITIVE),
-            GestureName.BACKWARD: (Axis.Y, Direction.NEGATIVE),
+
+            GestureName.LEFT: (Axis.Y, Direction.POSITIVE),
+            GestureName.RIGHT: (Axis.Y, Direction.NEGATIVE),
+
+            GestureName.FORWARD: (Axis.X, Direction.POSITIVE),
+            GestureName.BACKWARD: (Axis.X, Direction.NEGATIVE),
         }
         for gesture, (axis, direction) in expected.items():
             with self.subTest(gesture=gesture):

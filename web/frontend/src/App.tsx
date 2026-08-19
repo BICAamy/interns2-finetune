@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   PointerEvent as ReactPointerEvent,
-  WheelEvent as ReactWheelEvent,
 } from "react";
 import { api, fileToDataUrl, openSessionSocket } from "./api";
 import type {
@@ -177,6 +176,7 @@ export default function App() {
   } | null>(null);
   const cameraRequestInFlight = useRef(false);
   const lastCameraSendAt = useRef(0);
+  const videoStageRef = useRef<HTMLDivElement | null>(null);
   const mediaRecorder = useRef<MediaRecorder | null>(null);
   const microphoneStream = useRef<MediaStream | null>(null);
   const audioChunks = useRef<Blob[]>([]);
@@ -342,6 +342,31 @@ export default function App() {
       cameraRequestInFlight.current = false;
     }
   }
+  useEffect(() => {
+  const element = videoStageRef.current;
+  if (!element) return;
+
+  const handleWheel = (event: WheelEvent) => {
+    // 鼠标位于仿真画面时，滚轮只控制相机缩放，
+    // 禁止浏览器继续滚动整个页面。
+    event.preventDefault();
+
+    if (cameraRequestInFlight.current) return;
+
+    void updateCamera({
+      action: "zoom",
+      distance_delta_m: event.deltaY > 0 ? 0.14 : -0.14,
+    });
+  };
+
+  element.addEventListener("wheel", handleWheel, {
+    passive: false,
+  });
+
+  return () => {
+    element.removeEventListener("wheel", handleWheel);
+  };
+}, [session?.session_id]);
 
   function beginCameraDrag(event: ReactPointerEvent<HTMLDivElement>) {
     if (event.button !== 0 && event.button !== 2) return;
@@ -393,14 +418,6 @@ export default function App() {
     setCameraDragging(false);
   }
 
-  function zoomCamera(event: ReactWheelEvent<HTMLDivElement>) {
-    event.preventDefault();
-    if (cameraRequestInFlight.current) return;
-    void updateCamera({
-      action: "zoom",
-      distance_delta_m: event.deltaY > 0 ? 0.14 : -0.14,
-    });
-  }
 
   async function submit() {
     if (!session || !canSubmit) return;
@@ -752,15 +769,12 @@ export default function App() {
             </div>
             <div className="simulation-layout">
               <div
+                ref={videoStageRef}
                 className={`video-stage ${cameraDragging ? "dragging" : ""}`}
                 onPointerDown={beginCameraDrag}
                 onPointerMove={moveCamera}
                 onPointerUp={endCameraDrag}
                 onPointerCancel={endCameraDrag}
-                onWheel={zoomCamera}
-                onDoubleClick={() => void updateCamera({ action: "preset", preset: "front" })}
-                onContextMenu={(event) => event.preventDefault()}
-                aria-label="可交互的远程 SOFA 相机画面"
               >
                 {videoUrl && (
                   <img

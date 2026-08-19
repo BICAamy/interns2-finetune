@@ -143,10 +143,13 @@ export default function GestureOverlay() {
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) return;
 
-    // Deliberately do NOT mirror the canvas. The visible preview is mirrored by
-    // CSS only; InternS2 receives the raw frame so operator-view left/right is
-    // stable and auditable.
+    // Mirror the frame before sending it to InternS2 so image left/right
+    // matches the operator's own left/right and the visible preview.
+    context.save();
+    context.translate(width, 0);
+    context.scale(-1, 1);
     context.drawImage(video, 0, 0, width, height);
+    context.restore();
     const imageDataUrl = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
     requestInFlight.current = true;
     try {
@@ -271,7 +274,7 @@ export default function GestureOverlay() {
     <aside className={`gesture-overlay ${collapsed ? "collapsed" : ""}`}>
       <div className="gesture-overlay-heading">
         <div>
-          <strong>Step 14 · 手势控制</strong>
+          <strong>手势控制</strong>
           <span>InternS2 视觉识别 · 操作者自身视角</span>
         </div>
         <button onClick={() => setCollapsed((value) => !value)}>
@@ -290,6 +293,12 @@ export default function GestureOverlay() {
               {enabled ? "关闭手势摄像头" : "启用手势摄像头"}
             </button>
             <span>{enabled ? "约 1 FPS 低频采样" : "不会影响文本/语音"}</span>
+          </div>
+          <div className="gesture-axis-hint">
+            <strong>方向与 robot_base 坐标系</strong>
+            <span>前进 👍 = +X　·　后退 👎 = −X</span>
+            <span>左 = +Y　·　右 = −Y</span>
+            <span>上 = +Z　·　下 = −Z</span>
           </div>
           {result && (
             <div className={`gesture-result ${result.decision}`}>

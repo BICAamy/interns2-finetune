@@ -4,11 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
+from PIL import Image, ImageDraw
 import numpy as np
 
 
 PixelProjector = Callable[[np.ndarray], tuple[int, int]]
+_AXIS_ORIGIN_SCENE = np.asarray((0.0, 0.0, 0.0), dtype=np.float64)
+_AXIS_LENGTH_SCENE = 0.20  # 200 mm
 
+_AXIS_SPECS = (
+    ("X", np.asarray((1.0, 0.0, 0.0)), (255, 70, 70)),
+    ("Y", np.asarray((0.0, 1.0, 0.0)), (70, 230, 90)),
+    ("Z", np.asarray((0.0, 0.0, 1.0)), (70, 140, 255)),
+)
 
 class TrajectoryRenderer:
     """Draw TCP, entry point, and motion history onto a rendered RGB frame."""
@@ -51,6 +59,46 @@ class TrajectoryRenderer:
         columns = np.rint(np.linspace(start[1], end[1], length + 1)).astype(int)
         for row, column in zip(rows, columns):
             self._draw_disk(image, (int(row), int(column)), self.line_radius, color)
+    def _draw_arrow(
+        self,
+        image: np.ndarray,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        color: tuple[int, int, int],
+    ) -> None:
+        self._draw_line(image, start, end, color)
+
+        start_v = np.asarray(start, dtype=np.float64)
+        end_v = np.asarray(end, dtype=np.float64)
+
+        vector = end_v - start_v
+        length = float(np.linalg.norm(vector))
+        if length <= 1e-6:
+            return
+
+        unit = vector / length
+        perpendicular = np.asarray((-unit[1], unit[0]))
+
+        arrow_length = 10.0
+        arrow_width = 5.0
+
+        base = end_v - unit * arrow_length
+
+        wing_a = base + perpendicular * arrow_width
+        wing_b = base - perpendicular * arrow_width
+
+        self._draw_line(
+            image,
+            (int(round(wing_a[0])), int(round(wing_a[1]))),
+            end,
+            color,
+        )
+        self._draw_line(
+            image,
+            (int(round(wing_b[0])), int(round(wing_b[1]))),
+            end,
+            color,
+        )
 
     def render(
         self,
@@ -67,6 +115,36 @@ class TrajectoryRenderer:
             raise ValueError("frame must have shape HxWx3 and dtype uint8")
 
         output = frame.copy()
+        axis_labels: list[
+            tuple[str, tuple[int, int], tuple[int, int, int]]
+        ] = []
+
+        axis_origin_pixel = project(_AXIS_ORIGIN_SCENE)
+
+        for label, direction, color in _AXIS_SPECS:
+            endpoint_scene = (
+                _AXIS_ORIGIN_SCENE
+                + direction * _AXIS_LENGTH_SCENE
+            )
+            endpoint_pixel = project(endpoint_scene)
+
+            self._draw_arrow(
+                output,
+                axis_origin_pixel,
+                endpoint_pixel,
+                color,
+            )
+
+            self._draw_disk(
+                output,
+                endpoint_pixel,
+                3,
+                color,
+            )
+
+            axis_labels.append(
+                (label, endpoint_pixel, color)
+            )
         projected_path = [project(np.asarray(point, dtype=np.float64)) for point in trajectory_scene]
         for start, end in zip(projected_path, projected_path[1:]):
             self._draw_line(output, start, end, (255, 215, 0))
@@ -83,5 +161,18 @@ class TrajectoryRenderer:
             self.marker_radius,
             (0, 255, 0),
         )
+        pil_image = Image.fromarray(output)
+        draw = ImageDraw.Draw(pil_image)
+
+        for label, (row, column), color in axis_labels:
+            draw.text(
+                (column + 5, row + 5),
+                f"+{label}",
+                fill=color,
+                stroke_width=1,
+                stroke_fill=(0, 0, 0),
+            )
+
+        output = np.asarray(pil_image, dtype=np.uint8).copy()
         return output
 

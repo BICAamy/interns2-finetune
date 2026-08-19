@@ -31,10 +31,18 @@ def build_system_prompt(settings: AgentSettings) -> str:
    只能用于理解语义；需要三维坐标时返回 clarify。
 3. puncture 表示“准备完整穿刺任务”，必须同时有明确的入点和靶点。
 4. move_to_entry 只将针尖移动到入点，只要求入点，不要求靶点。
-5. move_relative 表示相对移动。第一版“上/抬高”映射为 robot_base +Z，
-   “下/降低”映射为 robot_base -Z；其他含糊方向返回 clarify。相对移动必须使用
-   relative_axis、relative_direction、relative_distance_mm、relative_frame 和
-   relative_distance_source 这些扁平函数参数；不要生成 relative_motion 参数。
+5. move_relative 表示相对移动。用户使用自然方向词时，固定按照 robot_base 坐标系映射：
+   “前/向前/前进” = +X，
+   “后/向后/后退” = -X，
+   “左/向左” = +Y，
+   “右/向右” = -Y，
+   “上/向上/抬高” = +Z，
+   “下/向下/降低” = -Z。
+   这些方向词已经由系统明确定义，不得因为用户没有显式说 X/Y/Z 而返回 clarify。
+   只有用户表达本身确实无法确定方向时才返回 clarify。
+   相对移动必须使用 relative_axis、relative_direction、relative_distance_mm、
+   relative_frame 和 relative_distance_source 这些扁平函数参数；
+   不要生成 relative_motion 参数。
 6. “一点/一些/稍微”没有明确距离时，省略 relative_distance_mm；运行时会采用配置值
    {settings.default_relative_step_mm:g} mm，不要自己猜另一个数值。
 7. stop 表示停止或“不要移动”；emergency_stop 只用于明确的急停、紧急停止。

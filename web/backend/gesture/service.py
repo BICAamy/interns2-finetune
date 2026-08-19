@@ -39,7 +39,8 @@ _GESTURE_SYSTEM_PROMPT = """你是手术机器人科研仿真系统中的固定�
 8. estop：五指张开且掌心正对摄像头。
 
 规则：
-- 输入图片是原始未镜像摄像头帧；不要根据网页镜像预览反转左右。
+- 输入图片已经镜像为操作者自身视角；图像左侧就是操作者自己的左侧，图像右侧就是操作者自己的右侧。
+- 判断 left/right 时严格按照操作者自身方向：食指指向自己的左侧输出 left，指向自己的右侧输出 right。
 - 只能从上述八种手势、none、uncertain 中选择一个。
 - 没有检测到手时选择 none。
 - 有手但无法明确匹配一个协议手势时选择 uncertain。
@@ -278,10 +279,17 @@ def gesture_to_command(
 ) -> ParsedCommand | None:
     """Map operator-view semantics to the simulation robot_base frame.
 
-    The Step 12 canonical front view looks from robot_base -Y toward +Y, with
-    screen/operator right aligned to +X and world up aligned to +Z. Therefore
-    the simulation mapping is deterministic: left/right -> -/+X,
-    forward/backward -> +/-Y, up/down -> +/-Z.
+    The physical robot_base coordinate frame is kept unchanged.
+
+    For the operator-facing control semantics:
+    - forward/backward -> +/-X
+    - left/right -> +/-Y
+    - up/down -> +/-Z
+
+    Therefore:
+    left = +Y, right = -Y,
+    forward = +X, backward = -X,
+    up = +Z, down = -Z.
     """
 
     if gesture == GestureName.STOP:
@@ -292,10 +300,12 @@ def gesture_to_command(
     directions: dict[GestureName, tuple[Axis, Direction]] = {
         GestureName.UP: (Axis.Z, Direction.POSITIVE),
         GestureName.DOWN: (Axis.Z, Direction.NEGATIVE),
-        GestureName.LEFT: (Axis.X, Direction.NEGATIVE),
-        GestureName.RIGHT: (Axis.X, Direction.POSITIVE),
-        GestureName.FORWARD: (Axis.Y, Direction.POSITIVE),
-        GestureName.BACKWARD: (Axis.Y, Direction.NEGATIVE),
+
+        GestureName.LEFT: (Axis.Y, Direction.POSITIVE),
+        GestureName.RIGHT: (Axis.Y, Direction.NEGATIVE),
+
+        GestureName.FORWARD: (Axis.X, Direction.POSITIVE),
+        GestureName.BACKWARD: (Axis.X, Direction.NEGATIVE),
     }
     selected = directions.get(gesture)
     if selected is None:
