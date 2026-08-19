@@ -45,8 +45,8 @@ const gestureLabels: Record<GestureName, string> = {
   down: "食指向下",
   left: "食指向自己的左侧",
   right: "食指向自己的右侧",
-  forward: "食指指向摄像头",
-  backward: "大拇指指向自己的胸口",
+  forward: "握拳 · 大拇指向上 👍",
+  backward: "握拳 · 大拇指向下 👎",
   stop: "圆圈 · 停止",
   estop: "张开手掌 · 急停",
   none: "未检测到手势",
@@ -308,8 +308,8 @@ export default function GestureOverlay() {
               <li>down：食指向下</li>
               <li>left：食指向自己的左侧</li>
               <li>right：食指向自己的右侧</li>
-              <li>forward：食指指向摄像头</li>
-              <li>backward：大拇指指向自己的胸口</li>
+              <li>forward：握拳，大拇指明显向上（Thumbs Up 👍）</li>
+              <li>backward：握拳，大拇指明显向下（Thumbs Down 👎）</li>
               <li>stop：拇指和食指组成圆圈</li>
               <li>estop：五指张开且掌心正对摄像头</li>
             </ol>

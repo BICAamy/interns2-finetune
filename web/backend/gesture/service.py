@@ -33,20 +33,20 @@ _GESTURE_SYSTEM_PROMPT = """你是手术机器人科研仿真系统中的固定�
 2. down：食指向下。
 3. left：食指指向操作者自己的左侧。
 4. right：食指指向操作者自己的右侧。
-5. forward：食指直接指向摄像头。
-6. backward：大拇指指向操作者自己的胸口。
+5. forward：握拳，其余手指收拢，大拇指明显向上，即 Thumbs Up（👍）；不要因为拇指朝上而分类为 up，up 必须是食指向上。
+6. backward：握拳，其余手指收拢，大拇指明显向下，即 Thumbs Down（👎）；不要因为拇指朝下而分类为 down，down 必须是食指向下。
 7. stop：拇指和食指组成清晰圆圈；即使这个形态在日常语境中类似 OK，本系统也固定解释为 stop。
 8. estop：五指张开且掌心正对摄像头。
 
 规则：
 - 输入图片是原始未镜像摄像头帧；不要根据网页镜像预览反转左右。
 - 只能从上述八种手势、none、uncertain 中选择一个。
-- 没有检测到手时选择 none，hand_detected=false。
+- 没有检测到手时选择 none。
 - 有手但无法明确匹配一个协议手势时选择 uncertain。
 - 不要把比心、握拳或其他未明确匹配协议形态的动作强行解释成协议手势。
 - stop 与 estop 是安全指令，只有形态明确匹配时才能输出。
 - confidence 表示你对固定协议分类的置信度，范围 0~1。
-- 必须且只能调用 classify_fixed_gesture 一次，不输出机械臂坐标、关节角或控制量。
+- 最终只输出一个符合给定 JSON Schema 的 JSON 对象，不输出解释、Markdown 或其他文本。
 """
 
 
@@ -158,57 +158,115 @@ class InternS2GestureRecognizer:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                tools=[build_gesture_tool()],
                 temperature=0.0,
                 top_p=0.95,
-                max_tokens=256,
-                extra_body={"spaces_between_special_tokens": False},
+                max_tokens=128,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "fixed_gesture",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "gesture": {
+                                    "type": "string",
+                                    "enum": [gesture.value for gesture in GestureName],
+                                },
+                                "confidence": {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1,
+                                },
+                            },
+                            "required": ["gesture", "confidence"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                extra_body={
+                    "spaces_between_special_tokens": False,
+                    "chat_template_kwargs": {
+                        "enable_thinking": False,
+                    },
+                },
             )
         except Exception as error:
             raise GestureRecognitionError(
                 f"InternS2 gesture recognition failed: {type(error).__name__}"
             ) from error
+        choice0 = response.choices[0] if getattr(response, "choices", None) else None
+        message0 = getattr(choice0, "message", None)
 
+        print("\n========== STEP14 GESTURE DEBUG ==========", flush=True)
+        print(
+            "finish_reason =",
+            repr(getattr(choice0, "finish_reason", None)),
+            flush=True,
+        )
+        print(
+            "content =",
+            repr(getattr(message0, "content", None)),
+            flush=True,
+        )
+        print(
+            "reasoning_content =",
+            repr(getattr(message0, "reasoning_content", None)),
+            flush=True,
+        )
+        print(
+            "tool_calls =",
+            repr(getattr(message0, "tool_calls", None)),
+            flush=True,
+        )
+        print("========== END GESTURE DEBUG ==========\n", flush=True)
         choices = getattr(response, "choices", None)
         if not choices:
-            raise GestureRecognitionError("InternS2 returned no gesture completion choice")
-        message = getattr(choices[0], "message", None)
-        tool_calls = getattr(message, "tool_calls", None) if message is not None else None
-        if not tool_calls or len(tool_calls) != 1:
             raise GestureRecognitionError(
-                "InternS2 must return exactly one classify_fixed_gesture tool call"
+                "InternS2 returned no gesture completion choice"
             )
-        tool_call = tool_calls[0]
-        function = getattr(tool_call, "function", None)
-        if getattr(function, "name", None) != GESTURE_TOOL_NAME:
-            raise GestureRecognitionError("InternS2 returned an unauthorized gesture tool")
-        arguments = getattr(function, "arguments", None)
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except json.JSONDecodeError as error:
-                raise GestureRecognitionError("gesture tool arguments are not valid JSON") from error
+
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", None) if message is not None else None
+
+        if not isinstance(content, str) or not content.strip():
+            raise GestureRecognitionError(
+                "InternS2 returned empty gesture JSON"
+            )
+
+        try:
+            arguments = json.loads(content)
+        except json.JSONDecodeError as error:
+            raise GestureRecognitionError(
+                "gesture response is not valid JSON"
+            ) from error
+
         if not isinstance(arguments, dict):
-            raise GestureRecognitionError("gesture tool arguments must be a JSON object")
+            raise GestureRecognitionError(
+                "gesture response must be a JSON object"
+            )
+        print("STEP14 parsed arguments =", repr(arguments), flush=True)
         try:
             gesture = GestureName(arguments["gesture"])
             confidence = float(arguments["confidence"])
-            hand_detected = arguments["hand_detected"]
         except (KeyError, TypeError, ValueError) as error:
-            raise GestureRecognitionError("gesture tool arguments failed validation") from error
-        if not isinstance(hand_detected, bool):
-            raise GestureRecognitionError("gesture hand_detected must be boolean")
+            raise GestureRecognitionError(
+                "gesture response failed validation"
+            ) from error
+
         if not 0.0 <= confidence <= 1.0:
-            raise GestureRecognitionError("gesture confidence must be between 0 and 1")
-        if gesture == GestureName.NONE:
-            hand_detected = False
+            raise GestureRecognitionError(
+                "gesture confidence must be between 0 and 1"
+            )
+
+        hand_detected = gesture != GestureName.NONE
+
         return GestureRecognition(
             gesture=gesture,
             confidence=confidence,
             hand_detected=hand_detected,
             model=self.model,
             latency_ms=max(0, round((time.monotonic() - started) * 1000)),
-            tool_call_id=getattr(tool_call, "id", None),
+            tool_call_id=None,
         )
 
 
