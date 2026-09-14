@@ -1,33 +1,30 @@
 entry_point_env:
-  tcp_name: needle_tip
-  coordinate_frame: robot_base
-  time_step_s: 0.05
-  default_speed_mm_s: 20.0
-  maximum_speed_mm_s: 50.0
-  reach_tolerance_mm: 0.5
-  maximum_relative_distance_mm: 50.0
-  trajectory_history_limit: 2048
+  tcp_name: needle_tip # TCP 的名字叫做needle_tip
+  coordinate_frame: robot_base # 坐标默认以机器人底座坐标系表达
+  time_step_s: 0.05 # 仿真控制每 0.05 秒推进一次
+  default_speed_mm_s: 20.0 # 默认 TCP 运动速度 20 mm/s
+  maximum_speed_mm_s: 50.0 # 最大允许 TCP 速度 50 mm/s
+  reach_tolerance_mm: 0.5 # 距目标 ≤ 0.5 mm 时，可以认为“到点”
+  maximum_relative_distance_mm: 50.0 # 单次相对运动最多 50 mm
+  trajectory_history_limit: 2048 # 最多保留 2048 个历史轨迹点
 
-  # This box is an early command filter, not a claim that every point is
-  # reachable. Every accepted command must additionally pass six-axis IK.
+  # workspace是一个长方体，对应xyz三个方向（例如 300.0 <= x <= 700.0），TCP移动后的坐标在任一方向上不能超过这些范围
   workspace:
     low_mm: [300.0, -250.0, 250.0]
     high_mm: [700.0, 250.0, 750.0]
 
   robot:
-    model_name: E05-Pro
+    model_name: E05-Pro # 机器人名字
     force_control_variant: true
-    source_repository: https://github.com/huayan-robotics/elfin_model
-    source_commit: 84baf18d37eefa46b6f092c7fa1f105f81f70ecb
-    source_variant: 485/elfin5
+    source_repository: https://github.com/huayan-robotics/elfin_model # 机械臂几何参数提取的仓库源
+    source_commit: 84baf18d37eefa46b6f092c7fa1f105f81f70ecb # 机械臂几何参数提取的版本号
+    source_variant: 485/elfin5 
 
-    # Vendor force-control dimension drawing:
+    # 机械臂零位时，从底座一路沿几何链算到力控法兰的尺寸组成是
     # 1204 mm total = 220 + 380 + 420 + 184 mm.
     force_flange_offset_mm: 184.0
 
-    # Purchased E05-Pro datasheet limits: J1/J4/J6 ±360°, J2 ±135°,
-    # J3 ±153°, J5 ±180°. Maximum speeds are J1-J4 180°/s and
-    # J5-J6 200°/s.
+    # 六个关节的角度范围
     joint_limits_deg:
       - [-360.0, 360.0]
       - [-135.0, 135.0]
@@ -35,27 +32,25 @@ entry_point_env:
       - [-360.0, 360.0]
       - [-180.0, 180.0]
       - [-360.0, 360.0]
-    joint_max_speeds_deg_s: [180.0, 180.0, 180.0, 180.0, 200.0, 200.0]
+    joint_max_speeds_deg_s: [180.0, 180.0, 180.0, 180.0, 200.0, 200.0] # 每个关节自己的最大旋转速度。
 
-    # A deterministic, non-singular simulation start pose. The resulting
-    # needle TCP is approximately [530.7, 0.0, 520.7] mm.
+    # 仿真一启动，六个关节初始角度
     initial_joint_positions_deg: [0.0, 0.0, 60.0, 0.0, 90.0, 0.0]
 
     tool_transform:
-      # Temporary flange -> needle-tip transform requested for simulation.
-      # The +Z convention follows the verified vendor xacro flange axis.
-      translation_mm: [0.0, 0.0, 150.0]
-      rpy_deg: [0.0, 0.0, 0.0]
-      provisional: true
-      real_robot_motion_allowed: false
+      # 从机械臂法兰坐标系，到你安装的工具 TCP/针尖坐标系之间的固定刚体变换
+      translation_mm: [0.0, 0.0, 150.0] # 针尖 TCP 相对于 flange 原点的平移向量xyz
+      rpy_deg: [0.0, 0.0, 0.0] # 针尖 TCP 相对于 flange 坐标系的旋转矩阵Roll、Pitch、Yaw
+      provisional: true # 意思是临时的，表示这个 150mm 只是当前仿真的临时工具参数，不是实际针架安装后的真实标定结果。
+      real_robot_motion_allowed: false # 使用这套 TCP 参数时，不允许认为系统已经可以安全控制真实机器人。
       note: 仿真临时值；实机前必须安装针架后通过厂家TCP标定流程替换
-
+  # K 数值求解器的参数
   inverse_kinematics:
     orientation_weight_mm_per_rad: 100.0
-    position_tolerance_mm: 0.05
-    orientation_tolerance_deg: 0.05
-    maximum_solver_evaluations: 300
-
+    position_tolerance_mm: 0.05 # 要求最终 IK 的解算结果中，算的位置与目标结果位置误差小于0.05mm
+    orientation_tolerance_deg: 0.05 # 要求最终 TCP 姿态误差 <= 0.05度
+    maximum_solver_evaluations: 300 # 求解器最多允许尝试300次
+  # 仿真图像大小
   image:
     height: 600
     width: 600
