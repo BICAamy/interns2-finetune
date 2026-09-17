@@ -1,64 +1,53 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -euo pipefail
 
-FAILED=0
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+APP_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
+BUNDLE_ROOT="$(cd "$APP_ROOT/.." && pwd -P)"
+PYTHON="$BUNDLE_ROOT/runtime/envs/agent-web/bin/python"
 
-check() {
-    local name="$1"
-    local url="$2"
-
-    echo
-    echo "--------------------------------------------------"
-    echo "$name"
-    echo "$url"
-    echo "--------------------------------------------------"
-
-    if response=$(curl -fsS --max-time 5 "$url"); then
-        echo "$response"
-
-        if printf '%s' "$response" | python3 -m json.tool >/dev/null 2>&1; then
-            echo
-            echo "[PASS] HTTP OK + valid JSON"
-        else
-            echo
-            echo "[FAIL] Response is not valid JSON"
-            FAILED=1
-        fi
-    else
-        echo "[FAIL] Service unavailable"
-        FAILED=1
-    fi
+test -x "$PYTHON" || {
+    echo "ERROR: agent-web runtime is missing at $PYTHON." >&2
+    echo "Run the bundle's scripts/bootstrap.sh first." >&2
+    exit 1
 }
 
-echo "=================================================="
-echo " Surgical Navigation Health Check"
-echo "=================================================="
+"$PYTHON" - <<'PY'
+import sys
+import urllib.request
 
-check \
-    "InternS2 inference" \
-    "http://127.0.0.1:23333/v1/models"
+services = [
+    ("InternS2 inference", "http://127.0.0.1:23333/v1/models"),
+    ("robot-simulation", "http://127.0.0.1:8001/health"),
+    ("planner-adapter", "http://127.0.0.1:8002/health"),
+    ("agent-web", "http://127.0.0.1:8000/health"),
+]
 
-check \
-    "robot-simulation" \
-    "http://127.0.0.1:8001/health"
+failed = False
 
-check \
-    "planner-adapter" \
-    "http://127.0.0.1:8002/health"
+print("========================================")
+print(" InternS2 Service Health Check")
+print("========================================")
 
-check \
-    "agent-web" \
-    "http://127.0.0.1:8000/health"
+for name, url in services:
+    try:
+        with urllib.request.urlopen(url, timeout=3) as response:
+            ok = 200 <= response.status < 300
+            status = f"HTTP {response.status}"
+    except Exception as exc:
+        ok = False
+        status = str(exc)
 
-echo
-echo "=================================================="
+    print(f"{name:20} : {'HEALTHY' if ok else 'FAILED'}")
+    if not ok:
+        print(f"  {status}")
+        failed = True
 
-if (( FAILED == 0 )); then
-    echo " ALL HEALTH CHECKS PASSED"
-    echo "=================================================="
-    exit 0
-else
-    echo " HEALTH CHECK FAILED"
-    echo "=================================================="
-    exit 1
-fi
+print("========================================")
+
+if failed:
+    print("HEALTH CHECK = FAILED")
+    sys.exit(1)
+
+print("HEALTH CHECK = PASS")
+PY

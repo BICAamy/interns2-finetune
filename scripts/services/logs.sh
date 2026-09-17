@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT="/UNICOMFS/shskw43_1/.bihu/interns2-agent-robot/interns2-finetune"
-LOG_DIR="$ROOT/logs/services"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+APP_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
+BUNDLE_ROOT="$(cd "$APP_ROOT/.." && pwd -P)"
+LOG_DIR="$BUNDLE_ROOT/logs/services"
 
 usage() {
     echo "Usage:"
@@ -11,6 +13,7 @@ usage() {
     echo "  $0 simulation"
     echo "  $0 planner"
     echo "  $0 web"
+    echo "  $0 xvfb"
 }
 
 case "${1:-}" in
@@ -19,7 +22,8 @@ case "${1:-}" in
             "$LOG_DIR/inference.log" \
             "$LOG_DIR/robot-simulation.log" \
             "$LOG_DIR/planner-adapter.log" \
-            "$LOG_DIR/agent-web.log"
+            "$LOG_DIR/agent-web.log" \
+            "$LOG_DIR/xvfb.log"
         ;;
     inference)
         tail -n 200 -F "$LOG_DIR/inference.log"
@@ -32,6 +36,9 @@ case "${1:-}" in
         ;;
     web)
         tail -n 200 -F "$LOG_DIR/agent-web.log"
+        ;;
+    xvfb)
+        tail -n 200 -F "$LOG_DIR/xvfb.log"
         ;;
     *)
         usage
