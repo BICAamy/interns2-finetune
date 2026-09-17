@@ -3,8 +3,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 APP_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
-BUNDLE_ROOT="$(cd "$APP_ROOT/.." && pwd -P)"
-LOG_DIR="$BUNDLE_ROOT/logs/services"
+LOG_DIR="$APP_ROOT/logs/services"
 
 usage() {
     echo "Usage:"

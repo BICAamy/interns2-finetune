@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 APP_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 BUNDLE_ROOT="$(cd "$APP_ROOT/.." && pwd -P)"
 RUNTIME_ROOT="$BUNDLE_ROOT/runtime/envs"
-LOG_DIR="$BUNDLE_ROOT/logs/services"
+LOG_DIR="$APP_ROOT/logs/services"
 
 INFERENCE_ENV="$RUNTIME_ROOT/inference"
 PLANNER_ENV="$RUNTIME_ROOT/planner"
