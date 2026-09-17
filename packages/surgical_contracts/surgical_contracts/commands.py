@@ -16,6 +16,7 @@ class CommandIntent(str, Enum):
     MOVE_RELATIVE = "move_relative"
     STOP = "stop"
     EMERGENCY_STOP = "emergency_stop"
+    SOFTWARE_STOP_REQUEST = "software_stop_request"
     CLARIFY = "clarify"
 
 
@@ -66,7 +67,11 @@ class ParsedCommand(ContractModel):
             if self.entry_point is not None or self.target_point is not None:
                 raise ValueError("move_relative cannot contain entry or target points")
 
-        elif self.intent in {CommandIntent.STOP, CommandIntent.EMERGENCY_STOP}:
+        elif self.intent in {
+            CommandIntent.STOP,
+            CommandIntent.EMERGENCY_STOP,
+            CommandIntent.SOFTWARE_STOP_REQUEST,
+        }:
             if any(
                 value is not None
                 for value in (self.entry_point, self.target_point, self.relative_motion)

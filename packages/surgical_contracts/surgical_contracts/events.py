@@ -14,6 +14,7 @@ class ToolName(str, Enum):
     ROBOT_MOVE_RELATIVE = "robot.move_relative"
     ROBOT_STOP = "robot.stop"
     ROBOT_EMERGENCY_STOP = "robot.emergency_stop"
+    ROBOT_SOFTWARE_STOP_REQUEST = "robot.software_stop_request"
     PLANNER_PLAN_PUNCTURE = "planner.plan_puncture"
 
 
