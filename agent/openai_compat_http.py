@@ -83,6 +83,9 @@ class OpenAICompatibleHTTPClient:
 
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         response = self._client.request(method, path, **kwargs)
+        if path == "chat/completions":
+            print("debug:")
+            print(response.text, flush=True)
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):

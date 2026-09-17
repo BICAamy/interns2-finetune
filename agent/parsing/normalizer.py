@@ -68,6 +68,7 @@ ALLOWED_MISSING_FIELDS = {
     "relative_motion.axis",
     "relative_motion.direction",
     "relative_motion.frame",
+    "relative_motion.distance_mm",
     "entry_point_3d",
     "target_point_3d",
 }

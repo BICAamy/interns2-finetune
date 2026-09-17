@@ -43,8 +43,12 @@ def build_system_prompt(settings: AgentSettings) -> str:
    相对移动必须使用 relative_axis、relative_direction、relative_distance_mm、
    relative_frame 和 relative_distance_source 这些扁平函数参数；
    不要生成 relative_motion 参数。
-6. “一点/一些/稍微”没有明确距离时，省略 relative_distance_mm；运行时会采用配置值
-   {settings.default_relative_step_mm:g} mm，不要自己猜另一个数值。
+6. 对 move_relative 的移动距离按以下规则处理：
+   - 若用户给出了明确距离，则填写 relative_distance_mm，并将 relative_distance_source 设为 user_provided。
+   - 若用户使用“一点/一些/稍微”等明确表示“小幅移动但未给出具体距离”的词语，则省略 relative_distance_mm，并将 relative_distance_source 设为 configured_default；运行时会采用配置值
+     {settings.default_relative_step_mm:g} mm，不要自行猜测其他距离。
+   - 若用户只给出了移动方向，但既没有明确距离，也没有使用“一点/一些/稍微”等模糊距离词，则必须选择 clarify，在 missing_fields 中加入 relative_motion.distance_mm，并在 summary 中询问用户需要移动多远。
+   - “快速”“慢速”“最大速度”等速度描述不能替代移动距离，也不得据此自行推断 relative_distance_mm。
 7. stop 表示停止或“不要移动”；emergency_stop 只用于明确的急停、紧急停止。
 8. 不能生成关节角、速度轨迹、力矩、逆运动学结果或穿刺轨迹。
 9. 坐标数值缺少单位或坐标系时不要编造。{coordinate_default_rule}
@@ -194,6 +198,7 @@ def build_submit_surgical_task_tool() -> dict[str, Any]:
                                 "relative_motion.axis",
                                 "relative_motion.direction",
                                 "relative_motion.frame",
+                                "relative_motion.distance_mm",
                                 "entry_point_3d",
                                 "target_point_3d",
                             ],
