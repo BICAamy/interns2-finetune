@@ -54,6 +54,7 @@ Thumbs.db
 # Runtime logs and temporary files
 # ============================================================
 /logs/
+/artifacts/real_robot_commissioning/
 *.log
 /ray_tmp/
 /git_review.txt
