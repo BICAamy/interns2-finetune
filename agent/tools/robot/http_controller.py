@@ -1,4 +1,4 @@
-"""HTTP RobotController backed by the Step 6 robot-simulation service."""
+"""HTTP RobotController backed by the provider-neutral port-8001 service."""
 
 from __future__ import annotations
 
@@ -22,7 +22,9 @@ from surgical_contracts import (
     RobotActionResult,
     RobotCommandKind,
     RobotCommandRecord,
+    RobotHealth,
     RobotState,
+    RobotTelemetry,
     SimulationHealth,
     SimulationTelemetry,
     ToolStatus,
@@ -56,7 +58,7 @@ class RobotSimulationProtocolError(RobotSimulationClientError):
         super().__init__(ErrorCode.INTERNAL_ERROR, message)
 
 
-class RobotSimulationHTTPController:
+class RobotRuntimeHTTPController:
     """Translate synchronous high-level tool calls to the queued HTTP API."""
 
     def __init__(
@@ -99,22 +101,48 @@ class RobotSimulationHTTPController:
         if self._owns_client:
             self._client.close()
 
-    def __enter__(self) -> "RobotSimulationHTTPController":
+    def __enter__(self) -> "RobotRuntimeHTTPController":
         return self
 
     def __exit__(self, _exc_type, _exc, _traceback) -> None:
         self.close()
 
-    def health(self) -> SimulationHealth:
-        health = self._model_request("GET", "/health", SimulationHealth)
+    def get_runtime_health(self) -> SimulationHealth | RobotHealth:
+        payload = self._request_json("GET", "/health")
+        model = RobotHealth if "runtime_mode" in payload else SimulationHealth
+        try:
+            return model.model_validate(payload)
+        except ValidationError as exc:
+            raise RobotSimulationProtocolError("/health response failed validation") from exc
+
+    def health(self) -> SimulationHealth | RobotHealth:
+        health = self.get_runtime_health()
+        if isinstance(health, RobotHealth):
+            if not health.ready_for_motion:
+                raise RobotSimulationUnavailableError(
+                    f"robot runtime is not ready for motion: {health.error or health.status}"
+                )
+            return health
         if not health.ready:
             raise RobotSimulationUnavailableError(
                 f"robot-simulation is not ready: {health.status} {health.error or ''}".strip()
             )
         return health
 
+    def get_telemetry(self) -> SimulationTelemetry | RobotTelemetry:
+        payload = self._request_json("GET", "/v1/state")
+        model = SimulationTelemetry if "state" in payload else RobotTelemetry
+        try:
+            return model.model_validate(payload)
+        except ValidationError as exc:
+            raise RobotSimulationProtocolError("/v1/state response failed validation") from exc
+
     def get_state(self) -> RobotState:
-        telemetry = self._model_request("GET", "/v1/state", SimulationTelemetry)
+        telemetry = self.get_telemetry()
+        if isinstance(telemetry, RobotTelemetry):
+            raise RobotSimulationUnavailableError(
+                "real robot state cannot be adapted to RobotState before the real provider is connected"
+            )
         return telemetry.state
 
     def move_to_entry(self, request: MoveToEntryRequest) -> MoveToEntryResult:
@@ -125,6 +153,7 @@ class RobotSimulationHTTPController:
         )
         if record.status == CommandExecutionStatus.SUCCEEDED:
             return self._result_model(record, MoveToEntryResult)
+        self._reject_unavailable_real_command(record)
         state = self.get_state()
         error_code, message, status = self._record_failure(record)
         position_error = None
@@ -148,6 +177,7 @@ class RobotSimulationHTTPController:
         )
         if record.status == CommandExecutionStatus.SUCCEEDED:
             return self._result_model(record, MoveRelativeResult)
+        self._reject_unavailable_real_command(record)
         state = self.get_state()
         error_code, message, status = self._record_failure(record)
         return MoveRelativeResult(
@@ -292,6 +322,11 @@ class RobotSimulationHTTPController:
         )
         return code, message, status
 
+    @staticmethod
+    def _reject_unavailable_real_command(record: RobotCommandRecord) -> None:
+        if record.error and record.error.code == ErrorCode.OPERATION_NOT_ENABLED:
+            raise RobotSimulationClientError(record.error.code, record.error.message)
+
     def _model_request(self, method: str, path: str, model_type: Any, **kwargs):
         payload = self._request_json(method, path, **kwargs)
         try:
@@ -331,3 +366,11 @@ class RobotSimulationHTTPController:
                 f"robot-simulation returned a non-object JSON response for {path}"
             )
         return payload
+
+
+# Existing callers and tests keep the old name until the service-mode wiring in Step 3.
+RobotSimulationHTTPController = RobotRuntimeHTTPController
+RobotRuntimeClientError = RobotSimulationClientError
+RobotRuntimeUnavailableError = RobotSimulationUnavailableError
+RobotRuntimeTimeoutError = RobotSimulationTimeoutError
+RobotRuntimeProtocolError = RobotSimulationProtocolError

@@ -47,6 +47,7 @@ COPY third_party/elfin_model /opt/huayan-elfin-model
 WORKDIR /workspace
 COPY configs /workspace/configs
 COPY simulation /workspace/simulation
+COPY robot_runtime /workspace/robot_runtime
 COPY tests /workspace/tests
 
 RUN sh simulation/scripts/prepare_e05_model.sh /opt/huayan-elfin-model \

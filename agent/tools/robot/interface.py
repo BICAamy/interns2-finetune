@@ -36,7 +36,7 @@ class RobotController(Protocol):
         ...
 
     def emergency_stop(self, command_id: str | None = None) -> RobotState:
-        """Latch an emergency stop and return the resulting state."""
+        """Simulation latch only; a real provider must not claim a physical E-stop."""
 
         ...
 

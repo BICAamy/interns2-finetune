@@ -110,6 +110,7 @@ class RobotTelemetry(ContractModel):
     schema_version: SchemaVersion = SCHEMA_VERSION
     runtime_mode: RuntimeMode
     provider: RobotProvider
+    control_mode: Literal["observe-only", "enabled"] | None = None
     sequence: int = Field(ge=0)
     freshness: SourceFreshness = SourceFreshness.UNKNOWN
     connections: RobotConnectionState = Field(default_factory=RobotConnectionState)
@@ -179,6 +180,7 @@ class RobotHealth(ContractModel):
     schema_version: SchemaVersion = SCHEMA_VERSION
     runtime_mode: RuntimeMode
     provider: RobotProvider
+    control_mode: Literal["observe-only", "enabled"] | None = None
     status: Literal["healthy", "degraded", "disconnected"]
     freshness: SourceFreshness = SourceFreshness.UNKNOWN
     connections: RobotConnectionState = Field(default_factory=RobotConnectionState)

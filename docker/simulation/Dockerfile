@@ -113,6 +113,7 @@ COPY third_party/sofa_env /workspace/third_party/sofa_env
 COPY third_party/elfin_model /opt/huayan-elfin-model
 COPY configs /workspace/configs
 COPY simulation /workspace/simulation
+COPY robot_runtime /workspace/robot_runtime
 COPY tests /workspace/tests
 
 # sofa_env's custom develop command downloads SOFA unless SKIP_SOFA is set.
