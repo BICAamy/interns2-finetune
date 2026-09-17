@@ -1,5 +1,7 @@
 # InternS2 手术机械臂智能体
 
+> 本文中的 Docker 运行命令是旧环境记录，已不适用于新服务器。当前启动入口是 `scripts/services/start_all.sh`，详见 `docs/星光启动命令（统一）.md`。
+
 当前完成到 Step 10：InternS2 通过 LMDeploy 的 OpenAI-compatible API，将文本和
 可选图片解析成统一 `ParsedCommand`；确定性状态机通过 HTTP 调用 Step 6
 `robot-simulation` 和 Step 9 `planner-adapter`。当前只连接仿真机械臂，规划结果始终

@@ -1,5 +1,7 @@
 # Step 11–13：FastAPI + React 网页、远程仿真与语音控制台
 
+> 本文中的 Docker 构建与运行章节是旧环境记录，相关构建文件已移除。新服务器统一从仓库内运行 `scripts/services/start_all.sh`，详见 `docs/星光启动命令（统一）.md`。
+
 本服务是浏览器唯一入口。浏览器只访问 `agent-web`，不能直接访问
 `robot-simulation` 或 `planner-adapter`。任务始终先由 InternS2 解析并展示，
 医生点击“确认并执行”后，确定性编排器才允许调用工具。

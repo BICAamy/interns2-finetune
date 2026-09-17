@@ -1,5 +1,7 @@
 # SOFA/LapGym 仿真环境
 
+> 本文中的 Docker 构建与运行章节是旧环境记录，相关构建文件已移除。新服务器统一从仓库内运行 `scripts/services/start_all.sh`，详见 `docs/星光启动命令（统一）.md`。
+
 本目录承载手术导航项目的独立仿真运行时。Step 4 验证了 SOFA、SofaPython3、`sofa_env` 和无头渲染；Step 5 使用已购买的华沿 E05-Pro 力控版六轴机械臂，实现针尖/TCP 到入点的连续定位和相对移动；Step 6 将该环境封装为单 worker 的 HTTP/WebSocket/MJPEG 服务。当前仍不连接 InternS2、网页、路径规划或真实机械臂，也不包含穿刺执行逻辑。
 
 ## 固定版本

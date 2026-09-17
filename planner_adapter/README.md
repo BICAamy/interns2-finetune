@@ -1,5 +1,7 @@
 # Planner adapter
 
+> The Docker build/run section below is historical; the repository no longer maintains Docker images. On the new server, start this service with `scripts/services/start_all.sh` as documented in `docs/星光启动命令（统一）.md`.
+
 Step 9 provides a standalone, provider-neutral HTTP service for puncture path
 planning. It is an adapter and fault simulator, not a path-planning algorithm.
 The current Mock output contains only the requested entry and target points for

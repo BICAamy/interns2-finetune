@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -43,10 +42,3 @@ def test_real_stub_does_not_import_simulation_worker() -> None:
         capture_output=True,
         text=True,
     )
-
-
-def test_simulation_images_include_the_runtime_package() -> None:
-    project_root = Path(__file__).resolve().parents[3]
-    for name in ("Dockerfile", "Dockerfile.offline"):
-        dockerfile = project_root / "docker" / "simulation" / name
-        assert "COPY robot_runtime /workspace/robot_runtime" in dockerfile.read_text()
