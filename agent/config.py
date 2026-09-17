@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,6 +81,9 @@ class AgentSettings:
     top_p: float
     max_tool_rounds: int
     runtime_mode: RuntimeMode = RuntimeMode.SIMULATION
+    robot_control_mode: str | None = None
+    real_config_path: str | None = None
+    real_config_sha256: str | None = None
     default_coordinate_frame: CoordinateFrame = CoordinateFrame.ROBOT_BASE
     default_distance_unit: DistanceUnit = DistanceUnit.MILLIMETER
     default_relative_step_mm: float = 5.0
@@ -99,6 +103,12 @@ class AgentSettings:
     def from_env(cls, env_file: str | Path | None = None) -> "AgentSettings":
         load_environment(env_file)
         model = os.getenv("INTERNS2_MODEL", "").strip() or None
+        selected_mode = RuntimeMode(
+            os.getenv("RUNTIME_MODE", RuntimeMode.SIMULATION.value).strip()
+        )
+        robot_mode = os.getenv("ROBOT_MODE", selected_mode.value).strip()
+        if robot_mode != selected_mode.value:
+            raise ValueError("ROBOT_MODE and RUNTIME_MODE disagree")
         settings = cls(
             base_url=os.getenv("INTERNS2_BASE_URL", "http://127.0.0.1:23333/v1").strip(),
             api_key=os.getenv("INTERNS2_API_KEY", "EMPTY").strip(),
@@ -109,9 +119,10 @@ class AgentSettings:
             temperature=_as_float("INTERNS2_TEMPERATURE", 0.0),
             top_p=_as_float("INTERNS2_TOP_P", 0.95),
             max_tool_rounds=_as_int("INTERNS2_MAX_TOOL_ROUNDS", 3),
-            runtime_mode=RuntimeMode(
-                os.getenv("RUNTIME_MODE", RuntimeMode.SIMULATION.value).strip()
-            ),
+            runtime_mode=selected_mode,
+            robot_control_mode=os.getenv("ROBOT_CONTROL_MODE", "").strip() or None,
+            real_config_path=os.getenv("REAL_CONFIG_PATH", "").strip() or None,
+            real_config_sha256=os.getenv("REAL_CONFIG_SHA256", "").strip() or None,
             default_coordinate_frame=CoordinateFrame(
                 os.getenv(
                     "DEFAULT_COORDINATE_FRAME",
@@ -162,6 +173,15 @@ class AgentSettings:
         return settings
 
     def validate(self) -> None:
+        if self.runtime_mode == RuntimeMode.REAL:
+            if self.robot_control_mode != "observe-only":
+                raise ValueError("Step 3 real mode must remain observe-only")
+            if not self.real_config_path or not self.real_config_sha256:
+                raise ValueError("real mode requires config path and digest")
+            if re.fullmatch(r"[0-9a-f]{64}", self.real_config_sha256) is None:
+                raise ValueError("REAL_CONFIG_SHA256 must be a lowercase SHA-256 digest")
+        elif self.real_config_path or self.real_config_sha256:
+            raise ValueError("simulation mode cannot use real config")
         if not self.base_url:
             raise ValueError("INTERNS2_BASE_URL cannot be empty")
         if not self.api_key:

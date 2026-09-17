@@ -66,6 +66,110 @@ fail() {
     exit 1
 }
 
+ENV_ROBOT_MODE="${ROBOT_MODE:-}"
+ROBOT_MODE=simulation
+REAL_CONFIG_INPUT=""
+REQUESTED_CONTROL=observe-only
+MODE_GIVEN=false
+CONTROL_GIVEN=false
+CHECK_CONFIG=false
+
+while (( $# > 0 )); do
+    case "$1" in
+        --robot-mode)
+            (( $# >= 2 )) || fail "--robot-mode requires simulation or real."
+            $MODE_GIVEN && fail "--robot-mode was supplied more than once."
+            ROBOT_MODE="$2"
+            MODE_GIVEN=true
+            shift 2
+            ;;
+        --real-config)
+            (( $# >= 2 )) || fail "--real-config requires a file path."
+            [[ -z "$REAL_CONFIG_INPUT" ]] || fail "--real-config was supplied more than once."
+            REAL_CONFIG_INPUT="$2"
+            shift 2
+            ;;
+        --real-control)
+            (( $# >= 2 )) || fail "--real-control requires observe-only or enabled."
+            $CONTROL_GIVEN && fail "--real-control was supplied more than once."
+            REQUESTED_CONTROL="$2"
+            CONTROL_GIVEN=true
+            shift 2
+            ;;
+        --check-config)
+            CHECK_CONFIG=true
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--robot-mode simulation|real] [--real-config PATH] [--real-control observe-only|enabled] [--check-config]"
+            exit 0
+            ;;
+        *) fail "Unknown argument: $1" ;;
+    esac
+done
+
+[[ "$ROBOT_MODE" == simulation || "$ROBOT_MODE" == real ]] \
+    || fail "--robot-mode must be simulation or real."
+[[ "$REQUESTED_CONTROL" == observe-only || "$REQUESTED_CONTROL" == enabled ]] \
+    || fail "--real-control must be observe-only or enabled."
+[[ -z "${RUNTIME_MODE:-}" || "$RUNTIME_MODE" == "$ROBOT_MODE" ]] \
+    || fail "RUNTIME_MODE conflicts with --robot-mode."
+[[ -z "$ENV_ROBOT_MODE" || "$ENV_ROBOT_MODE" == "$ROBOT_MODE" ]] \
+    || fail "ROBOT_MODE conflicts with --robot-mode."
+
+CONFIG_SHA=""
+CONFIG_MISSING=0
+if [[ "$ROBOT_MODE" == simulation ]]; then
+    [[ -z "$REAL_CONFIG_INPUT" && -z "${REAL_CONFIG_PATH:-}" && -z "${REAL_CONFIG_SHA256:-}" ]] \
+        || fail "--real-config is not allowed in simulation mode."
+    $CONTROL_GIVEN && fail "--real-control is only valid in real mode."
+    [[ -z "${ROBOT_CONTROL_MODE:-}" ]] \
+        || fail "ROBOT_CONTROL_MODE is not allowed in simulation mode."
+    unset REAL_CONFIG_PATH REAL_CONFIG_SHA256 ROBOT_CONTROL_MODE
+else
+    [[ -n "$REAL_CONFIG_INPUT" ]] || fail "real mode requires --real-config."
+    [[ -z "${REAL_CONFIG_PATH:-}" ]] \
+        || fail "REAL_CONFIG_PATH must not override --real-config."
+    [[ -z "${ROBOT_CONTROL_MODE:-}" || "$ROBOT_CONTROL_MODE" == "$REQUESTED_CONTROL" ]] \
+        || fail "ROBOT_CONTROL_MODE conflicts with --real-control."
+    CONFIG_PYTHON="$SIM_ENV/bin/python"
+    if $CHECK_CONFIG && [[ ! -x "$CONFIG_PYTHON" ]]; then
+        CONFIG_PYTHON="$(command -v python3)"
+    fi
+    [[ -x "$CONFIG_PYTHON" ]] || fail "simulation Python environment is missing."
+    if [[ "$REAL_CONFIG_INPUT" == /* ]]; then
+        CONFIG_CANDIDATE="$REAL_CONFIG_INPUT"
+    else
+        CONFIG_CANDIDATE="$APP_ROOT/$REAL_CONFIG_INPUT"
+    fi
+    REAL_CONFIG_PATH="$("$CONFIG_PYTHON" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True))' "$CONFIG_CANDIDATE")" \
+        || fail "real config file does not exist."
+    CONFIG_REPORT="$(PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
+        "$CONFIG_PYTHON" -m robot_runtime.real_config "$REAL_CONFIG_PATH")" \
+        || fail "real config validation failed."
+    read -r CONFIG_SHA CONFIG_ALLOWED CONFIG_MISSING <<<"$CONFIG_REPORT"
+    [[ "$CONFIG_SHA" =~ ^[0-9a-f]{64}$ ]] || fail "real config digest is invalid."
+    [[ -z "${REAL_CONFIG_SHA256:-}" || "$REAL_CONFIG_SHA256" == "$CONFIG_SHA" ]] \
+        || fail "REAL_CONFIG_SHA256 conflicts with --real-config."
+    # Step 3 has no gateway, ARM, or motion path regardless of CLI/config.
+    ROBOT_CONTROL_MODE=observe-only
+    REAL_CONFIG_SHA256="$CONFIG_SHA"
+    export ROBOT_CONTROL_MODE REAL_CONFIG_PATH REAL_CONFIG_SHA256
+fi
+
+export ROBOT_MODE RUNTIME_MODE="$ROBOT_MODE"
+
+if $CHECK_CONFIG; then
+    if [[ "$ROBOT_MODE" == real ]]; then
+        echo "REAL / OBSERVE ONLY (requested=$REQUESTED_CONTROL, config_cap=$CONFIG_ALLOWED, blocking_fields=$CONFIG_MISSING)"
+        echo "REAL_CONFIG_PATH=$REAL_CONFIG_PATH"
+        echo "REAL_CONFIG_SHA256=$CONFIG_SHA"
+    else
+        echo "SIMULATION"
+    fi
+    exit 0
+fi
+
 check_model() {
     "$INFERENCE_ENV/bin/python" - "$MODEL_DIR" <<'PY_MODEL'
 from pathlib import Path
@@ -166,13 +270,14 @@ echo
 echo "BUNDLE_ROOT = $BUNDLE_ROOT"
 echo "APP_ROOT    = $APP_ROOT"
 echo "MODEL_DIR   = $MODEL_DIR"
-echo
-
-# Real-mode CLI is introduced in Step 3. Do not silently ignore a requested
-# mode and accidentally launch the current simulation-only stack instead.
-if (( $# != 0 )); then
-    fail "Unsupported arguments; this launcher currently starts simulation only."
+if [[ "$ROBOT_MODE" == real ]]; then
+    echo "ROBOT MODE  = REAL / OBSERVE ONLY"
+    echo "CONFIG SHA  = $CONFIG_SHA"
+    echo "BLOCKERS    = $CONFIG_MISSING"
+else
+    echo "ROBOT MODE  = SIMULATION"
 fi
+echo
 
 # --------------------------------------------------
 # Preflight (before creating logs or starting services)
@@ -191,8 +296,10 @@ done
 test -x "$INFERENCE_ENV/bin/lmdeploy" \
     || fail "lmdeploy is missing from inference environment."
 
-test -x "$SIM_ENV/bin/Xvfb" \
-    || fail "Xvfb is missing from simulation environment."
+if [[ "$ROBOT_MODE" == simulation ]]; then
+    test -x "$SIM_ENV/bin/Xvfb" \
+        || fail "Xvfb is missing from simulation environment."
+fi
 
 test -x "$CUDA_TOOLKIT_ROOT/bin/nvcc" \
     || fail "CUDA 12.8 toolkit is missing at $CUDA_TOOLKIT_ROOT."
@@ -202,14 +309,14 @@ CUDA_VERSION_OUTPUT="$("$CUDA_TOOLKIT_ROOT/bin/nvcc" --version)" \
 [[ "$CUDA_VERSION_OUTPUT" == *"release 12.8"* ]] \
     || fail "Expected CUDA 12.8 at $CUDA_TOOLKIT_ROOT."
 
-test -x "$SOFA_ROOT/bin/runSofa" \
-    || fail "SOFA runtime is missing."
-
-test -d "$SOFAPYTHON3_ROOT" \
-    || fail "SofaPython3 is missing."
-
-test -d "$E05_MODEL_DIR" \
-    || fail "E05 model directory is missing."
+if [[ "$ROBOT_MODE" == simulation ]]; then
+    test -x "$SOFA_ROOT/bin/runSofa" \
+        || fail "SOFA runtime is missing."
+    test -d "$SOFAPYTHON3_ROOT" \
+        || fail "SofaPython3 is missing."
+    test -d "$E05_MODEL_DIR" \
+        || fail "E05 model directory is missing."
+fi
 
 test -f "$APP_ROOT/models/asr/faster-whisper-small/model.bin" \
     || fail "ASR model is missing."
@@ -233,8 +340,12 @@ mkdir -p "$LOG_DIR"
 
 echo "Intern-S2 model = OK"
 echo "CUDA toolkit    = $CUDA_TOOLKIT_ROOT"
-echo "SOFA            = OK"
-echo "E05             = OK"
+if [[ "$ROBOT_MODE" == simulation ]]; then
+    echo "SOFA            = OK"
+    echo "E05             = OK"
+else
+    echo "Gateway         = disconnected (Step 3 stub)"
+fi
 echo "ASR             = OK"
 echo "frontend dist   = OK"
 echo
@@ -299,9 +410,12 @@ echo "      log=$LOG_DIR/planner-adapter.log"
 
 
 # --------------------------------------------------
-# 3. Xvfb + robot-simulation :8001
+# 3. robot runtime :8001 (simulation preserves the original Xvfb/SOFA path)
 # --------------------------------------------------
 
+if [[ "$ROBOT_MODE" == simulation ]]; then
+ROBOT_LOG="$LOG_DIR/robot-simulation.log"
+ROBOT_SERVICE_LABEL=robot-simulation
 echo "[3/4] Starting Xvfb + robot-simulation..."
 
 (
@@ -346,7 +460,7 @@ fi
 
     exec "$SIM_ENV/bin/python" \
         -m simulation.server.main
-) >"$LOG_DIR/robot-simulation.log" 2>&1 &
+) >"$ROBOT_LOG" 2>&1 &
 
 SIM_PID=$!
 PIDS+=("$SIM_PID")
@@ -354,7 +468,23 @@ PIDS+=("$SIM_PID")
 echo "      Xvfb PID=$XVFB_PID"
 echo "      simulation PID=$SIM_PID"
 echo "      DISPLAY=:$XVFB_DISPLAY"
-echo "      log=$LOG_DIR/robot-simulation.log"
+echo "      log=$ROBOT_LOG"
+else
+    ROBOT_LOG="$LOG_DIR/robot-runtime.log"
+    ROBOT_SERVICE_LABEL=robot-runtime
+    echo "[3/4] Starting REAL / OBSERVE ONLY robot runtime (gateway disconnected)..."
+    (
+        export PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT"
+        export ROBOT_SIMULATION_HOST=127.0.0.1
+        export ROBOT_SIMULATION_PORT=8001
+        export ROBOT_SIMULATION_LOG_LEVEL=info
+        exec "$SIM_ENV/bin/python" -m robot_runtime.main
+    ) >"$ROBOT_LOG" 2>&1 &
+    SIM_PID=$!
+    PIDS+=("$SIM_PID")
+    echo "      runtime PID=$SIM_PID"
+    echo "      log=$ROBOT_LOG"
+fi
 
 
 # --------------------------------------------------
@@ -377,10 +507,33 @@ wait_http \
     "$LOG_DIR/planner-adapter.log"
 
 wait_http \
-    "robot-simulation" \
+    "$ROBOT_SERVICE_LABEL" \
     "http://127.0.0.1:8001/health" \
     120 \
-    "$LOG_DIR/robot-simulation.log"
+    "$ROBOT_LOG"
+
+"$PLANNER_ENV/bin/python" - "$ROBOT_MODE" <<'PY_ROBOT_MODE' \
+    || fail "Port 8001 provider mode does not match startup mode."
+import json
+import sys
+import urllib.request
+
+with urllib.request.urlopen("http://127.0.0.1:8001/health", timeout=3) as response:
+    health = json.load(response)
+if sys.argv[1] == "real":
+    valid = (
+        health.get("runtime_mode") == "real"
+        and health.get("control_mode") == "observe-only"
+        and health.get("provider") == "huayan_edge_gateway"
+        and health.get("ready_for_motion") is False
+        and health.get("error") == "gateway_disconnected"
+    )
+else:
+    valid = health.get("service") == "robot-simulation" and health.get("ready") is True
+if not valid:
+    print("robot provider health does not match requested mode", file=sys.stderr)
+    raise SystemExit(1)
+PY_ROBOT_MODE
 
 
 # --------------------------------------------------
@@ -398,7 +551,7 @@ echo "[4/4] Starting agent-web..."
     export INTERNS2_MODEL="$MODEL_DIR"
     export INTERNS2_TEMPERATURE=0
 
-    export RUNTIME_MODE=simulation
+    export RUNTIME_MODE="$ROBOT_MODE"
     export DEFAULT_COORDINATE_FRAME=robot_base
     export DEFAULT_DISTANCE_UNIT=mm
 
@@ -442,6 +595,19 @@ wait_http \
     60 \
     "$LOG_DIR/agent-web.log"
 
+"$PLANNER_ENV/bin/python" - "$ROBOT_MODE" <<'PY_WEB_MODE' \
+    || fail "agent-web mode does not match startup mode."
+import json
+import sys
+import urllib.request
+
+with urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3) as response:
+    health = json.load(response)
+if health.get("runtime_mode") != sys.argv[1]:
+    print("agent-web runtime_mode disagrees with robot runtime", file=sys.stderr)
+    raise SystemExit(1)
+PY_WEB_MODE
+
 
 echo
 echo "=================================================="
@@ -449,13 +615,13 @@ echo " ALL SERVICES HEALTHY"
 echo "=================================================="
 echo
 echo " InternS2 inference : http://127.0.0.1:23333"
-echo " robot-simulation   : http://127.0.0.1:8001"
+echo " $ROBOT_SERVICE_LABEL : http://127.0.0.1:8001"
 echo " planner-adapter    : http://127.0.0.1:8002"
 echo " agent-web          : http://127.0.0.1:8000"
 echo
 echo " Logs:"
 echo "   $LOG_DIR/inference.log"
-echo "   $LOG_DIR/robot-simulation.log"
+echo "   $ROBOT_LOG"
 echo "   $LOG_DIR/planner-adapter.log"
 echo "   $LOG_DIR/agent-web.log"
 echo

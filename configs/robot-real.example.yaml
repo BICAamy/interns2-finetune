@@ -1,0 +1,54 @@
+# 这是示例配置。复制后填写现场确认过的数据；null 表示还没确认。
+schema_version: "1.0" # 配置格式版本
+allowed_control: observe-only # 目前禁止控制真机运动
+
+controller:
+  host: null # 控制器的 TCP 地址，不一定是网页地址
+  command_port: 10003 # 命令端口，现场核对
+  datasheet_port: null # 实时状态数据端口
+  device_sn: null # 设备序列号
+  asset_id: null # 项目里给这台机器的编号
+  model: E05-Pro # 机器人型号，现场核对
+  package_versions: [] # 允许的控制器软件版本；空列表表示未确认
+
+joint_mapping:
+  sign: null # J1～J6 的方向：同向填 1，反向填 -1
+  zero_offset_deg: null # J1～J6 的零点差，单位：deg
+
+base_to_sofa: # 真机底座在仿真场景中的位置和朝向
+  translation_mm: null # 位置 [x, y, z]，单位：mm
+  quaternion_xyzw: null # 朝向 [qx, qy, qz, qw]
+
+tool:
+  tcp_name: null # 控制器里选用的工具中心点名称
+  flange_to_tcp: # 法兰到工具中心点的变换
+    translation_mm: null # 位置 [x, y, z]，单位：mm
+    quaternion_xyzw: null # 朝向 [qx, qy, qz, qw]
+  payload_kg: null # 工具重量，单位：千克
+  center_of_gravity_mm: null # 工具重心 [x, y, z]，单位：mm
+  mount_angle_deg: null # 机器人安装角deg，单位：deg
+
+limits:
+  joint_soft_limits_deg: null # J1～J6 各自的 [最小角, 最大角]，单位：deg
+  joint_margin_deg: null # 离关节角deg边界留多少余量，单位：deg
+  workspace_low_mm: null # 活动区域下边界 [x, y, z]，单位：mm
+  workspace_high_mm: null # 活动区域上边界 [x, y, z]，单位：mm
+  max_speed_mm_s: null # 最高移动速deg，单位：mm/秒
+  max_acceleration_mm_s2: null # 最高移动加速deg，单位：mm/秒²
+  max_step_mm: null # 一次相对移动最多走多远，单位：mm
+  max_rotation_deg: null # 一次最多转多少deg
+  max_absolute_displacement_mm: null # 离参考位置最多多远，单位：mm
+
+deadlines: # 各环节最多等多久；超时不算成功
+  state_stale_ms: null # 状态数据多久没更新就算过期，单位：ms
+  response_ms: null # 等控制器回复的最长时间，单位：ms
+  startup_ms: null # 等机器人开始运动的最长时间，单位：ms
+  motion_ms: null # 等运动结束的最长时间，单位：ms
+  stop_delivery_ms: null # 等软件停止请求送达的最长时间，单位：ms
+  stop_ack_ms: null # 等控制器确认停止的最长时间，单位：ms
+
+arrival: # 怎样判断机器人真的到位
+  position_tolerance_mm: null # 位置最多能差多少，单位：mm
+  orientation_tolerance_deg: null # 朝向最多能差多少，单位：deg
+  stable_samples: null # 连续多少次状态都满足要求；至少填 2
+  dwell_ms: null # 到位后还要保持多久，单位：ms

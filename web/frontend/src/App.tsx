@@ -151,6 +151,7 @@ function TrajectoryPlot({ telemetry }: { telemetry: SimulationTelemetry | null }
 
 export default function App() {
   const [session, setSession] = useState<SessionSnapshot | null>(null);
+  const [runtimeMode, setRuntimeMode] = useState<"simulation" | "real" | null>(null);
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [image, setImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -182,6 +183,18 @@ export default function App() {
   const audioChunks = useRef<Blob[]>([]);
   const recordingStartedAt = useRef(0);
   const recordingTimer = useRef<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.health()
+      .then((health) => {
+        if (!cancelled) setRuntimeMode(health.runtime_mode);
+      })
+      .catch((error) => {
+        if (!cancelled) setRequestError(`无法确认机器人运行模式：${String(error)}`);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -267,7 +280,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!session?.session_id) return;
+    if (!session?.session_id || runtimeMode !== "simulation") return;
     let cancelled = false;
     api.camera(session.session_id)
       .then((state) => {
@@ -282,16 +295,16 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [session?.session_id]);
+  }, [session?.session_id, runtimeMode]);
 
   useEffect(() => {
-    if (!videoFailed) return;
+    if (!videoFailed || runtimeMode !== "simulation") return;
     const timer = window.setTimeout(() => {
       setVideoAttempt((value) => value + 1);
       setVideoFailed(false);
     }, 2000);
     return () => window.clearTimeout(timer);
-  }, [videoFailed]);
+  }, [videoFailed, runtimeMode]);
 
   const command = session?.normalized_command;
   const isBusy = session ? busyStatuses.has(session.status) : true;
@@ -311,7 +324,7 @@ export default function App() {
   const entry = (command?.entry_point ?? telemetry?.entry_point) as Point3D | undefined;
   const target = (command?.target_point ?? telemetry?.target_point) as Point3D | undefined;
   const currentTcp = telemetry?.current_tcp ?? session?.current_tcp;
-  const videoUrl = session ? api.videoUrl(session.session_id, videoAttempt) : "";
+  const videoUrl = runtimeMode === "simulation" && session ? api.videoUrl(session.session_id, videoAttempt) : "";
 
   const statusTone = useMemo(() => {
     if (!session) return "neutral";
@@ -331,7 +344,7 @@ export default function App() {
   }
 
   async function updateCamera(payload: CameraControlPayload) {
-    if (!session || cameraRequestInFlight.current) return;
+    if (!session || runtimeMode !== "simulation" || cameraRequestInFlight.current) return;
     cameraRequestInFlight.current = true;
     try {
       setCamera(await api.controlCamera(session.session_id, payload));
@@ -343,6 +356,7 @@ export default function App() {
     }
   }
   useEffect(() => {
+  if (runtimeMode !== "simulation") return;
   const element = videoStageRef.current;
   if (!element) return;
 
@@ -366,7 +380,7 @@ export default function App() {
   return () => {
     element.removeEventListener("wheel", handleWheel);
   };
-}, [session?.session_id]);
+}, [session?.session_id, runtimeMode]);
 
   function beginCameraDrag(event: ReactPointerEvent<HTMLDivElement>) {
     if (event.button !== 0 && event.button !== 2) return;
@@ -564,26 +578,26 @@ export default function App() {
           <div className="brand-mark">IS</div>
           <div>
             <h1>InternS2 手术导航控制台</h1>
-            <p>E05-Pro 仿真定位 · 人工确认模式</p>
+            <p>{runtimeMode === "real" ? "真实机械臂 · 仅观察 · 网关未连接" : runtimeMode === "simulation" ? "E05-Pro 仿真定位 · 人工确认模式" : "正在确认机器人运行模式"}</p>
           </div>
         </div>
         <div className="topbar-actions">
           <span className={`connection ${connected ? "online" : "offline"}`}>
-            {connected ? "状态已连接" : "状态连接中"}
+            {runtimeMode === "real" ? (connected ? "控制台已连接 · 网关断开" : "控制台连接中 · 网关断开") : connected ? "状态已连接" : "状态连接中"}
           </span>
-          <span className={`connection ${videoConnected ? "online" : "offline"}`}>
-            {videoConnected ? "视频已连接" : "视频连接中"}
+          <span className={`connection ${videoConnected && runtimeMode === "simulation" ? "online" : "offline"}`}>
+            {runtimeMode === "real" ? "真实画面不可用" : videoConnected ? "视频已连接" : "视频连接中"}
           </span>
           <button
             className="button stop"
-            disabled={!session}
+            disabled={!session || runtimeMode !== "simulation"}
             onClick={() => session && run(() => api.action(session.session_id, "stop"))}
           >
             停止
           </button>
           <button
             className="button estop"
-            disabled={!session}
+            disabled={!session || runtimeMode !== "simulation"}
             onClick={() => session && run(() => api.action(session.session_id, "estop"))}
           >
             紧急停止
@@ -600,7 +614,7 @@ export default function App() {
             {session?.message && <p className="operation-message">{session.message}</p>}
           </div>
           <div className="session-meta">
-            <span>仿真模式</span>
+            <span>{runtimeMode === "real" ? "真实 / 仅观察" : runtimeMode === "simulation" ? "仿真模式" : "模式未确认"}</span>
             <code>{session?.session_id.slice(-10) ?? "—"}</code>
           </div>
         </section>
@@ -709,10 +723,10 @@ export default function App() {
               </button>
               <button
                 className="button confirm"
-                disabled={!session?.pending_confirmation}
+                disabled={!session?.pending_confirmation || runtimeMode !== "simulation"}
                 onClick={() => session && run(() => api.action(session.session_id, "confirm"))}
               >
-                确认并执行
+                {runtimeMode === "real" ? "真实模式禁止执行" : "确认并执行"}
               </button>
               <button
                 className="button secondary"
@@ -723,7 +737,7 @@ export default function App() {
               </button>
               <button
                 className="button secondary"
-                disabled={session?.status !== "estop"}
+                disabled={session?.status !== "estop" || runtimeMode !== "simulation"}
                 onClick={() => session && run(() => api.action(session.session_id, "reset-estop"))}
               >
                 复位急停
@@ -731,7 +745,7 @@ export default function App() {
             </div>
             <div className="safety-note">
               <strong>执行边界</strong>
-              <span>确认只会移动机械臂并请求不可执行的路径预览，当前版本不会执行穿刺。</span>
+              <span>{runtimeMode === "real" ? "真实模式当前仅供观察；网关未连接，网页不能执行、停止、急停或复位。请使用现场物理装置保障安全。" : "确认只会移动机械臂并请求不可执行的路径预览，当前版本不会执行穿刺。"}</span>
             </div>
           </section>
 
@@ -760,8 +774,8 @@ export default function App() {
           <section className="panel simulation-panel">
             <div className="panel-heading">
               <div>
-                <span className="eyebrow">03 · 远程仿真</span>
-                <h2>E05-Pro 实时画面与遥测</h2>
+                <span className="eyebrow">{runtimeMode === "real" ? "03 · 真实机械臂" : runtimeMode === "simulation" ? "03 · 远程仿真" : "03 · 模式未确认"}</span>
+                <h2>{runtimeMode === "real" ? "真实姿态尚不可用" : runtimeMode === "simulation" ? "E05-Pro 实时画面与遥测" : "等待运行模式确认"}</h2>
               </div>
               <span className={`step-badge ${telemetry?.connected ? "live" : ""}`}>
                 {telemetry?.connected ? `${telemetry.simulation_fps ?? 0} FPS` : "遥测断开"}
@@ -771,10 +785,10 @@ export default function App() {
               <div
                 ref={videoStageRef}
                 className={`video-stage ${cameraDragging ? "dragging" : ""}`}
-                onPointerDown={beginCameraDrag}
-                onPointerMove={moveCamera}
-                onPointerUp={endCameraDrag}
-                onPointerCancel={endCameraDrag}
+                onPointerDown={runtimeMode === "simulation" ? beginCameraDrag : undefined}
+                onPointerMove={runtimeMode === "simulation" ? moveCamera : undefined}
+                onPointerUp={runtimeMode === "simulation" ? endCameraDrag : undefined}
+                onPointerCancel={runtimeMode === "simulation" ? endCameraDrag : undefined}
               >
                 {videoUrl && (
                   <img
@@ -792,22 +806,31 @@ export default function App() {
                     }}
                   />
                 )}
-                <div className="video-overlay top-left">
+                {runtimeMode === "real" && (
+                  <div className="video-fallback">
+                    <strong>REAL / OBSERVE ONLY</strong>
+                    <span>Mac 网关未连接；尚无可信的真实关节姿态与 SOFA 同步画面。此处不会显示仿真姿态冒充真机。</span>
+                  </div>
+                )}
+                {runtimeMode === null && (
+                  <div className="video-fallback"><strong>运行模式未确认</strong><span>暂不显示机械臂画面。</span></div>
+                )}
+                {runtimeMode === "simulation" && <div className="video-overlay top-left">
                   <span className={videoConnected ? "record-dot live" : "record-dot"} />
                   {videoConnected ? "REMOTE SIMULATION" : "RECONNECTING"}
-                </div>
-                <div className="video-overlay bottom-right">
+                </div>}
+                {runtimeMode === "simulation" && <div className="video-overlay bottom-right">
                   frame {telemetry?.frame_sequence ?? 0}
-                </div>
-                <div className="camera-hint">
+                </div>}
+                {runtimeMode === "simulation" && <div className="camera-hint">
                   左键旋转 · 右键平移 · 滚轮缩放 · 双击复位
-                </div>
-                <div className="camera-state">
+                </div>}
+                {runtimeMode === "simulation" && <div className="camera-state">
                   {camera
                     ? `方位 ${camera.yaw_deg.toFixed(0)}° · 俯仰 ${camera.pitch_deg.toFixed(0)}° · ${camera.distance_m.toFixed(2)} m`
                     : "正在读取相机状态"}
-                </div>
-                <div
+                </div>}
+                {runtimeMode === "simulation" && <div
                   className="camera-presets"
                   onPointerDown={(event) => event.stopPropagation()}
                   onDoubleClick={(event) => event.stopPropagation()}
@@ -821,8 +844,8 @@ export default function App() {
                       {preset.label}
                     </button>
                   ))}
-                </div>
-                {videoFailed && (
+                </div>}
+                {videoFailed && runtimeMode === "simulation" && (
                   <div className="video-fallback">
                     <strong>仿真视频暂时不可用</strong>
                     <span>系统将在 2 秒后自动重连，机械臂控制线程不受影响。</span>
@@ -831,7 +854,11 @@ export default function App() {
                 {cameraError && <div className="camera-error">{cameraError}</div>}
               </div>
 
-              <aside className="telemetry-board">
+              {runtimeMode === "real" ? (
+                <aside className="telemetry-board">
+                  <div className="telemetry-error">真实机械臂网关未连接；无可信关节角、TCP 或运动状态。后续只读网关联调完成前不显示仿真值。</div>
+                </aside>
+              ) : <aside className="telemetry-board">
                 <div className="telemetry-stats">
                   <div><span>位置误差</span><strong>{telemetry?.position_error_mm != null ? `${telemetry.position_error_mm.toFixed(3)} mm` : "—"}</strong></div>
                   <div><span>运动状态</span><strong>{telemetry?.motion_state ?? "—"}</strong></div>
@@ -851,7 +878,7 @@ export default function App() {
                 {telemetry?.error && (
                   <div className="telemetry-error">{String(telemetry.error.message ?? "仿真遥测不可用")}</div>
                 )}
-              </aside>
+              </aside>}
             </div>
           </section>
 

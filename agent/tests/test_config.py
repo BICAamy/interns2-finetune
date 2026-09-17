@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import unittest
+from unittest.mock import patch
 
 from agent.config import AgentSettings
 from surgical_contracts import CoordinateFrame
@@ -22,6 +23,35 @@ def settings() -> AgentSettings:
 
 
 class AgentSettingsTests(unittest.TestCase):
+    def test_real_environment_is_observe_only_and_requires_config(self):
+        base = {
+            "RUNTIME_MODE": "real",
+            "ROBOT_MODE": "real",
+            "ROBOT_CONTROL_MODE": "observe-only",
+            "REAL_CONFIG_PATH": "/tmp/robot-real.local.yaml",
+            "REAL_CONFIG_SHA256": "a" * 64,
+        }
+        with patch.dict("os.environ", base, clear=True):
+            self.assertEqual(AgentSettings.from_env().runtime_mode.value, "real")
+        with patch.dict("os.environ", {**base, "ROBOT_CONTROL_MODE": "enabled"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "observe-only"):
+                AgentSettings.from_env()
+        with patch.dict("os.environ", {**base, "REAL_CONFIG_PATH": ""}, clear=True):
+            with self.assertRaisesRegex(ValueError, "config path"):
+                AgentSettings.from_env()
+        with patch.dict("os.environ", {**base, "REAL_CONFIG_SHA256": "invalid"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "SHA-256"):
+                AgentSettings.from_env()
+
+    def test_environment_mode_conflict_is_rejected(self):
+        with patch.dict(
+            "os.environ",
+            {"RUNTIME_MODE": "real", "ROBOT_MODE": "simulation"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "disagree"):
+                AgentSettings.from_env()
+
     def test_step7_defaults_are_valid(self):
         value = settings()
         value.validate()

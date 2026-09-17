@@ -94,6 +94,7 @@ class HealthResponse(WebModel):
     status: Literal["healthy"] = "healthy"
     service: Literal["agent-web"] = "agent-web"
     runtime_mode: str
+    control_mode: str | None = None
     puncture_execution_enabled: Literal[False] = False
     sessions: int = Field(ge=0)
     downstream: dict[str, str]

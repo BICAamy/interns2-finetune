@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from robot_runtime.api import create_app, create_provider
+from robot_runtime.main import app_from_environment
+from robot_runtime.real_config import load_real_config
 from robot_runtime.providers import HuayanRealStubProvider, SimulationProvider
 from surgical_contracts import RuntimeMode
 
@@ -42,3 +46,29 @@ def test_real_stub_does_not_import_simulation_worker() -> None:
         capture_output=True,
         text=True,
     )
+
+
+def test_real_process_entry_requires_matching_mode_config_and_digest(monkeypatch) -> None:
+    example = Path(__file__).resolve().parents[3] / "configs" / "robot-real.example.yaml"
+    digest = load_real_config(example).digest()
+    monkeypatch.setenv("ROBOT_MODE", "real")
+    monkeypatch.setenv("RUNTIME_MODE", "real")
+    monkeypatch.setenv("REAL_CONFIG_PATH", str(example))
+    monkeypatch.setenv("REAL_CONFIG_SHA256", digest)
+    monkeypatch.setenv("ROBOT_CONTROL_MODE", "observe-only")
+    with TestClient(app_from_environment()) as client:
+        health = client.get("/health").json()
+        assert health["control_mode"] == "observe-only"
+        assert health["ready_for_motion"] is False
+
+    monkeypatch.setenv("REAL_CONFIG_SHA256", "0" * 64)
+    with pytest.raises(ValueError, match="digest"):
+        app_from_environment()
+    monkeypatch.setenv("REAL_CONFIG_SHA256", digest)
+    monkeypatch.setenv("ROBOT_CONTROL_MODE", "enabled")
+    with pytest.raises(ValueError, match="observe-only"):
+        app_from_environment()
+    monkeypatch.setenv("ROBOT_CONTROL_MODE", "observe-only")
+    monkeypatch.setenv("RUNTIME_MODE", "simulation")
+    with pytest.raises(ValueError, match="disagree"):
+        app_from_environment()

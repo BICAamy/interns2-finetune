@@ -88,6 +88,7 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+/configs/robot-real.local.yaml
 
 # ============================================================
 # Web frontend

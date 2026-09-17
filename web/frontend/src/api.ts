@@ -23,6 +23,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  health: () => request<{ runtime_mode: "simulation" | "real"; control_mode: string | null }>("/health"),
   createSession: () =>
     request<SessionSnapshot>("/api/sessions", { method: "POST" }),
   getSession: (sessionId: string) =>

@@ -20,6 +20,7 @@ from surgical_contracts import (
     SimulationCameraControlRequest,
     SimulationCameraState,
     ToolEvent,
+    RuntimeMode,
 )
 
 from agent.config import AgentSettings
@@ -54,6 +55,7 @@ from .simulation_proxy import (
     MJPEGStream,
     RobotSimulationObservabilityHTTPClient,
     SimulationObserver,
+    SimulationProxyError,
 )
 from .sessions import SessionConflict, SessionStore
 
@@ -97,6 +99,16 @@ _CURRENT_TOOLS = {
 _TELEMETRY_TRAJECTORY_LIMIT = 160
 
 
+class _DisconnectedRealRobot:
+    """No outbound robot client exists before the Mac gateway is implemented."""
+
+    def __getattr__(self, name: str):
+        raise RuntimeError(f"real robot operation {name} is unavailable in observe-only mode")
+
+    def close(self) -> None:
+        pass
+
+
 class WebRuntime:
     def __init__(
         self,
@@ -111,29 +123,33 @@ class WebRuntime:
         speech_transcriber: SpeechTranscriber | None = None,
     ) -> None:
         settings.validate()
-        if settings.runtime_mode.value != "simulation":
-            raise ValueError("agent-web currently requires RUNTIME_MODE=simulation")
+        self._real_observe_only = settings.runtime_mode == RuntimeMode.REAL
         self.settings = settings
         self.store = store or SessionStore()
         self._model_http: OpenAICompatibleHTTPClient | None = None
         self._owns_robot = robot is None
         self._owns_planner = planner is None
-        self._owns_simulation_observer = simulation_observer is None
+        self._owns_simulation_observer = simulation_observer is None and not self._real_observe_only
         if parser is None:
             self._model_http = OpenAICompatibleHTTPClient(settings)
             parser = InternS2Agent(settings, client=self._model_http)
         self.parser = parser
-        self.robot = robot or RobotSimulationHTTPController(
-            settings.robot_simulation_base_url,
-            http_timeout_s=settings.robot_simulation_http_timeout,
-            command_timeout_s=settings.robot_simulation_command_timeout,
-            poll_interval_s=settings.robot_simulation_poll_interval,
+        self.robot = robot or (
+            _DisconnectedRealRobot()
+            if self._real_observe_only else
+            RobotSimulationHTTPController(
+                settings.robot_simulation_base_url,
+                http_timeout_s=settings.robot_simulation_http_timeout,
+                command_timeout_s=settings.robot_simulation_command_timeout,
+                poll_interval_s=settings.robot_simulation_poll_interval,
+            )
         )
         self.planner = planner or PlannerAdapterHTTPClient(
             settings.planner_adapter_base_url,
             timeout_s=settings.planner_adapter_timeout,
         )
         self.simulation_observer = (
+            None if self._real_observe_only else
             simulation_observer
             or RobotSimulationObservabilityHTTPClient(
                 settings.robot_simulation_base_url,
@@ -173,11 +189,13 @@ class WebRuntime:
             self.robot.close()
         if self._owns_planner and hasattr(self.planner, "close"):
             self.planner.close()
-        if self._owns_simulation_observer:
+        if self._owns_simulation_observer and self.simulation_observer is not None:
             self.simulation_observer.close()
 
     async def create_session(self) -> SessionSnapshot:
         snapshot = self.store.create()
+        if self._real_observe_only:
+            return snapshot
         try:
             state = await asyncio.to_thread(self.robot.get_state)
         except Exception:
@@ -199,6 +217,18 @@ class WebRuntime:
 
     def get_simulation_telemetry(self, session_id: str) -> SimulationTelemetryView:
         session = self.store.snapshot(session_id)
+        if self._real_observe_only:
+            return SimulationTelemetryView(
+                connected=False,
+                sequence=0,
+                received_at_ms=_now_ms(),
+                state_machine_state=session.status.value,
+                error={
+                    "code": "GATEWAY_DISCONNECTED",
+                    "message": "真实机械臂网关未连接；当前没有可信的实时姿态或画面",
+                },
+            )
+        assert self.simulation_observer is not None
         telemetry = self.simulation_observer.get_telemetry()
         command = session.normalized_command or {}
         entry_point = _point_from_payload(command.get("entry_point"))
@@ -269,10 +299,14 @@ class WebRuntime:
 
     async def open_simulation_video(self, session_id: str) -> MJPEGStream:
         self.store.snapshot(session_id)
+        if self.simulation_observer is None:
+            raise SimulationProxyError("真实机械臂网关未连接；没有可用视频")
         return await self.simulation_observer.open_mjpeg()
 
     def get_simulation_camera(self, session_id: str) -> SimulationCameraState:
         self.store.snapshot(session_id)
+        if self.simulation_observer is None:
+            raise SimulationProxyError("真实机械臂网关未连接；没有可用相机")
         return self.simulation_observer.get_camera_state()
 
     def control_simulation_camera(
@@ -281,16 +315,20 @@ class WebRuntime:
         request: SimulationCameraControlRequest,
     ) -> SimulationCameraState:
         self.store.snapshot(session_id)
+        if self.simulation_observer is None:
+            raise SimulationProxyError("真实机械臂网关未连接；没有可用相机")
         return self.simulation_observer.control_camera(request)
 
     def health(self) -> HealthResponse:
         return HealthResponse(
             runtime_mode=self.settings.runtime_mode.value,
+            control_mode="observe-only" if self._real_observe_only else None,
             puncture_execution_enabled=False,
             sessions=self.store.count,
             downstream={
                 "interns2": self.settings.base_url,
-                "robot_simulation": self.settings.robot_simulation_base_url,
+                ("robot_runtime" if self._real_observe_only else "robot_simulation"):
+                    self.settings.robot_simulation_base_url,
                 "planner_adapter": self.settings.planner_adapter_base_url,
             },
             asr=self.asr.status(),
@@ -455,8 +493,16 @@ class WebRuntime:
                 # even when the parser considers a relative command unambiguous.
                 record.status = SessionStatus.AWAITING_CONFIRMATION
                 record.pending_command = parsed.command
-                record.message = "请核对结构化任务，确认后才会调用机械臂"
-                if asr_transcription is not None and asr_transcription.low_confidence:
+                record.message = (
+                    "已解析任务；真实模式仅供观察，网关未连接，不能确认执行"
+                    if self._real_observe_only
+                    else "请核对结构化任务，确认后才会调用机械臂"
+                )
+                if (
+                    not self._real_observe_only
+                    and asr_transcription is not None
+                    and asr_transcription.low_confidence
+                ):
                     record.message = (
                         "语音置信度较低，请逐字核对转写与坐标；确认后才会调用机械臂"
                     )
@@ -464,6 +510,8 @@ class WebRuntime:
         return self.store.mutate(session_id, finish)
 
     async def confirm(self, session_id: str) -> SessionSnapshot:
+        if self._real_observe_only:
+            raise SessionConflict("真实机械臂当前仅供观察，网关未连接；禁止执行命令")
         selected: dict[str, Any] = {}
 
         def begin(record) -> None:
@@ -510,6 +558,8 @@ class WebRuntime:
         return self.store.mutate(session_id, operation)
 
     async def stop(self, session_id: str, *, emergency: bool) -> SessionSnapshot:
+        if self._real_observe_only:
+            raise SessionConflict("真实机械臂网关未连接；网页不能发送停止或急停，请使用现场物理装置")
         command = ParsedCommand(
             command_id=f"web-{'estop' if emergency else 'stop'}-{uuid4().hex}",
             intent=(
@@ -557,6 +607,8 @@ class WebRuntime:
         return self.store.mutate(session_id, finish)
 
     async def reset_estop(self, session_id: str) -> SessionSnapshot:
+        if self._real_observe_only:
+            raise SessionConflict("真实机械臂网关未连接；禁止远程复位急停")
         # Resolve the session before performing a state-changing tool call.
         self.store.snapshot(session_id)
         command_id = f"web-reset-{uuid4().hex}"

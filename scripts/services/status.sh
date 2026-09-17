@@ -12,13 +12,11 @@ test -x "$PYTHON" || {
 }
 
 "$PYTHON" - <<'PY'
+import json
 import urllib.request
 
 services = [
     ("interns2-inference", 23333, "/v1/models"),
-    ("robot-simulation", 8001, "/health"),
-    ("planner-adapter", 8002, "/health"),
-    ("agent-web", 8000, "/health"),
 ]
 
 print("==================================================")
@@ -36,6 +34,46 @@ for name, port, path in services:
     state = "RUNNING" if healthy else "DOWN"
     detail = "HEALTHY" if healthy else "UNAVAILABLE"
     print(f"{name:22} {state:9} :{port:<5}  {detail}")
+
+try:
+    with urllib.request.urlopen("http://127.0.0.1:8001/health", timeout=3) as response:
+        robot = json.load(response)
+    if robot.get("runtime_mode") == "real":
+        real_ok = (
+            robot.get("control_mode") == "observe-only"
+            and robot.get("status") == "degraded"
+            and robot.get("ready_for_motion") is False
+            and robot.get("error") == "gateway_disconnected"
+        )
+        mode = "REAL / OBSERVE ONLY" if real_ok else "REAL / MODE MISMATCH"
+        detail = "DEGRADED (gateway disconnected)" if real_ok else "MODE MISMATCH"
+    else:
+        mode = "SIMULATION"
+        detail = "HEALTHY" if robot.get("service") == "robot-simulation" and robot.get("ready") else "UNAVAILABLE"
+    state = "RUNNING" if detail not in {"MODE MISMATCH", "UNAVAILABLE"} else "DOWN"
+except Exception:
+    mode, state, detail = "UNKNOWN", "DOWN", "UNAVAILABLE"
+robot_name = "robot-runtime" if mode.startswith("REAL") else "robot-simulation"
+print(f"{robot_name:22} {state:9} :{8001:<5}  {detail}")
+
+try:
+    with urllib.request.urlopen("http://127.0.0.1:8002/health", timeout=3) as response:
+        planner_healthy = 200 <= response.status < 300
+except Exception:
+    planner_healthy = False
+print(f"{'planner-adapter':22} {'RUNNING' if planner_healthy else 'DOWN':9} :{8002:<5}  {'HEALTHY' if planner_healthy else 'UNAVAILABLE'}")
+
+try:
+    with urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3) as response:
+        web = json.load(response)
+    expected = "real" if mode.startswith("REAL") else "simulation"
+    healthy = mode != "UNKNOWN" and web.get("runtime_mode") == expected
+    if mode.startswith("REAL"):
+        healthy = healthy and web.get("control_mode") == "observe-only"
+except Exception:
+    healthy = False
+print(f"{'agent-web':22} {'RUNNING' if healthy else 'DOWN':9} :{8000:<5}  {'HEALTHY' if healthy else 'MODE MISMATCH / UNAVAILABLE'}")
+print(f"ROBOT MODE = {mode}")
 
 print("==================================================")
 PY
