@@ -41,12 +41,20 @@ try:
     if robot.get("runtime_mode") == "real":
         real_ok = (
             robot.get("control_mode") == "observe-only"
-            and robot.get("status") == "degraded"
+            and robot.get("provider") == "huayan_edge_gateway"
+            and robot.get("status") in {"healthy", "degraded"}
             and robot.get("ready_for_motion") is False
-            and robot.get("error") == "gateway_disconnected"
+            and robot.get("error") in {
+                None, "gateway_disconnected", "datasheet_disconnected",
+                "datasheet_stale", "command_socket_disconnected",
+            }
         )
         mode = "REAL / OBSERVE ONLY" if real_ok else "REAL / MODE MISMATCH"
-        detail = "DEGRADED (gateway disconnected)" if real_ok else "MODE MISMATCH"
+        detail = (
+            "MODE MISMATCH" if not real_ok else
+            "HEALTHY (state fresh, observe-only)" if robot.get("status") == "healthy"
+            else f"DEGRADED ({robot.get('error')})"
+        )
     else:
         mode = "SIMULATION"
         detail = "HEALTHY" if robot.get("service") == "robot-simulation" and robot.get("ready") else "UNAVAILABLE"

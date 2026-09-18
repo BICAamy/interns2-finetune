@@ -49,12 +49,20 @@ try:
     if robot_health.get("runtime_mode") == "real":
         robot_ok = (
             robot_health.get("control_mode") == "observe-only"
-            and robot_health.get("status") == "degraded"
-            and robot_health.get("error") == "gateway_disconnected"
+            and robot_health.get("provider") == "huayan_edge_gateway"
+            and robot_health.get("status") in {"healthy", "degraded"}
+            and robot_health.get("error") in {
+                None, "gateway_disconnected", "datasheet_disconnected",
+                "datasheet_stale", "command_socket_disconnected",
+            }
             and robot_health.get("ready_for_motion") is False
         )
         mode = "REAL / OBSERVE ONLY" if robot_ok else "REAL / MODE MISMATCH"
-        robot_status = "DEGRADED (gateway disconnected)" if robot_ok else "FAILED"
+        robot_status = (
+            "FAILED" if not robot_ok else
+            "HEALTHY (state fresh, observe-only)" if robot_health.get("status") == "healthy"
+            else f"DEGRADED ({robot_health.get('error')})"
+        )
     else:
         mode = "SIMULATION"
         robot_ok = robot_health.get("service") == "robot-simulation" and robot_health.get("ready") is True

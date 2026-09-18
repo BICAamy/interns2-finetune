@@ -1,4 +1,4 @@
-"""In-memory rejected-command records for the disconnected real stub only.
+"""Bounded in-memory rejected-command records for observe-only real mode.
 
 This is not a durable motion journal. A future executable real provider must
 implement its own persistent idempotency and unknown-execution handling.
@@ -7,6 +7,7 @@ implement its own persistent idempotency and unknown-execution handling.
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from threading import Lock
 import time
 from typing import Any
@@ -23,9 +24,12 @@ from .provider import RobotRuntimeServiceError
 
 
 class RejectedCommandStore:
-    def __init__(self) -> None:
+    def __init__(self, *, max_records: int = 1024) -> None:
+        if max_records < 1:
+            raise ValueError("max_records must be positive")
         self._lock = Lock()
-        self._records: dict[str, RobotCommandRecord] = {}
+        self._max_records = max_records
+        self._records: OrderedDict[str, RobotCommandRecord] = OrderedDict()
         self._fingerprints: dict[str, str] = {}
 
     def reject(
@@ -69,6 +73,9 @@ class RejectedCommandStore:
             )
             self._records[command_id] = record
             self._fingerprints[command_id] = fingerprint
+            if len(self._records) > self._max_records:
+                oldest, _ = self._records.popitem(last=False)
+                del self._fingerprints[oldest]
             return record.model_copy(deep=True), True
 
     def get(self, command_id: str) -> RobotCommandRecord:

@@ -36,6 +36,7 @@ class DatasheetClient:
         self.latest: DatasheetSample | None = None
         self._events: list[DatasheetSample] = []
         self.received_samples = 0
+        self.last_batch: tuple[DatasheetSample, ...] = ()
 
     def connect(self) -> None:
         if self._socket is not None:
@@ -46,6 +47,7 @@ class DatasheetClient:
         self.latest = None
         self._events.clear()
         self.received_samples = 0
+        self.last_batch = ()
 
     def close(self) -> None:
         if self._socket is not None:
@@ -53,6 +55,7 @@ class DatasheetClient:
         self._socket = None
         self._decoder = DatasheetFrameDecoder(byte_order=self._byte_order)
         self.latest = None
+        self.last_batch = ()
 
     @property
     def pending_events(self) -> int:
@@ -66,6 +69,7 @@ class DatasheetClient:
             if not chunk:
                 raise ConnectionError("DataSheet stream closed")
             samples = self._decoder.feed(chunk)
+            self.last_batch = tuple(samples)
             self.received_samples += len(samples)
             for sample in samples:
                 previous = self.latest

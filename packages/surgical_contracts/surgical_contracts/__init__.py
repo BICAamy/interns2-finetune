@@ -28,6 +28,16 @@ from .gateway import (
     SoftwareStopResult,
     StopDelivery,
 )
+from .gateway_wire import (
+    GatewayHeartbeat,
+    GatewayHello,
+    GatewayStateFrame,
+    MAX_WIRE_BYTES,
+    PROTOCOL_VERSION,
+    hello_auth_tag,
+    load_gateway_secret,
+    parse_wire_json,
+)
 from .planner import (
     PlannerHealth,
     PlannerStatus,
@@ -94,8 +104,12 @@ __all__ = [
     "GatewayCommandKind",
     "GatewayControlMode",
     "GatewayHandshake",
+    "GatewayHeartbeat",
+    "GatewayHello",
+    "GatewayStateFrame",
     "LinkState",
     "MotionState",
+    "MAX_WIRE_BYTES",
     "MotionSafetyLimits",
     "MotionStopConfirmation",
     "MoveRelativeRequest",
@@ -111,6 +125,7 @@ __all__ = [
     "Point3D",
     "RelativeMotion",
     "RobotState",
+    "PROTOCOL_VERSION",
     "ResetSimulationRequest",
     "RobotActionRequest",
     "RobotActionResult",
@@ -138,4 +153,7 @@ __all__ = [
     "ToolName",
     "ToolStatus",
     "VendorFault",
+    "hello_auth_tag",
+    "load_gateway_secret",
+    "parse_wire_json",
 ]

@@ -1,4 +1,4 @@
-"""Disconnected, observe-only real provider. No vendor or network imports."""
+"""Observe-only real provider; never sends a vendor command."""
 
 from __future__ import annotations
 
@@ -21,17 +21,19 @@ from surgical_contracts import (
 )
 
 from ..command_store import RejectedCommandStore
+from ..gateway_session import GatewaySessionManager
 from ..provider import ProviderCapabilities, RobotRuntimeServiceError
 
 
 class HuayanRealStubProvider:
-    """Fail-closed placeholder until an authenticated Mac gateway exists."""
+    """Disconnected by default; optionally receives authenticated Mac state."""
 
     mode = RuntimeMode.REAL
     capabilities = ProviderCapabilities()
 
-    def __init__(self) -> None:
+    def __init__(self, gateway_sessions: GatewaySessionManager | None = None) -> None:
         self._commands = RejectedCommandStore()
+        self.gateway_sessions = gateway_sessions
 
     def start(self) -> None:
         pass
@@ -49,6 +51,8 @@ class HuayanRealStubProvider:
         )
 
     def health(self) -> RobotHealth:
+        if self.gateway_sessions is not None:
+            return self.gateway_sessions.health()
         return RobotHealth(
             runtime_mode=RuntimeMode.REAL,
             provider=RobotProviderKind.HUAYAN_EDGE_GATEWAY,
@@ -61,6 +65,8 @@ class HuayanRealStubProvider:
         )
 
     def get_telemetry(self) -> RobotTelemetry:
+        if self.gateway_sessions is not None:
+            return self.gateway_sessions.telemetry()
         return RobotTelemetry(
             runtime_mode=RuntimeMode.REAL,
             provider=RobotProviderKind.HUAYAN_EDGE_GATEWAY,
@@ -74,7 +80,7 @@ class HuayanRealStubProvider:
     def _unavailable() -> RobotRuntimeServiceError:
         return RobotRuntimeServiceError(
             ErrorCode.OPERATION_NOT_ENABLED,
-            "Real robot gateway is disconnected; this capability is unavailable",
+            "Real robot motion and camera are unavailable in observe-only mode",
         )
 
     def get_camera_state(self) -> SimulationCameraState:
@@ -88,7 +94,9 @@ class HuayanRealStubProvider:
     def submit(
         self, kind: RobotCommandKind, request: Any
     ) -> tuple[RobotCommandRecord, bool]:
-        record, _created = self._commands.reject(kind, request)
+        record, _created = self._commands.reject(
+            kind, request, message="Real robot control is not enabled in Step 5"
+        )
         raise RobotRuntimeServiceError(
             ErrorCode.OPERATION_NOT_ENABLED,
             record.error.message,

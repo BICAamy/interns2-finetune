@@ -1,0 +1,3 @@
+# Mac fake-only gateway (install surgical_contracts from packages/surgical_contracts).
+pydantic>=2.10,<3
+websockets>=14,<15

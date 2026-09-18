@@ -17,6 +17,7 @@ from edge_gateway.huayan.command_codec import MAX_COMMAND_BYTES
 from edge_gateway.huayan.models import FAST_PORT_COMMANDS, ROBOT_ID_COMMANDS, ReadCommand
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "huayan" / "datasheet-v6.json"
+MAX_RECORDED_COMMANDS = 4096
 
 
 def datasheet_document() -> dict[str, Any]:
@@ -73,6 +74,7 @@ class FakeHuayanController:
         self._command_actions = defaultdict(deque)
         for command, actions in (command_actions or {}).items():
             self._command_actions[command].extend(actions)
+        # Keep test diagnostics bounded during long-running gateway soak tests.
         self.received_commands: list[bytes] = []
         self._stop = threading.Event()
         self._listeners: list[socket.socket] = []
@@ -186,6 +188,8 @@ class FakeHuayanController:
             end = buffer.index(b";") + 1
             frame = bytes(buffer[:end])
             self.received_commands.append(frame)
+            if len(self.received_commands) > MAX_RECORDED_COMMANDS:
+                del self.received_commands[:len(self.received_commands) - MAX_RECORDED_COMMANDS]
             # The documented controller accepts only the first complete command
             # from a multi-command send; any trailing bytes are discarded.
             pipelined = len(buffer) != end

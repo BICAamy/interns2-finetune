@@ -122,6 +122,8 @@ CONFIG_MISSING=0
 if [[ "$ROBOT_MODE" == simulation ]]; then
     [[ -z "$REAL_CONFIG_INPUT" && -z "${REAL_CONFIG_PATH:-}" && -z "${REAL_CONFIG_SHA256:-}" ]] \
         || fail "--real-config is not allowed in simulation mode."
+    [[ -z "${GATEWAY_AUTH_SECRET_FILE:-}" && -z "${GATEWAY_EXPECTED_ID:-}" ]] \
+        || fail "gateway authentication is only valid in real mode."
     $CONTROL_GIVEN && fail "--real-control is only valid in real mode."
     [[ -z "${ROBOT_CONTROL_MODE:-}" ]] \
         || fail "ROBOT_CONTROL_MODE is not allowed in simulation mode."
@@ -151,10 +153,32 @@ else
     [[ "$CONFIG_SHA" =~ ^[0-9a-f]{64}$ ]] || fail "real config digest is invalid."
     [[ -z "${REAL_CONFIG_SHA256:-}" || "$REAL_CONFIG_SHA256" == "$CONFIG_SHA" ]] \
         || fail "REAL_CONFIG_SHA256 conflicts with --real-config."
-    # Step 3 has no gateway, ARM, or motion path regardless of CLI/config.
+    # Step 5 may authenticate a read-only gateway, but cannot ARM or move.
     ROBOT_CONTROL_MODE=observe-only
     REAL_CONFIG_SHA256="$CONFIG_SHA"
     export ROBOT_CONTROL_MODE REAL_CONFIG_PATH REAL_CONFIG_SHA256
+    if [[ -n "${GATEWAY_AUTH_SECRET_FILE:-}" || -n "${GATEWAY_EXPECTED_ID:-}" ]]; then
+        [[ -n "${GATEWAY_AUTH_SECRET_FILE:-}" && -n "${GATEWAY_EXPECTED_ID:-}" ]] \
+            || fail "gateway authentication requires both GATEWAY_AUTH_SECRET_FILE and GATEWAY_EXPECTED_ID."
+        PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
+            "$CONFIG_PYTHON" -c '
+import os
+from robot_runtime.gateway_session import GatewaySessionManager
+from robot_runtime.real_config import load_real_config
+from surgical_contracts import load_gateway_secret
+config = load_real_config(os.environ["REAL_CONFIG_PATH"])
+GatewaySessionManager(
+    secret=load_gateway_secret(os.environ["GATEWAY_AUTH_SECRET_FILE"]),
+    gateway_id=os.environ["GATEWAY_EXPECTED_ID"],
+    device_sn=config.controller.device_sn,
+    robot_model=config.controller.model,
+    package_versions=tuple(config.controller.package_versions),
+    config_sha256=config.digest(),
+    stale_ms=config.deadlines.state_stale_ms,
+)
+' \
+            || fail "gateway authentication preflight failed."
+    fi
 fi
 
 export ROBOT_MODE RUNTIME_MODE="$ROBOT_MODE"
@@ -344,7 +368,11 @@ if [[ "$ROBOT_MODE" == simulation ]]; then
     echo "SOFA            = OK"
     echo "E05             = OK"
 else
-    echo "Gateway         = disconnected (Step 3 stub)"
+    if [[ -n "${GATEWAY_AUTH_SECRET_FILE:-}" ]]; then
+        echo "Gateway         = authenticated observe-only (awaiting Mac connection)"
+    else
+        echo "Gateway         = disconnected (no authentication configured)"
+    fi
 fi
 echo "ASR             = OK"
 echo "frontend dist   = OK"
@@ -472,7 +500,7 @@ echo "      log=$ROBOT_LOG"
 else
     ROBOT_LOG="$LOG_DIR/robot-runtime.log"
     ROBOT_SERVICE_LABEL=robot-runtime
-    echo "[3/4] Starting REAL / OBSERVE ONLY robot runtime (gateway disconnected)..."
+    echo "[3/4] Starting REAL / OBSERVE ONLY robot runtime..."
     (
         export PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT"
         export ROBOT_SIMULATION_HOST=127.0.0.1
@@ -526,7 +554,11 @@ if sys.argv[1] == "real":
         and health.get("control_mode") == "observe-only"
         and health.get("provider") == "huayan_edge_gateway"
         and health.get("ready_for_motion") is False
-        and health.get("error") == "gateway_disconnected"
+        and health.get("status") in {"healthy", "degraded"}
+        and health.get("error") in {
+            None, "gateway_disconnected", "datasheet_disconnected",
+            "datasheet_stale", "command_socket_disconnected",
+        }
     )
 else:
     valid = health.get("service") == "robot-simulation" and health.get("ready") is True

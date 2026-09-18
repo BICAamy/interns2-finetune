@@ -8,6 +8,7 @@ import re
 import subprocess
 
 import pytest
+import yaml
 
 from fastapi.testclient import TestClient
 
@@ -29,7 +30,7 @@ def check(
     env = os.environ.copy()
     for name in (
         "RUNTIME_MODE", "ROBOT_MODE", "ROBOT_CONTROL_MODE", "REAL_CONFIG_PATH",
-        "REAL_CONFIG_SHA256",
+        "REAL_CONFIG_SHA256", "GATEWAY_AUTH_SECRET_FILE", "GATEWAY_EXPECTED_ID",
     ):
         env.pop(name, None)
     env.update(extra_env or {})
@@ -76,6 +77,49 @@ def test_real_config_is_observe_only_even_when_enabled_requested() -> None:
         assert "blocking_fields=" in result.stdout
         assert re.search(r"REAL_CONFIG_SHA256=[0-9a-f]{64}", result.stdout)
         assert "[1/4] Starting" not in result.stdout
+
+
+def test_gateway_authentication_fails_preflight_without_both_inputs_or_confirmed_identity(
+    tmp_path: Path,
+) -> None:
+    secret = tmp_path / "gateway-auth.local"
+    secret.write_bytes(b"x" * 32)
+    os.chmod(secret, 0o600)
+    arguments = ("--robot-mode", "real", "--real-config", str(EXAMPLE))
+    missing_id = check(*arguments, extra_env={"GATEWAY_AUTH_SECRET_FILE": str(secret)})
+    assert missing_id.returncode != 0
+    assert "requires both" in missing_id.stderr
+    unconfirmed = check(*arguments, extra_env={
+        "GATEWAY_AUTH_SECRET_FILE": str(secret), "GATEWAY_EXPECTED_ID": "mac-edge-test",
+    })
+    assert unconfirmed.returncode != 0
+    assert "gateway authentication preflight failed" in unconfirmed.stderr
+    assert "[1/4] Starting" not in unconfirmed.stdout
+    simulation = check(extra_env={"GATEWAY_AUTH_SECRET_FILE": str(secret)})
+    assert simulation.returncode != 0
+    assert "only valid in real mode" in simulation.stderr
+
+
+def test_gateway_authentication_preflight_accepts_complete_fake_identity(tmp_path: Path) -> None:
+    config_data = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    config_data["controller"]["device_sn"] = "FAKE-E05-001"
+    config_data["controller"]["package_versions"] = ["6.3.6.20240305"]
+    config_data["deadlines"]["state_stale_ms"] = 350
+    config_path = tmp_path / "robot-real-fake.yaml"
+    config_path.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+    secret = tmp_path / "gateway-auth.local"
+    secret.write_bytes(b"x" * 32)
+    os.chmod(secret, 0o600)
+    result = check(
+        "--robot-mode", "real", "--real-config", str(config_path),
+        extra_env={
+            "GATEWAY_AUTH_SECRET_FILE": str(secret),
+            "GATEWAY_EXPECTED_ID": "mac-edge-test",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert "REAL / OBSERVE ONLY" in result.stdout
+    assert "[1/4] Starting" not in result.stdout
 
 
 def test_relative_config_is_resolved_from_app_not_caller_cwd(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import asyncio
+import secrets
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -11,10 +12,14 @@ from fastapi import APIRouter, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import ValidationError
 
 from surgical_contracts import (
     ErrorCode,
     ErrorResponse,
+    GatewayHeartbeat,
+    GatewayHello,
+    GatewayStateFrame,
     MoveRelativeRequest,
     MoveToEntryRequest,
     ResetSimulationRequest,
@@ -24,15 +29,18 @@ from surgical_contracts import (
     RobotHealth,
     RobotTelemetry,
     RuntimeMode,
+    PROTOCOL_VERSION,
     SimulationHeartbeat,
     SimulationCameraControlRequest,
     SimulationCameraState,
     SimulationHealth,
     SimulationTelemetry,
+    parse_wire_json,
 )
 from simulation.server.video_stream import MJPEG_BOUNDARY, mjpeg_stream
 
 from .provider import RobotProvider, RobotRuntimeServiceError
+from .gateway_session import GatewaySessionError
 
 if TYPE_CHECKING:
     from simulation.server.simulation_worker import SimulationWorker
@@ -166,6 +174,62 @@ def create_app(
     @router.get("/v1/state", response_model=SimulationTelemetry | RobotTelemetry)
     def state() -> SimulationTelemetry | RobotTelemetry:
         return runtime_provider.get_telemetry()
+
+    if selected == RuntimeMode.REAL:
+        @router.websocket("/v1/gateway/connect")
+        async def gateway_connect(websocket: WebSocket) -> None:
+            manager = getattr(runtime_provider, "gateway_sessions", None)
+            await websocket.accept()
+            if manager is None:
+                await websocket.close(code=1008, reason="gateway authentication not configured")
+                return
+            connection_key = secrets.token_hex(16)
+            challenge = manager.new_challenge()
+            try:
+                await websocket.send_json({
+                    "type": "challenge",
+                    "challenge": challenge,
+                    "protocol_version": PROTOCOL_VERSION,
+                })
+                raw = await asyncio.wait_for(websocket.receive_text(), timeout=3)
+                hello = GatewayHello.model_validate(parse_wire_json(raw))
+                manager.open(hello, challenge=challenge, connection_key=connection_key)
+                await websocket.send_json({
+                    "type": "accepted",
+                    "gateway_session_id": hello.handshake.gateway_session_id,
+                    "control_mode": "observe-only",
+                })
+                while True:
+                    raw = await asyncio.wait_for(
+                        websocket.receive_text(),
+                        timeout=manager.gateway_timeout_ms / 1000,
+                    )
+                    message = parse_wire_json(raw)
+                    if message.get("type") == "state":
+                        manager.ingest_state(
+                            GatewayStateFrame.model_validate(message),
+                            connection_key=connection_key,
+                        )
+                    elif message.get("type") == "heartbeat":
+                        manager.ingest_heartbeat(
+                            GatewayHeartbeat.model_validate(message),
+                            connection_key=connection_key,
+                        )
+                    else:
+                        raise GatewaySessionError("unsupported gateway message type")
+                    await websocket.send_json({
+                        "type": "ack",
+                        "message_sequence": message["message_sequence"],
+                    })
+            except WebSocketDisconnect:
+                pass
+            except (GatewaySessionError, ValidationError, ValueError, asyncio.TimeoutError):
+                try:
+                    await websocket.close(code=1008, reason="gateway session rejected")
+                except RuntimeError:
+                    pass
+            finally:
+                manager.disconnect(connection_key=connection_key)
 
     @router.get("/v1/camera", response_model=SimulationCameraState)
     def camera_state() -> SimulationCameraState:

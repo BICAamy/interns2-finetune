@@ -154,3 +154,17 @@ def read_identity_text(reply: CommandReply) -> str:
     if not value.isascii() or len(value) > 128:
         raise ProtocolError("invalid identity string")
     return value
+
+
+def fixed_xyz_quaternion(rotation_rpy_deg: tuple[float, float, float]) -> tuple[float, float, float, float]:
+    """XYZ fixed-angle degrees -> xyzw; used only for read-only base pose."""
+    rx, ry, rz = (math.radians(value) / 2 for value in rotation_rpy_deg)
+    sx, cx = math.sin(rx), math.cos(rx)
+    sy, cy = math.sin(ry), math.cos(ry)
+    sz, cz = math.sin(rz), math.cos(rz)
+    return (
+        sx * cy * cz - cx * sy * sz,
+        cx * sy * cz + sx * cy * sz,
+        cx * cy * sz - sx * sy * cz,
+        cx * cy * cz + sx * sy * sz,
+    )
