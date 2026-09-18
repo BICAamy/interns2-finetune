@@ -1,0 +1,28 @@
+{
+  "PosAndVel": {
+    "Actual_Position": ["0.000", "0.000", "81.099", "0.000", "81.099", "0.000", "367.945", "0.000", "359.628", "180.000", "17.803", "180.000"],
+    "Actual_Joint_Velocity": ["0.000", "0.000", "0.000", "0.000", "0.000", "0.000"],
+    "Actual_Joint_Acceleration": ["0.000", "0.000", "0.000", "0.000", "0.000", "0.000"],
+    "Actual_PCS_TCP": ["367.945", "0.000", "359.628", "180.000", "17.803", "180.000"],
+    "Actual_PCS_Base": ["367.945", "0.000", "359.628", "180.000", "17.803", "180.000"],
+    "Actual_Override": "1.000"
+  },
+  "StateAndError": {
+    "robotState": 33,
+    "robotEnabled": 1,
+    "robotPaused": 0,
+    "robotMoving": 0,
+    "robotBlendingDone": 1,
+    "InPos": 1,
+    "Error_AxisID": 0,
+    "Error_Code": 0,
+    "IsReduceMode": 0,
+    "IsFreeDriveMode": 0,
+    "AutoMode": "1",
+    "BrakeState": [1, 1, 1, 1, 1, 1],
+    "nAxisErrorCode": [0, 0, 0, 0, 0, 0]
+  },
+  "FTData": {"FTControlState": 0},
+  "RobotAuthorization": {"DeviceSN": "FAKE-E05-001"},
+  "MsgTitle": {"Stamp": "1749526862228"}
+}
