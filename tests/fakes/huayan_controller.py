@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from edge_gateway.huayan.command_codec import MAX_COMMAND_BYTES
-from edge_gateway.huayan.models import FAST_PORT_COMMANDS, ROBOT_ID_COMMANDS, ReadCommand
+from edge_gateway.huayan.models import (
+    FAST_PORT_COMMANDS, NAMED_READ_COMMANDS, ROBOT_ID_COMMANDS, ReadCommand,
+)
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "huayan" / "datasheet-v6.json"
 MAX_RECORDED_COMMANDS = 4096
@@ -52,6 +54,13 @@ DEFAULT_REPLIES: dict[ReadCommand, bytes] = {
     ),
     ReadCommand.EMERGENCY_INFO: b"ReadEmergencyInfo,OK,0,0,0,0,;",
     ReadCommand.CURRENT_WAYPOINT_ID: b"ReadCurWayPointID,OK,FAKE_ONLY,;",
+    ReadCommand.AXIS_ERROR_CODE: b"ReadAxisErrorCode,OK,0,0,0,0,0,0,0,;",
+    ReadCommand.PAYLOAD: b"ReadPayload,OK,1.500000,12.000000,25.000000,39.000000,;",
+    ReadCommand.BASE_INSTALLING_ANGLE: b"GetBaseInstallingAngle,OK,90,90,;",
+    ReadCommand.CURRENT_TCP: b"ReadCurTCP,OK,60,80,120,50,0,0,;",
+    ReadCommand.CURRENT_UCS: b"ReadCurUCS,OK,0,0,0,0,0,0,;",
+    ReadCommand.TCP_BY_NAME: b"ReadTCPByName,OK,60,80,120,50,0,0,;",
+    ReadCommand.UCS_BY_NAME: b"ReadUCSByName,OK,0,0,0,0,0,0,;",
 }
 
 
@@ -64,12 +73,16 @@ class FakeHuayanController:
         command_actions: dict[ReadCommand, list[CommandAction]] | None = None,
         data_actions: list[bytes | float] | None = None,
         data_interval_s: float = 0.05,
+        stamp_every_n_frames: int = 1,
         byte_order: str = "little",
     ) -> None:
         if data_interval_s <= 0:
             raise ValueError("data_interval_s must be positive")
+        if stamp_every_n_frames < 1:
+            raise ValueError("stamp_every_n_frames must be positive")
         self._byte_order = byte_order
         self._data_interval_s = data_interval_s
+        self._stamp_every_n_frames = stamp_every_n_frames
         self._data_actions = data_actions
         self._command_actions = defaultdict(deque)
         for command, actions in (command_actions or {}).items():
@@ -209,7 +222,12 @@ class FakeHuayanController:
                     return
                 continue
             valid_args = (
-                len(fields) == 2 and fields[1] in (b"0", b"1", b"2", b"3", b"4", b"5")
+                len(fields) == (3 if command in NAMED_READ_COMMANDS else 2)
+                and fields[1] in (b"0", b"1", b"2", b"3", b"4", b"5")
+                and (command not in NAMED_READ_COMMANDS or (
+                    fields[2].isascii() and fields[2].replace(b"_", b"").replace(b"-", b"").isalnum()
+                    and 1 <= len(fields[2]) <= 64
+                ))
                 if command in ROBOT_ID_COMMANDS else len(fields) == 1
             )
             if not valid_args:
@@ -251,10 +269,15 @@ class FakeHuayanController:
                 else:
                     connection.sendall(action)
             return
+        frame_index = 0
+        source_stamp_ms = 0
         while not self._stop.is_set():
             document = datasheet_document()
-            document["MsgTitle"]["Stamp"] = str(time.time_ns() // 1_000_000)
+            if frame_index % self._stamp_every_n_frames == 0:
+                source_stamp_ms = time.time_ns() // 1_000_000
+            document["MsgTitle"]["Stamp"] = str(source_stamp_ms)
             frame = datasheet_frame(document, byte_order=self._byte_order)
             connection.sendall(frame)
+            frame_index += 1
             if self._stop.wait(self._data_interval_s):
                 return

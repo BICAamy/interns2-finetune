@@ -1,4 +1,4 @@
-"""Fake-only Mac edge process; no real controller connection or motion path."""
+"""Mac observe-only edge process; never contains a motion command path."""
 
 from __future__ import annotations
 
@@ -11,19 +11,20 @@ from surgical_contracts import LinkState, load_gateway_secret
 
 from .audit import EdgeAudit
 from .cloud_transport import CloudTransport, telemetry_from_sample
-from .config import EdgeConfig
+from .config import EdgeConfig, RealEdgeConfig
 from .huayan.adapter import (
     read_controller_started, read_current_fsm, read_identity_text, read_is_simulation,
+    read_emergency_info, read_robot_state,
 )
 from .huayan.command_client import CommandClient
 from .huayan.datasheet_client import DatasheetClient
 from .huayan.models import ReadCommand
 from .state_machine import EdgeState
-from .watchdog import StateWatchdog
+from .watchdog import SourceStampWatchdog, StateWatchdog
 
 
 class EdgeGateway:
-    def __init__(self, config: EdgeConfig) -> None:
+    def __init__(self, config: EdgeConfig | RealEdgeConfig) -> None:
         self.config = config
         self.secret = load_gateway_secret(config.secret_file)
         self.state = EdgeState()
@@ -31,7 +32,14 @@ class EdgeGateway:
         self.audit = EdgeAudit(config.audit_path)
         self._stop = threading.Event()
         self._producer: threading.Thread | None = None
-        self._command = CommandClient("127.0.0.1", config.fake_command_port, timeout_s=0.5)
+        self._real = isinstance(config, RealEdgeConfig)
+        self._controller_host = config.controller_host if self._real else "127.0.0.1"
+        self._command_port = config.command_port if self._real else config.fake_command_port
+        self._datasheet_port = config.datasheet_port if self._real else config.fake_datasheet_port
+        self._scope = "private-read-only" if self._real else "loopback"
+        self._command = CommandClient(
+            self._controller_host, self._command_port, timeout_s=0.5, scope=self._scope,
+        )
         self._cloud = CloudTransport(
             config.server_url,
             secret=self.secret,
@@ -46,12 +54,29 @@ class EdgeGateway:
     def _query_identity(self) -> None:
         self._command.connect()
         try:
-            model = read_identity_text(self._command.request(ReadCommand.ROBOT_MODEL))
             version = read_identity_text(self._command.request(ReadCommand.PACKAGE_VERSION))
+            if self._real and version not in self.config.approved_package_versions:
+                self.state.fault = True
+                raise ValueError("PackageVersion is not approved for this real gateway")
+            model = read_identity_text(self._command.request(ReadCommand.ROBOT_MODEL))
+            if self._real and model != self.config.expected_robot_model:
+                self.state.fault = True
+                raise ValueError("robot model changed or disagrees with real config")
             simulation = read_is_simulation(self._command.request(ReadCommand.IS_SIMULATION))
             started = read_controller_started(self._command.request(ReadCommand.CONTROLLER_STATE))
             if simulation or not started:
-                raise ValueError("fake controller did not report a started hardware-like state")
+                self.state.fault = True
+                raise ValueError("controller did not report a started hardware state")
+            if self._real:
+                status = read_robot_state(self._command.request(ReadCommand.ROBOT_STATE))
+                emergency = read_emergency_info(self._command.request(ReadCommand.EMERGENCY_INFO))
+                if (
+                    status.moving or status.has_error or status.emergency_stop
+                    or status.safeguard or not status.controller_box_connected
+                    or emergency.emergency_circuit_fault or emergency.safeguard_circuit_fault
+                ):
+                    self.state.fault = True
+                    raise ValueError("real robot or safety status is abnormal; stop commissioning")
             if self.robot_model is not None and self.robot_model != model:
                 self.state.fault = True
                 raise ValueError("robot model changed after reconnect")
@@ -71,18 +96,36 @@ class EdgeGateway:
         while not self._stop.is_set() and not self.state.fault:
             try:
                 with DatasheetClient(
-                    "127.0.0.1",
-                    self.config.fake_datasheet_port,
+                    self._controller_host,
+                    self._datasheet_port,
                     byte_order=self.config.datasheet_byte_order,
                     timeout_s=0.25,
                     max_events=256,
+                    scope=self._scope,
                 ) as reader:
+                    source_stamps = (
+                        SourceStampWatchdog(stale_ms=self.watchdog.stale_ms)
+                        if self._real else None
+                    )
                     self.state.datasheet_connected = True
                     while not self._stop.is_set():
                         reader.poll()
                         for sample in reader.last_batch:
                             if not sample.device_sn:
                                 raise ValueError("DataSheet DeviceSN is missing")
+                            if self._real and sample.device_sn != self.config.expected_device_sn:
+                                self.state.fault = True
+                                raise ValueError("DataSheet DeviceSN disagrees with real config")
+                            if self._real and (sample.error_code or any(sample.axis_error_codes)):
+                                self.state.fault = True
+                                raise ValueError("DataSheet reports a robot or axis error")
+                            if source_stamps is not None:
+                                try:
+                                    source_stamps.observe(sample)
+                                except ValueError:
+                                    self.state.fault = True
+                                    self.audit.record("source_stamp_invalid")
+                                    raise
                             if self.device_sn is None:
                                 self.device_sn = sample.device_sn
                             elif sample.device_sn != self.device_sn:
@@ -203,26 +246,68 @@ class EdgeGateway:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Step 5 fake-only observe gateway")
-    parser.add_argument("--fake-command-port", type=int, required=True)
-    parser.add_argument("--fake-datasheet-port", type=int, required=True)
+    parser = argparse.ArgumentParser(description="Observe-only Mac edge gateway")
+    parser.add_argument("--fake-command-port", type=int)
+    parser.add_argument("--fake-datasheet-port", type=int)
+    parser.add_argument("--real-config", type=Path)
+    parser.add_argument("--probe-summary", type=Path)
+    parser.add_argument("--connect-real-read-only", action="store_true")
+    parser.add_argument("--vendor-compatibility-confirmed", action="store_true")
+    parser.add_argument("--operator-ready", action="store_true")
     parser.add_argument("--server-url", required=True)
     parser.add_argument("--secret-file", type=Path, required=True)
     parser.add_argument("--gateway-id", required=True)
-    parser.add_argument("--config-sha256", required=True)
+    parser.add_argument("--config-sha256")
     parser.add_argument("--datasheet-byte-order", choices=("little", "big"), required=True)
     parser.add_argument("--audit-path", type=Path, default=Path("logs/edge_gateway.log"))
     args = parser.parse_args()
-    config = EdgeConfig(
-        fake_command_port=args.fake_command_port,
-        fake_datasheet_port=args.fake_datasheet_port,
-        server_url=args.server_url,
-        secret_file=args.secret_file,
-        gateway_id=args.gateway_id,
-        config_sha256=args.config_sha256,
-        datasheet_byte_order=args.datasheet_byte_order,
-        audit_path=args.audit_path,
-    )
+    if args.real_config is not None:
+        if args.fake_command_port is not None or args.fake_datasheet_port is not None:
+            parser.error("real mode cannot accept fake controller ports")
+        if not args.connect_real_read_only or not args.vendor_compatibility_confirmed or not args.operator_ready:
+            parser.error("real gateway requires explicit read-only, vendor and operator confirmation")
+        from robot_runtime.real_config import load_real_config
+
+        from .huayan.real_probe import validate_probe_config, validate_probe_summary
+
+        real = load_real_config(args.real_config)
+        validate_probe_config(real)
+        if args.probe_summary is None:
+            parser.error("real gateway requires a recent successful --probe-summary")
+        validate_probe_summary(args.probe_summary, real, byte_order=args.datasheet_byte_order)
+        digest = real.digest()
+        if args.config_sha256 is not None and args.config_sha256 != digest:
+            parser.error("supplied config digest does not match the real config")
+        config = RealEdgeConfig(
+            controller_host=real.controller.host,
+            command_port=real.controller.command_port,
+            datasheet_port=real.controller.datasheet_port,
+            expected_device_sn=real.controller.device_sn,
+            expected_robot_model=real.controller.model,
+            approved_package_versions=tuple(real.controller.package_versions),
+            server_url=args.server_url,
+            secret_file=args.secret_file,
+            gateway_id=args.gateway_id,
+            config_sha256=digest,
+            datasheet_byte_order=args.datasheet_byte_order,
+            audit_path=args.audit_path,
+            stale_ms=real.deadlines.state_stale_ms,
+        )
+    else:
+        if args.connect_real_read_only or args.vendor_compatibility_confirmed or args.operator_ready or args.probe_summary:
+            parser.error("real confirmation flags require --real-config")
+        if args.fake_command_port is None or args.fake_datasheet_port is None or args.config_sha256 is None:
+            parser.error("fake mode requires both fake ports and --config-sha256")
+        config = EdgeConfig(
+            fake_command_port=args.fake_command_port,
+            fake_datasheet_port=args.fake_datasheet_port,
+            server_url=args.server_url,
+            secret_file=args.secret_file,
+            gateway_id=args.gateway_id,
+            config_sha256=args.config_sha256,
+            datasheet_byte_order=args.datasheet_byte_order,
+            audit_path=args.audit_path,
+        )
     gateway = EdgeGateway(config)
     try:
         gateway.run()

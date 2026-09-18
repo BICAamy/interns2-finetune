@@ -1,4 +1,4 @@
-"""Bounded, secret-free local audit output for the fake-only gateway."""
+"""Bounded, secret-free local audit output for the observe-only gateway."""
 
 from __future__ import annotations
 

@@ -51,6 +51,18 @@ class EmergencyInfoRead:
     safeguard: bool
 
 
+@dataclass(frozen=True)
+class AxisErrorRead:
+    group_error_code: int
+    joint_error_codes: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class PayloadRead:
+    mass_kg: float
+    center_of_gravity_mm: tuple[float, float, float]
+
+
 def _values(reply: CommandReply, command: ReadCommand) -> tuple[str, ...]:
     if reply.command != command:
         raise ProtocolError("wrong command reply type")
@@ -65,6 +77,16 @@ def _integer(value: str, name: str, *, minimum: int = 0) -> int:
     number = int(value)
     if number < minimum:
         raise ProtocolError(f"{name} is below minimum")
+    return number
+
+
+def _signed_integer(value: str, name: str, *, low: int, high: int) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise ProtocolError(f"{name} is not an integer") from exc
+    if str(number) != value or not low <= number <= high:
+        raise ProtocolError(f"{name} is out of range")
     return number
 
 
@@ -121,6 +143,39 @@ def read_emergency_info(reply: CommandReply) -> EmergencyInfoRead:
     values = _values(reply, ReadCommand.EMERGENCY_INFO)
     return EmergencyInfoRead(*(
         _flag(value, f"emergency[{index}]") for index, value in enumerate(values)
+    ))
+
+
+def read_axis_error_code(reply: CommandReply) -> AxisErrorRead:
+    values = _values(reply, ReadCommand.AXIS_ERROR_CODE)
+    codes = tuple(_integer(value, f"axis_error[{index}]") for index, value in enumerate(values))
+    return AxisErrorRead(codes[0], codes[1:])
+
+
+def read_payload(reply: CommandReply) -> PayloadRead:
+    values = _values(reply, ReadCommand.PAYLOAD)
+    numbers = tuple(_float(value, f"payload[{index}]") for index, value in enumerate(values))
+    if numbers[0] < 0:
+        raise ProtocolError("payload mass cannot be negative")
+    return PayloadRead(numbers[0], numbers[1:4])
+
+
+def read_base_installing_angle(reply: CommandReply) -> tuple[int, int]:
+    values = _values(reply, ReadCommand.BASE_INSTALLING_ANGLE)
+    return (
+        _signed_integer(values[0], "base_angle[0]", low=-360, high=360),
+        _signed_integer(values[1], "base_angle[1]", low=-360, high=360),
+    )
+
+
+def read_coordinate_value(reply: CommandReply) -> tuple[float, ...]:
+    if reply.command not in (
+        ReadCommand.CURRENT_TCP, ReadCommand.CURRENT_UCS,
+        ReadCommand.TCP_BY_NAME, ReadCommand.UCS_BY_NAME,
+    ):
+        raise ProtocolError("not a TCP/UCS read reply")
+    return tuple(_float(value, f"coordinate[{index}]") for index, value in enumerate(
+        _values(reply, reply.command)
     ))
 
 

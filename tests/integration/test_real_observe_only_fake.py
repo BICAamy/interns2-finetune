@@ -11,7 +11,9 @@ import json
 import uvicorn
 
 from edge_gateway.config import EdgeConfig
+from edge_gateway.config import RealEdgeConfig
 from edge_gateway.main import EdgeGateway
+from edge_gateway.huayan.command_client import CommandClient
 from robot_runtime.api import create_app
 from robot_runtime.gateway_session import GatewaySessionManager
 from robot_runtime.providers.huayan_real import HuayanRealStubProvider
@@ -130,6 +132,51 @@ def test_fake_controller_to_mac_gateway_to_runtime_is_read_only(tmp_path: Path) 
             assert not gateway_thread.is_alive()
             assert not errors, errors
             assert _json(f"http://127.0.0.1:{server_port}/health")["error"] == "gateway_disconnected"
+
+            # Exercise the real-mode identity checks against the fake, while
+            # replacing the physical network endpoint with loopback in this test.
+            real_config = RealEdgeConfig(
+                controller_host="192.168.0.10",
+                command_port=10003,
+                datasheet_port=10004,
+                expected_device_sn="FAKE-E05-001",
+                expected_robot_model="E05-Pro",
+                approved_package_versions=("6.3.6.20240305",),
+                server_url=config.server_url,
+                secret_file=secret_file,
+                gateway_id=config.gateway_id,
+                config_sha256=config.config_sha256,
+                datasheet_byte_order="little",
+                audit_path=tmp_path / "real-mode-fake-audit.log",
+                stale_ms=350,
+            )
+            real_mode_gateway = EdgeGateway(real_config)
+            real_mode_gateway._controller_host = "127.0.0.1"
+            real_mode_gateway._datasheet_port = fake.datasheet_port
+            real_mode_gateway._scope = "loopback"
+            real_mode_gateway._command = CommandClient("127.0.0.1", fake.command_port)
+
+            def run_real_mode_against_fake() -> None:
+                try:
+                    real_mode_gateway.run(max_runtime_s=0.8)
+                except Exception as exc:
+                    errors.append(exc)
+
+            real_mode_thread = threading.Thread(target=run_real_mode_against_fake, daemon=True)
+            real_mode_thread.start()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                real_health = _json(f"http://127.0.0.1:{server_port}/health")
+                if real_health["status"] == "healthy":
+                    break
+                time.sleep(0.02)
+            else:
+                raise AssertionError("real-mode gateway did not publish fake state")
+            assert real_health["ready_for_motion"] is False
+            assert _json(f"http://127.0.0.1:{server_port}/v1/state")["device_sn"] == "FAKE-E05-001"
+            real_mode_thread.join(timeout=3)
+            assert not real_mode_thread.is_alive()
+            assert not errors, errors
 
             # Restart only the Mac process while the fake and server stay up.
             # Its old session must not be reused or regain control authority.

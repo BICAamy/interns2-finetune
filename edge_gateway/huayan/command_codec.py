@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import re
 
-from .models import CommandReply, ProtocolError, REPLY_FIELD_COUNTS, ROBOT_ID_COMMANDS, ReadCommand
+from .models import (
+    CommandReply, NAMED_READ_COMMANDS, ProtocolError, REPLY_FIELD_COUNTS,
+    ROBOT_ID_COMMANDS, ReadCommand,
+)
 
 MAX_COMMAND_BYTES = 128
 MAX_REPLY_BYTES = 4096
@@ -19,7 +22,7 @@ def validate_identifier(value: str) -> str:
     return value
 
 
-def encode_read(command: ReadCommand, *, robot_id: int = 0) -> bytes:
+def encode_read(command: ReadCommand, *, robot_id: int = 0, name: str | None = None) -> bytes:
     if not isinstance(command, ReadCommand):
         raise TypeError("only listed read-only commands are allowed")
     if type(robot_id) is not int or not 0 <= robot_id <= 5:
@@ -29,6 +32,12 @@ def encode_read(command: ReadCommand, *, robot_id: int = 0) -> bytes:
         fields.append(str(robot_id))
     elif robot_id != 0:
         raise ValueError("this command has no robot_id parameter")
+    if command in NAMED_READ_COMMANDS:
+        if name is None:
+            raise ValueError("named read requires an approved name")
+        fields.append(validate_identifier(name))
+    elif name is not None:
+        raise ValueError("this command has no name parameter")
     frame = (",".join(fields) + ",;").encode("ascii")
     if len(frame) > MAX_COMMAND_BYTES:
         raise ValueError("command exceeds maximum length")

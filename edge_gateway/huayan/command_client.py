@@ -1,4 +1,4 @@
-"""One-in-flight TCP reader. Step 4 deliberately permits localhost only."""
+"""One-in-flight read-only TCP client; real access requires an explicit scope."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import ipaddress
 import math
 import socket
 import threading
+from typing import Literal
 
 from .adapter import read_fast_port
 from .command_codec import CommandFrameDecoder, decode_reply, encode_read
@@ -24,6 +25,29 @@ def _loopback_host(host: str) -> str:
     return str(address)
 
 
+_CONTROLLER_SUBNETS = tuple(ipaddress.ip_network(value) for value in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+))
+
+
+def _private_controller_host(host: str) -> str:
+    try:
+        address = ipaddress.IPv4Address(host)
+    except ipaddress.AddressValueError as exc:
+        raise ValueError("real controller host must be a literal private IPv4 address") from exc
+    if not any(address in subnet for subnet in _CONTROLLER_SUBNETS):
+        raise ValueError("real controller host must be a private IPv4 address")
+    return str(address)
+
+
+def _validated_host(host: str, scope: Literal["loopback", "private-read-only"]) -> str:
+    if scope == "loopback":
+        return _loopback_host(host)
+    if scope == "private-read-only":
+        return _private_controller_host(host)
+    raise ValueError("unsupported controller connection scope")
+
+
 class CommandClient:
     def __init__(
         self,
@@ -32,8 +56,9 @@ class CommandClient:
         *,
         timeout_s: float = 2.0,
         fast_port: bool = False,
+        scope: Literal["loopback", "private-read-only"] = "loopback",
     ) -> None:
-        self.host = _loopback_host(host)
+        self.host = _validated_host(host, scope)
         if type(port) is not int or not 1 <= port <= 65535:
             raise ValueError("port is out of range")
         if not math.isfinite(timeout_s) or timeout_s <= 0:
@@ -41,6 +66,7 @@ class CommandClient:
         self.port = port
         self.timeout_s = timeout_s
         self.fast_port = fast_port
+        self.scope = scope
         self._socket: socket.socket | None = None
         self._decoder = CommandFrameDecoder()
         self._lock = threading.Lock()
@@ -63,8 +89,10 @@ class CommandClient:
         self._socket = None
         self._decoder = CommandFrameDecoder()
 
-    def request(self, command: ReadCommand, *, robot_id: int = 0) -> CommandReply:
-        frame = encode_read(command, robot_id=robot_id)
+    def request(
+        self, command: ReadCommand, *, robot_id: int = 0, name: str | None = None,
+    ) -> CommandReply:
+        frame = encode_read(command, robot_id=robot_id, name=name)
         if self.fast_port and command not in FAST_PORT_COMMANDS:
             raise ValueError("command is not documented for the fast port")
         with self._lock:

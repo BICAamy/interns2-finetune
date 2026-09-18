@@ -28,6 +28,13 @@ class ReadCommand(str, Enum):
     ACTUAL_POSITION = "ReadActPos"
     EMERGENCY_INFO = "ReadEmergencyInfo"
     CURRENT_WAYPOINT_ID = "ReadCurWayPointID"
+    AXIS_ERROR_CODE = "ReadAxisErrorCode"
+    PAYLOAD = "ReadPayload"
+    BASE_INSTALLING_ANGLE = "GetBaseInstallingAngle"
+    CURRENT_TCP = "ReadCurTCP"
+    CURRENT_UCS = "ReadCurUCS"
+    TCP_BY_NAME = "ReadTCPByName"
+    UCS_BY_NAME = "ReadUCSByName"
 
 
 ROBOT_ID_COMMANDS = frozenset({
@@ -36,7 +43,16 @@ ROBOT_ID_COMMANDS = frozenset({
     ReadCommand.ACTUAL_POSITION,
     ReadCommand.EMERGENCY_INFO,
     ReadCommand.CURRENT_WAYPOINT_ID,
+    ReadCommand.AXIS_ERROR_CODE,
+    ReadCommand.PAYLOAD,
+    ReadCommand.BASE_INSTALLING_ANGLE,
+    ReadCommand.CURRENT_TCP,
+    ReadCommand.CURRENT_UCS,
+    ReadCommand.TCP_BY_NAME,
+    ReadCommand.UCS_BY_NAME,
 })
+
+NAMED_READ_COMMANDS = frozenset({ReadCommand.TCP_BY_NAME, ReadCommand.UCS_BY_NAME})
 
 # Each command here is explicitly marked as fast-port capable in V6 1.0.19.1.
 FAST_PORT_COMMANDS = frozenset({
@@ -48,6 +64,12 @@ FAST_PORT_COMMANDS = frozenset({
     ReadCommand.CURRENT_FSM,
     ReadCommand.ACTUAL_POSITION,
     ReadCommand.CURRENT_WAYPOINT_ID,
+    ReadCommand.AXIS_ERROR_CODE,
+    ReadCommand.PAYLOAD,
+    ReadCommand.CURRENT_TCP,
+    ReadCommand.CURRENT_UCS,
+    ReadCommand.TCP_BY_NAME,
+    ReadCommand.UCS_BY_NAME,
 })
 
 REPLY_FIELD_COUNTS = {
@@ -61,6 +83,13 @@ REPLY_FIELD_COUNTS = {
     ReadCommand.ACTUAL_POSITION: 24,
     ReadCommand.EMERGENCY_INFO: 4,
     ReadCommand.CURRENT_WAYPOINT_ID: 1,
+    ReadCommand.AXIS_ERROR_CODE: 7,
+    ReadCommand.PAYLOAD: 4,
+    ReadCommand.BASE_INSTALLING_ANGLE: 2,
+    ReadCommand.CURRENT_TCP: 6,
+    ReadCommand.CURRENT_UCS: 6,
+    ReadCommand.TCP_BY_NAME: 6,
+    ReadCommand.UCS_BY_NAME: 6,
 }
 
 

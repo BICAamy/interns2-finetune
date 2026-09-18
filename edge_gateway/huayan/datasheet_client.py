@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import math
 import socket
+from typing import Literal
 
-from .command_client import _loopback_host
+from .command_client import _validated_host
 from .datasheet_codec import DatasheetFrameDecoder
 from .models import DatasheetSample, ProtocolError
 
@@ -19,8 +20,9 @@ class DatasheetClient:
         byte_order: str,
         timeout_s: float = 1.0,
         max_events: int = 256,
+        scope: Literal["loopback", "private-read-only"] = "loopback",
     ) -> None:
-        self.host = _loopback_host(host)
+        self.host = _validated_host(host, scope)
         if type(port) is not int or not 1 <= port <= 65535:
             raise ValueError("port is out of range")
         if not math.isfinite(timeout_s) or timeout_s <= 0:

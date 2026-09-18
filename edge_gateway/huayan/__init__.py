@@ -1,7 +1,7 @@
 """Strict, read-only HansRobot V6 protocol primitives.
 
-Nothing in this package is wired into the real runtime yet. Network clients
-accept loopback addresses only until the later on-site commissioning step.
+Network clients default to loopback. Private-controller access is an explicit
+Step 6 read-only scope; this package has no motion encoding or sending API.
 """
 
 from .models import ProtocolError, ReadCommand, ResponseUnknown
