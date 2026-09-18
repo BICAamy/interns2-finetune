@@ -6,6 +6,7 @@ import os
 
 from .api import create_app
 from .gateway_session import GatewaySessionManager
+from .mirror_worker import RealMirrorWorker
 from .providers.huayan_real import HuayanRealStubProvider
 from .real_config import load_real_config
 from surgical_contracts import load_gateway_secret
@@ -20,11 +21,17 @@ def app_from_environment():
         raise ValueError("ROBOT_MODE and RUNTIME_MODE disagree")
     config_path = os.environ.get("REAL_CONFIG_PATH")
     secret_path = os.environ.get("GATEWAY_AUTH_SECRET_FILE")
+    mirror_flag = os.environ.get("ROBOT_REAL_MIRROR", "0")
+    if mirror_flag not in ("0", "1"):
+        raise ValueError("ROBOT_REAL_MIRROR must be 0 or 1")
+    mirror_enabled = mirror_flag == "1"
     if mode == "simulation":
         if config_path:
             raise ValueError("simulation mode cannot use REAL_CONFIG_PATH")
         if secret_path:
             raise ValueError("simulation mode cannot use GATEWAY_AUTH_SECRET_FILE")
+        if mirror_enabled:
+            raise ValueError("simulation mode cannot enable the real SOFA mirror")
     else:
         if not config_path:
             raise ValueError("real mode requires REAL_CONFIG_PATH")
@@ -53,7 +60,23 @@ def app_from_environment():
                 config_sha256=config.digest(),
                 stale_ms=config.deadlines.state_stale_ms,
             )
-            return create_app(provider=HuayanRealStubProvider(sessions), mode="real")
+            mirror = None
+            if mirror_enabled:
+                if (config.joint_mapping.sign is None) != (
+                    config.joint_mapping.zero_offset_deg is None
+                ):
+                    raise ValueError("joint mapping sign and zero offset must be set together")
+                mirror = RealMirrorWorker(
+                    sessions.telemetry,
+                    stale_ms=config.deadlines.state_stale_ms,
+                    sign=config.joint_mapping.sign,
+                    zero_offset_deg=config.joint_mapping.zero_offset_deg,
+                )
+            return create_app(
+                provider=HuayanRealStubProvider(sessions, mirror_worker=mirror), mode="real"
+            )
+        if mirror_enabled:
+            raise ValueError("real SOFA mirror requires authenticated gateway settings")
     return create_app(mode=mode)
 
 

@@ -105,9 +105,10 @@ class TrajectoryRenderer:
         frame: np.ndarray,
         *,
         trajectory_scene: Sequence[Sequence[float]],
-        tcp_scene: Sequence[float],
+        tcp_scene: Sequence[float] | None,
         entry_scene: Sequence[float] | None,
         project: PixelProjector,
+        warning: str | None = None,
     ) -> np.ndarray:
         if not isinstance(frame, np.ndarray):
             raise TypeError("frame must be a numpy array")
@@ -155,12 +156,13 @@ class TrajectoryRenderer:
                 self.marker_radius,
                 (0, 128, 255),
             )
-        self._draw_disk(
-            output,
-            project(np.asarray(tcp_scene, dtype=np.float64)),
-            self.marker_radius,
-            (0, 255, 0),
-        )
+        if tcp_scene is not None:
+            self._draw_disk(
+                output,
+                project(np.asarray(tcp_scene, dtype=np.float64)),
+                self.marker_radius,
+                (0, 255, 0),
+            )
         pil_image = Image.fromarray(output)
         draw = ImageDraw.Draw(pil_image)
 
@@ -172,7 +174,9 @@ class TrajectoryRenderer:
                 stroke_width=1,
                 stroke_fill=(0, 0, 0),
             )
+        if warning:
+            draw.rectangle((0, 0, min(pil_image.width, 440), 30), fill=(90, 0, 0))
+            draw.text((6, 8), warning, fill=(255, 255, 255))
 
         output = np.asarray(pil_image, dtype=np.uint8).copy()
         return output
-

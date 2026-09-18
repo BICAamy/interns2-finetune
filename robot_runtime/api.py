@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 import asyncio
 import secrets
 import time
@@ -176,6 +177,15 @@ def create_app(
         return runtime_provider.get_telemetry()
 
     if selected == RuntimeMode.REAL:
+        @router.get("/v1/mirror")
+        def mirror_status() -> dict[str, Any]:
+            getter = getattr(runtime_provider, "get_mirror_status", None)
+            if getter is None:
+                raise RobotRuntimeServiceError(
+                    ErrorCode.OPERATION_NOT_ENABLED, "Real SOFA mirror is unavailable"
+                )
+            return asdict(getter())
+
         @router.websocket("/v1/gateway/connect")
         async def gateway_connect(websocket: WebSocket) -> None:
             manager = getattr(runtime_provider, "gateway_sessions", None)

@@ -31,6 +31,7 @@ def check(
     for name in (
         "RUNTIME_MODE", "ROBOT_MODE", "ROBOT_CONTROL_MODE", "REAL_CONFIG_PATH",
         "REAL_CONFIG_SHA256", "GATEWAY_AUTH_SECRET_FILE", "GATEWAY_EXPECTED_ID",
+        "ROBOT_REAL_MIRROR",
     ):
         env.pop(name, None)
     env.update(extra_env or {})
@@ -120,6 +121,30 @@ def test_gateway_authentication_preflight_accepts_complete_fake_identity(tmp_pat
     assert result.returncode == 0, result.stderr
     assert "REAL / OBSERVE ONLY" in result.stdout
     assert "[1/4] Starting" not in result.stdout
+    mirror = check(
+        "--robot-mode", "real", "--real-config", str(config_path),
+        extra_env={
+            "GATEWAY_AUTH_SECRET_FILE": str(secret),
+            "GATEWAY_EXPECTED_ID": "mac-edge-test",
+            "ROBOT_REAL_MIRROR": "1",
+        },
+    )
+    assert mirror.returncode == 0, mirror.stderr
+
+
+def test_real_mirror_requires_real_mode_and_authenticated_gateway() -> None:
+    simulation = check(extra_env={"ROBOT_REAL_MIRROR": "1"})
+    assert simulation.returncode != 0
+    assert "only valid in real mode" in simulation.stderr
+    invalid = check(extra_env={"ROBOT_REAL_MIRROR": "yes"})
+    assert invalid.returncode != 0
+    assert "must be 0 or 1" in invalid.stderr
+    no_secret = check(
+        "--robot-mode", "real", "--real-config", str(EXAMPLE),
+        extra_env={"ROBOT_REAL_MIRROR": "1"},
+    )
+    assert no_secret.returncode != 0
+    assert "requires authenticated gateway" in no_secret.stderr
 
 
 def test_relative_config_is_resolved_from_app_not_caller_cwd(tmp_path: Path) -> None:
@@ -179,7 +204,8 @@ def test_syntax_of_all_service_scripts() -> None:
     scripts = APP_ROOT / "scripts" / "services"
     result = subprocess.run(
         ["bash", "-n", *(str(scripts / name) for name in (
-            "start_all.sh", "health_check.sh", "status.sh", "logs.sh"
+            "start_all.sh", "start_real_mirror_pilot.sh", "test_real_mirror_sofa.sh",
+            "health_check.sh", "status.sh", "logs.sh"
         ))],
         capture_output=True,
         text=True,

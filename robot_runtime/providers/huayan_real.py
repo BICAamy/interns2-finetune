@@ -22,6 +22,7 @@ from surgical_contracts import (
 
 from ..command_store import RejectedCommandStore
 from ..gateway_session import GatewaySessionManager
+from ..mirror_worker import RealMirrorWorker
 from ..provider import ProviderCapabilities, RobotRuntimeServiceError
 
 
@@ -31,15 +32,30 @@ class HuayanRealStubProvider:
     mode = RuntimeMode.REAL
     capabilities = ProviderCapabilities()
 
-    def __init__(self, gateway_sessions: GatewaySessionManager | None = None) -> None:
+    def __init__(
+        self,
+        gateway_sessions: GatewaySessionManager | None = None,
+        mirror_worker: RealMirrorWorker | None = None,
+    ) -> None:
         self._commands = RejectedCommandStore()
         self.gateway_sessions = gateway_sessions
+        self.mirror_worker = mirror_worker
+        self.capabilities = ProviderCapabilities(mjpeg=mirror_worker is not None)
 
     def start(self) -> None:
-        pass
+        if self.mirror_worker is not None:
+            self.mirror_worker.start()
 
     def shutdown(self) -> None:
-        pass
+        if self.mirror_worker is not None:
+            self.mirror_worker.shutdown()
+
+    def get_mirror_status(self):
+        if self.mirror_worker is None:
+            raise RobotRuntimeServiceError(
+                ErrorCode.OPERATION_NOT_ENABLED, "Real SOFA mirror is disabled"
+            )
+        return self.mirror_worker.status()
 
     @staticmethod
     def _connections() -> RobotConnectionState:
@@ -108,10 +124,12 @@ class HuayanRealStubProvider:
         return self._commands.get(command_id)
 
     def register_client(self) -> None:
-        raise self._unavailable()
+        if self.mirror_worker is None:
+            raise self._unavailable()
 
     def unregister_client(self) -> None:
-        raise self._unavailable()
+        if self.mirror_worker is None:
+            raise self._unavailable()
 
     def wait_for_events(
         self, after_sequence: int, *, timeout_s: float = 5.0
@@ -121,4 +139,6 @@ class HuayanRealStubProvider:
     def wait_for_frame(
         self, after_sequence: int, *, timeout_s: float = 2.0
     ) -> tuple[int, Any | None]:
-        raise self._unavailable()
+        if self.mirror_worker is None:
+            raise self._unavailable()
+        return self.mirror_worker.wait_for_frame(after_sequence, timeout_s=timeout_s)

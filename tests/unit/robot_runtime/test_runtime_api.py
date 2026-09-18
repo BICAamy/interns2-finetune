@@ -190,7 +190,7 @@ def test_real_stub_is_disconnected_and_rejects_every_command() -> None:
         )
         assert invalid.status_code == 422
 
-        for path in ("/v1/camera", "/v1/stream.mjpeg"):
+        for path in ("/v1/camera", "/v1/stream.mjpeg", "/v1/mirror"):
             unavailable = client.get(path)
             assert unavailable.status_code == 503
             assert unavailable.json()["code"] == "OPERATION_NOT_ENABLED"

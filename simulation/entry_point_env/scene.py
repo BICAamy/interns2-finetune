@@ -97,8 +97,10 @@ def createScene(
     workspace_high_m: Sequence[float] = (0.7, 0.25, 0.75),
     needle_length_m: float = 0.15,
     force_link6_scale_z: float = 184.0 / 146.0,
+    show_provisional_tool: bool = True,
+    show_command_workspace: bool = True,
 ):
-    """Create a visual six-axis robot driven by project FK/IK.
+    """Create a visual six-axis robot for simulation or passive real feedback.
 
     The official meshes and this scene use metres. Public commands remain in
     millimetres and are converted only by ``EntryPointReachEnv``.
@@ -107,7 +109,9 @@ def createScene(
     if len(initial_link_poses) != 6:
         raise ValueError("initial_link_poses must contain all six E05-Pro links")
     model_assets = _require_model_assets(Path(model_dir))
-    if not UNIT_CYLINDER_PATH.is_file() or not UNIT_SPHERE_PATH.is_file():
+    if show_provisional_tool and (
+        not UNIT_CYLINDER_PATH.is_file() or not UNIT_SPHERE_PATH.is_file()
+    ):
         raise FileNotFoundError("project needle or target marker mesh is missing")
 
     add_scene_header(
@@ -168,48 +172,49 @@ def createScene(
         )
         links.append(link)
 
-    needle_visual = partial(add_visual_model, color=(0.10, 0.85, 0.75))
-    needle = ControllableRigidObject(
-        parent_node=scene_node,
-        name="provisional_needle",
-        pose=initial_flange_pose,
-        visual_mesh_path=UNIT_CYLINDER_PATH,
-        scale=(0.002, 0.002, needle_length_m),
-        add_visual_model_func=needle_visual,
-    )
-
-    tcp_visual = partial(add_visual_model, color=(0.0, 1.0, 0.1))
-    tcp_marker = ControllableRigidObject(
-        parent_node=scene_node,
-        name="needle_tip_marker",
-        pose=initial_tcp_pose,
-        visual_mesh_path=UNIT_SPHERE_PATH,
-        scale=0.008,
-        add_visual_model_func=tcp_visual,
-    )
-
-    target_visual = partial(add_visual_model, color=(1.0, 0.45, 0.0))
-    visual_target = ControllableRigidObject(
-        parent_node=scene_node,
-        name="entry_point_marker",
-        pose=initial_tcp_pose,
-        visual_mesh_path=UNIT_SPHERE_PATH,
-        scale=0.012,
-        add_visual_model_func=target_visual,
-    )
+    needle = tcp_marker = visual_target = None
+    if show_provisional_tool:
+        needle_visual = partial(add_visual_model, color=(0.10, 0.85, 0.75))
+        needle = ControllableRigidObject(
+            parent_node=scene_node,
+            name="provisional_needle",
+            pose=initial_flange_pose,
+            visual_mesh_path=UNIT_CYLINDER_PATH,
+            scale=(0.002, 0.002, needle_length_m),
+            add_visual_model_func=needle_visual,
+        )
+        tcp_visual = partial(add_visual_model, color=(0.0, 1.0, 0.1))
+        tcp_marker = ControllableRigidObject(
+            parent_node=scene_node,
+            name="needle_tip_marker",
+            pose=initial_tcp_pose,
+            visual_mesh_path=UNIT_SPHERE_PATH,
+            scale=0.008,
+            add_visual_model_func=tcp_visual,
+        )
+        target_visual = partial(add_visual_model, color=(1.0, 0.45, 0.0))
+        visual_target = ControllableRigidObject(
+            parent_node=scene_node,
+            name="entry_point_marker",
+            pose=initial_tcp_pose,
+            visual_mesh_path=UNIT_SPHERE_PATH,
+            scale=0.012,
+            add_visual_model_func=target_visual,
+        )
 
     scene_node.addObject(
         "MechanicalObject",
         template="Rigid3d",
         position=(0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
     )
-    add_bounding_box(
-        scene_node,
-        min=workspace_low_m,
-        max=workspace_high_m,
-        show_bounding_box=True,
-        name="cartesian_command_workspace",
-    )
+    if show_command_workspace:
+        add_bounding_box(
+            scene_node,
+            min=workspace_low_m,
+            max=workspace_high_m,
+            show_bounding_box=True,
+            name="cartesian_command_workspace",
+        )
 
     return {
         "camera": camera,

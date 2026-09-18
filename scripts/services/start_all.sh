@@ -116,6 +116,12 @@ done
     || fail "RUNTIME_MODE conflicts with --robot-mode."
 [[ -z "$ENV_ROBOT_MODE" || "$ENV_ROBOT_MODE" == "$ROBOT_MODE" ]] \
     || fail "ROBOT_MODE conflicts with --robot-mode."
+ROBOT_REAL_MIRROR="${ROBOT_REAL_MIRROR:-0}"
+[[ "$ROBOT_REAL_MIRROR" == 0 || "$ROBOT_REAL_MIRROR" == 1 ]] \
+    || fail "ROBOT_REAL_MIRROR must be 0 or 1."
+[[ "$ROBOT_MODE" == real || "$ROBOT_REAL_MIRROR" == 0 ]] \
+    || fail "ROBOT_REAL_MIRROR is only valid in real mode."
+export ROBOT_REAL_MIRROR
 
 CONFIG_SHA=""
 CONFIG_MISSING=0
@@ -178,6 +184,10 @@ GatewaySessionManager(
 )
 ' \
             || fail "gateway authentication preflight failed."
+    fi
+    if [[ "$ROBOT_REAL_MIRROR" == 1 ]]; then
+        [[ -n "${GATEWAY_AUTH_SECRET_FILE:-}" && -n "${GATEWAY_EXPECTED_ID:-}" ]] \
+            || fail "real mirror requires authenticated gateway settings."
     fi
 fi
 
@@ -320,7 +330,7 @@ done
 test -x "$INFERENCE_ENV/bin/lmdeploy" \
     || fail "lmdeploy is missing from inference environment."
 
-if [[ "$ROBOT_MODE" == simulation ]]; then
+if [[ "$ROBOT_MODE" == simulation || "$ROBOT_REAL_MIRROR" == 1 ]]; then
     test -x "$SIM_ENV/bin/Xvfb" \
         || fail "Xvfb is missing from simulation environment."
 fi
@@ -333,7 +343,7 @@ CUDA_VERSION_OUTPUT="$("$CUDA_TOOLKIT_ROOT/bin/nvcc" --version)" \
 [[ "$CUDA_VERSION_OUTPUT" == *"release 12.8"* ]] \
     || fail "Expected CUDA 12.8 at $CUDA_TOOLKIT_ROOT."
 
-if [[ "$ROBOT_MODE" == simulation ]]; then
+if [[ "$ROBOT_MODE" == simulation || "$ROBOT_REAL_MIRROR" == 1 ]]; then
     test -x "$SOFA_ROOT/bin/runSofa" \
         || fail "SOFA runtime is missing."
     test -d "$SOFAPYTHON3_ROOT" \
@@ -372,6 +382,9 @@ else
         echo "Gateway         = authenticated observe-only (awaiting Mac connection)"
     else
         echo "Gateway         = disconnected (no authentication configured)"
+    fi
+    if [[ "$ROBOT_REAL_MIRROR" == 1 ]]; then
+        echo "Passive SOFA    = uncalibrated preview / not for control"
     fi
 fi
 echo "ASR             = OK"
@@ -438,14 +451,10 @@ echo "      log=$LOG_DIR/planner-adapter.log"
 
 
 # --------------------------------------------------
-# 3. robot runtime :8001 (simulation preserves the original Xvfb/SOFA path)
+# 3. robot runtime :8001 (real SOFA mirror is explicit and observe-only)
 # --------------------------------------------------
 
-if [[ "$ROBOT_MODE" == simulation ]]; then
-ROBOT_LOG="$LOG_DIR/robot-simulation.log"
-ROBOT_SERVICE_LABEL=robot-simulation
-echo "[3/4] Starting Xvfb + robot-simulation..."
-
+if [[ "$ROBOT_MODE" == simulation || "$ROBOT_REAL_MIRROR" == 1 ]]; then
 (
     exec "$SIM_ENV/bin/Xvfb" ":$XVFB_DISPLAY" \
         -screen 0 1280x1024x24 \
@@ -463,6 +472,12 @@ if ! kill -0 "$XVFB_PID" 2>/dev/null; then
     tail -n 80 "$LOG_DIR/xvfb.log" || true
     exit 1
 fi
+fi
+
+if [[ "$ROBOT_MODE" == simulation ]]; then
+ROBOT_LOG="$LOG_DIR/robot-simulation.log"
+ROBOT_SERVICE_LABEL=robot-simulation
+echo "[3/4] Starting Xvfb + robot-simulation..."
 
 (
     export SOFA_ROOT="$SOFA_ROOT"
@@ -500,9 +515,27 @@ echo "      log=$ROBOT_LOG"
 else
     ROBOT_LOG="$LOG_DIR/robot-runtime.log"
     ROBOT_SERVICE_LABEL=robot-runtime
-    echo "[3/4] Starting REAL / OBSERVE ONLY robot runtime..."
+    if [[ "$ROBOT_REAL_MIRROR" == 1 ]]; then
+        echo "[3/4] Starting REAL / OBSERVE ONLY robot runtime + passive SOFA mirror..."
+    else
+        echo "[3/4] Starting REAL / OBSERVE ONLY robot runtime..."
+    fi
     (
-        export PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT"
+        if [[ "$ROBOT_REAL_MIRROR" == 1 ]]; then
+            export SOFA_ROOT="$SOFA_ROOT"
+            export SOFAPYTHON3_ROOT="$SOFAPYTHON3_ROOT"
+            export PATH="$SOFA_ROOT/bin:$SIM_ENV/bin:$PATH"
+            export PYTHONPATH="$SOFAPYTHON3_ROOT/lib/python3/site-packages:$APP_ROOT/third_party/sofa_env:$APP_ROOT/packages/surgical_contracts:$APP_ROOT"
+            export LD_LIBRARY_PATH="$SIM_ENV/lib:$SOFA_ROOT/bin:$SOFA_ROOT/lib:$SOFAPYTHON3_ROOT/lib"
+            export E05_MODEL_DIR="$E05_MODEL_DIR"
+            export DISPLAY=":$XVFB_DISPLAY"
+            export LIBGL_ALWAYS_SOFTWARE=1
+            export LIBGL_DRIVERS_PATH="$SIM_ENV/lib/dri"
+            export QT_QPA_PLATFORM=offscreen
+            export OMP_NUM_THREADS=1
+        else
+            export PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT"
+        fi
         export ROBOT_SIMULATION_HOST=127.0.0.1
         export ROBOT_SIMULATION_PORT=8001
         export ROBOT_SIMULATION_LOG_LEVEL=info
@@ -510,6 +543,10 @@ else
     ) >"$ROBOT_LOG" 2>&1 &
     SIM_PID=$!
     PIDS+=("$SIM_PID")
+    if [[ "$ROBOT_REAL_MIRROR" == 1 ]]; then
+        echo "      Xvfb PID=$XVFB_PID"
+        echo "      DISPLAY=:$XVFB_DISPLAY"
+    fi
     echo "      runtime PID=$SIM_PID"
     echo "      log=$ROBOT_LOG"
 fi

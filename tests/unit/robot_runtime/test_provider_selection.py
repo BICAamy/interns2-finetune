@@ -72,3 +72,19 @@ def test_real_process_entry_requires_matching_mode_config_and_digest(monkeypatch
     monkeypatch.setenv("RUNTIME_MODE", "simulation")
     with pytest.raises(ValueError, match="disagree"):
         app_from_environment()
+
+
+def test_real_mirror_is_explicit_and_requires_an_authenticated_gateway(monkeypatch) -> None:
+    example = Path(__file__).resolve().parents[3] / "configs" / "robot-real.example.yaml"
+    monkeypatch.setenv("ROBOT_REAL_MIRROR", "1")
+    with pytest.raises(ValueError, match="simulation mode"):
+        app_from_environment()
+    monkeypatch.setenv("ROBOT_MODE", "real")
+    monkeypatch.setenv("REAL_CONFIG_PATH", str(example))
+    monkeypatch.setenv("REAL_CONFIG_SHA256", load_real_config(example).digest())
+    monkeypatch.setenv("ROBOT_CONTROL_MODE", "observe-only")
+    with pytest.raises(ValueError, match="authenticated gateway"):
+        app_from_environment()
+    monkeypatch.setenv("ROBOT_REAL_MIRROR", "yes")
+    with pytest.raises(ValueError, match="must be 0 or 1"):
+        app_from_environment()
