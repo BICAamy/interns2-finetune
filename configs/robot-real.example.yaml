@@ -12,12 +12,12 @@ controller:
   package_versions: [] # 允许的控制器软件版本；空列表表示未确认
 
 joint_mapping:
-  sign: null # J1～J6 的方向：同向填 1，反向填 -1
-  zero_offset_deg: null # J1～J6 的零点差，单位：deg
+  sign: null # Step 8 标定生成；不要凭画面猜
+  zero_offset_deg: null # Step 8 标定生成，单位：deg
 
 base_to_sofa: # 真机底座在仿真场景中的位置和朝向
-  translation_mm: null # 位置 [x, y, z]，单位：mm
-  quaternion_xyzw: null # 朝向 [qx, qy, qz, qw]
+  translation_mm: null # Step 8 标定生成的 [x, y, z]，单位：mm
+  quaternion_xyzw: null # Step 8 标定生成的 [qx, qy, qz, qw]
 
 tool:
   tcp_name: null # 控制器里选用的工具中心点名称

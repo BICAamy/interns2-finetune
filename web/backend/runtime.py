@@ -17,6 +17,8 @@ from surgical_contracts import (
     CoordinateSource,
     ParsedCommand,
     Point3D,
+    RobotTelemetry,
+    SimulationTelemetry,
     SimulationCameraControlRequest,
     SimulationCameraState,
     ToolEvent,
@@ -129,7 +131,7 @@ class WebRuntime:
         self._model_http: OpenAICompatibleHTTPClient | None = None
         self._owns_robot = robot is None
         self._owns_planner = planner is None
-        self._owns_simulation_observer = simulation_observer is None and not self._real_observe_only
+        self._owns_simulation_observer = simulation_observer is None
         if parser is None:
             self._model_http = OpenAICompatibleHTTPClient(settings)
             parser = InternS2Agent(settings, client=self._model_http)
@@ -149,7 +151,6 @@ class WebRuntime:
             timeout_s=settings.planner_adapter_timeout,
         )
         self.simulation_observer = (
-            None if self._real_observe_only else
             simulation_observer
             or RobotSimulationObservabilityHTTPClient(
                 settings.robot_simulation_base_url,
@@ -215,21 +216,88 @@ class WebRuntime:
     def get_session(self, session_id: str) -> SessionSnapshot:
         return self.store.snapshot(session_id)
 
-    def get_simulation_telemetry(self, session_id: str) -> SimulationTelemetryView:
+    def get_robot_telemetry(self, session_id: str) -> SimulationTelemetryView:
         session = self.store.snapshot(session_id)
-        if self._real_observe_only:
-            return SimulationTelemetryView(
-                connected=False,
-                sequence=0,
-                received_at_ms=_now_ms(),
-                state_machine_state=session.status.value,
-                error={
-                    "code": "GATEWAY_DISCONNECTED",
-                    "message": "真实机械臂网关未连接；当前没有可信的实时姿态或画面",
-                },
-            )
-        assert self.simulation_observer is not None
         telemetry = self.simulation_observer.get_telemetry()
+        if isinstance(telemetry, RobotTelemetry):
+            try:
+                mirror = self.simulation_observer.get_mirror_status()
+            except SimulationProxyError as error:
+                mirror = {"warning": f"SOFA mirror unavailable: {error}"}
+            pose = telemetry.actual_pose_robot_base
+            current_tcp = (
+                Point3D(
+                    x=pose.translation_mm[0],
+                    y=pose.translation_mm[1],
+                    z=pose.translation_mm[2],
+                    frame=pose.frame,
+                    unit=pose.unit,
+                )
+                if pose is not None
+                else None
+            )
+            connections = {
+                "server": "connected",
+                **{
+                    key: value.value
+                    for key, value in telemetry.connections.model_dump(mode="python").items()
+                },
+            }
+            return SimulationTelemetryView(
+                connected=telemetry.freshness.value == "fresh",
+                runtime_mode="real",
+                control_mode=telemetry.control_mode,
+                provider=telemetry.provider.value,
+                freshness=telemetry.freshness.value,
+                source_age_ms=telemetry.state_age_ms,
+                connections=connections,
+                sequence=telemetry.sequence,
+                received_at_ms=_now_ms(),
+                source_updated_at_ms=telemetry.server_received_at_ms,
+                state_machine_state=session.status.value,
+                motion_state=(telemetry.motion_state.value if telemetry.motion_state else None),
+                estop=bool(telemetry.physical_estop_active),
+                current_tcp=current_tcp,
+                actual_tcp_robot_base=(pose.model_dump(mode="json") if pose else None),
+                joint_positions_deg=(
+                    [float(value) for value in telemetry.joint_positions_deg]
+                    if telemetry.joint_positions_deg is not None
+                    else []
+                ),
+                frame_sequence=int(mirror.get("frame_sequence", 0)) if mirror else 0,
+                fsm_code=telemetry.fsm_code,
+                enabled=telemetry.enabled,
+                electrified=telemetry.electrified,
+                moving=telemetry.moving,
+                in_position=telemetry.in_position,
+                physical_estop_active=telemetry.physical_estop_active,
+                emergency_stop_circuit_fault=telemetry.emergency_stop_circuit_fault,
+                safeguard_active=telemetry.safeguard_active,
+                safeguard_circuit_fault=telemetry.safeguard_circuit_fault,
+                vendor_fault=(
+                    telemetry.vendor_fault.model_dump(mode="json")
+                    if telemetry.vendor_fault is not None
+                    else None
+                ),
+                mirror_calibrated=(bool(mirror.get("calibrated")) if mirror else None),
+                mirror_warning=(str(mirror.get("warning")) if mirror else None),
+                mirror_reason=(str(mirror.get("reason")) if mirror else None),
+                mirror_source_sequence=(
+                    int(mirror["source_sequence"])
+                    if mirror and mirror.get("source_sequence") is not None
+                    else None
+                ),
+                error=(
+                    None
+                    if telemetry.freshness.value == "fresh"
+                    else {
+                        "code": f"ROBOT_{telemetry.freshness.value.upper()}",
+                        "message": "真实状态不新鲜；画面已冻结",
+                    }
+                ),
+            )
+        if not isinstance(telemetry, SimulationTelemetry):
+            raise SimulationProxyError("robot-runtime 返回了未知遥测类型")
         command = session.normalized_command or {}
         entry_point = _point_from_payload(command.get("entry_point"))
         target_point = _point_from_payload(command.get("target_point"))
@@ -248,6 +316,10 @@ class WebRuntime:
         trajectory = [tuple(float(value) for value in point) for point in telemetry.trajectory_mm]
         return SimulationTelemetryView(
             connected=True,
+            runtime_mode="simulation",
+            provider="simulation",
+            freshness="fresh",
+            connections={"server": "connected"},
             sequence=telemetry.sequence,
             received_at_ms=_now_ms(),
             source_updated_at_ms=telemetry.updated_at_ms,
@@ -275,7 +347,10 @@ class WebRuntime:
             error=session.error,
         )
 
-    def simulation_telemetry_error(
+    def get_simulation_telemetry(self, session_id: str) -> SimulationTelemetryView:
+        return self.get_robot_telemetry(session_id)
+
+    def robot_telemetry_error(
         self,
         session_id: str,
         error: Exception,
@@ -284,6 +359,10 @@ class WebRuntime:
         command = session.normalized_command or {}
         return SimulationTelemetryView(
             connected=False,
+            runtime_mode=("real" if self._real_observe_only else "simulation"),
+            control_mode=("observe-only" if self._real_observe_only else None),
+            freshness="disconnected",
+            connections={"server": "disconnected"},
             sequence=0,
             received_at_ms=_now_ms(),
             state_machine_state=session.status.value,
@@ -291,33 +370,57 @@ class WebRuntime:
             entry_point=_point_from_payload(command.get("entry_point")),
             target_point=_point_from_payload(command.get("target_point")),
             error={
-                "code": "SIMULATION_TELEMETRY_UNAVAILABLE",
+                "code": (
+                    "GATEWAY_DISCONNECTED"
+                    if self._real_observe_only
+                    else "ROBOT_TELEMETRY_UNAVAILABLE"
+                ),
                 "message": str(error) or type(error).__name__,
                 "details": {},
             },
         )
 
-    async def open_simulation_video(self, session_id: str) -> MJPEGStream:
+    def simulation_telemetry_error(
+        self, session_id: str, error: Exception
+    ) -> SimulationTelemetryView:
+        return self.robot_telemetry_error(session_id, error)
+
+    def _verify_observer_mode(self) -> None:
+        telemetry = self.simulation_observer.get_telemetry()
+        if self._real_observe_only and not isinstance(telemetry, RobotTelemetry):
+            raise SimulationProxyError("robot-runtime 没有运行在 real 模式")
+        if not self._real_observe_only and not isinstance(telemetry, SimulationTelemetry):
+            raise SimulationProxyError("robot-runtime 没有运行在 simulation 模式")
+
+    async def open_robot_video(self, session_id: str) -> MJPEGStream:
         self.store.snapshot(session_id)
-        if self.simulation_observer is None:
-            raise SimulationProxyError("真实机械臂网关未连接；没有可用视频")
+        await asyncio.to_thread(self._verify_observer_mode)
         return await self.simulation_observer.open_mjpeg()
 
-    def get_simulation_camera(self, session_id: str) -> SimulationCameraState:
+    async def open_simulation_video(self, session_id: str) -> MJPEGStream:
+        return await self.open_robot_video(session_id)
+
+    def get_robot_camera(self, session_id: str) -> SimulationCameraState:
         self.store.snapshot(session_id)
-        if self.simulation_observer is None:
-            raise SimulationProxyError("真实机械臂网关未连接；没有可用相机")
+        self._verify_observer_mode()
         return self.simulation_observer.get_camera_state()
 
-    def control_simulation_camera(
+    def get_simulation_camera(self, session_id: str) -> SimulationCameraState:
+        return self.get_robot_camera(session_id)
+
+    def control_robot_camera(
         self,
         session_id: str,
         request: SimulationCameraControlRequest,
     ) -> SimulationCameraState:
         self.store.snapshot(session_id)
-        if self.simulation_observer is None:
-            raise SimulationProxyError("真实机械臂网关未连接；没有可用相机")
+        self._verify_observer_mode()
         return self.simulation_observer.control_camera(request)
+
+    def control_simulation_camera(
+        self, session_id: str, request: SimulationCameraControlRequest
+    ) -> SimulationCameraState:
+        return self.control_robot_camera(session_id, request)
 
     def health(self) -> HealthResponse:
         return HealthResponse(
@@ -494,7 +597,7 @@ class WebRuntime:
                 record.status = SessionStatus.AWAITING_CONFIRMATION
                 record.pending_command = parsed.command
                 record.message = (
-                    "已解析任务；真实模式仅供观察，网关未连接，不能确认执行"
+                    "已解析任务；真实模式仅供观察，不能确认执行"
                     if self._real_observe_only
                     else "请核对结构化任务，确认后才会调用机械臂"
                 )
@@ -511,7 +614,7 @@ class WebRuntime:
 
     async def confirm(self, session_id: str) -> SessionSnapshot:
         if self._real_observe_only:
-            raise SessionConflict("真实机械臂当前仅供观察，网关未连接；禁止执行命令")
+            raise SessionConflict("真实机械臂当前仅供观察；禁止执行命令")
         selected: dict[str, Any] = {}
 
         def begin(record) -> None:
@@ -559,7 +662,7 @@ class WebRuntime:
 
     async def stop(self, session_id: str, *, emergency: bool) -> SessionSnapshot:
         if self._real_observe_only:
-            raise SessionConflict("真实机械臂网关未连接；网页不能发送停止或急停，请使用现场物理装置")
+            raise SessionConflict("真实机械臂仅供观察；网页不能发送停止或急停，请使用现场物理装置")
         command = ParsedCommand(
             command_id=f"web-{'estop' if emergency else 'stop'}-{uuid4().hex}",
             intent=(
@@ -608,7 +711,7 @@ class WebRuntime:
 
     async def reset_estop(self, session_id: str) -> SessionSnapshot:
         if self._real_observe_only:
-            raise SessionConflict("真实机械臂网关未连接；禁止远程复位急停")
+            raise SessionConflict("真实机械臂仅供观察；禁止远程复位急停")
         # Resolve the session before performing a state-changing tool call.
         self.store.snapshot(session_id)
         command_id = f"web-reset-{uuid4().hex}"

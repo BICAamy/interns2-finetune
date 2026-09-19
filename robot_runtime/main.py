@@ -66,11 +66,19 @@ def app_from_environment():
                     config.joint_mapping.zero_offset_deg is None
                 ):
                     raise ValueError("joint mapping sign and zero offset must be set together")
+                if (config.base_to_sofa.translation_mm is None) != (
+                    config.base_to_sofa.quaternion_xyzw is None
+                ):
+                    raise ValueError(
+                        "Base-to-SOFA translation and quaternion must be set together"
+                    )
                 mirror = RealMirrorWorker(
                     sessions.telemetry,
                     stale_ms=config.deadlines.state_stale_ms,
                     sign=config.joint_mapping.sign,
                     zero_offset_deg=config.joint_mapping.zero_offset_deg,
+                    base_to_sofa_translation_mm=config.base_to_sofa.translation_mm,
+                    base_to_sofa_quaternion_xyzw=config.base_to_sofa.quaternion_xyzw,
                 )
             return create_app(
                 provider=HuayanRealStubProvider(sessions, mirror_worker=mirror), mode="real"

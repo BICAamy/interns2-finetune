@@ -88,6 +88,12 @@ export interface SimulationTelemetry {
   schema_version: "1.0";
   type: "telemetry";
   connected: boolean;
+  runtime_mode: "simulation" | "real";
+  control_mode: string | null;
+  provider: string | null;
+  freshness: "fresh" | "stale" | "disconnected" | "unknown";
+  source_age_ms: number | null;
+  connections: Record<string, string>;
   sequence: number;
   received_at_ms: number;
   source_updated_at_ms: number | null;
@@ -97,6 +103,13 @@ export interface SimulationTelemetry {
   estop: boolean;
   active_command_id: string | null;
   current_tcp: Point3D | null;
+  actual_tcp_robot_base: {
+    translation_mm: [number, number, number];
+    rotation_rpy_deg: [number, number, number];
+    quaternion_xyzw: [number, number, number, number];
+    frame: string;
+    unit: string;
+  } | null;
   entry_point: Point3D | null;
   target_point: Point3D | null;
   position_error_mm: number | null;
@@ -106,6 +119,21 @@ export interface SimulationTelemetry {
   trajectory_total_points: number;
   frame_sequence: number;
   simulation_fps: number | null;
+  fsm_code: number | null;
+  enabled: boolean | null;
+  electrified: boolean | null;
+  moving: boolean | null;
+  in_position: boolean | null;
+  physical_estop_active: boolean | null;
+  emergency_stop_circuit_fault: boolean | null;
+  safeguard_active: boolean | null;
+  safeguard_circuit_fault: boolean | null;
+  vendor_fault: Record<string, any> | null;
+  mirror_calibrated: boolean | null;
+  mirror_warning: string | null;
+  mirror_reason: string | null;
+  mirror_source_sequence: number | null;
+  tool_tcp_calibrated: false;
   error: Record<string, any> | null;
 }
 

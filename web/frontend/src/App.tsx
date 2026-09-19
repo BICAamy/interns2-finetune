@@ -72,6 +72,11 @@ function CoordinateCard({ title, point }: { title: string; point: any }) {
   );
 }
 
+function stateLabel(value: boolean | null | undefined): string {
+  if (value == null) return "未知";
+  return value ? "是" : "否";
+}
+
 function Timeline({ events }: { events: Array<Record<string, any>> }) {
   if (!events.length) {
     return <div className="empty-state">提交任务后，这里会显示工具调用时间线。</div>;
@@ -280,7 +285,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!session?.session_id || runtimeMode !== "simulation") return;
+    if (!session?.session_id || runtimeMode === null) return;
     let cancelled = false;
     api.camera(session.session_id)
       .then((state) => {
@@ -298,7 +303,7 @@ export default function App() {
   }, [session?.session_id, runtimeMode]);
 
   useEffect(() => {
-    if (!videoFailed || runtimeMode !== "simulation") return;
+    if (!videoFailed || runtimeMode === null) return;
     const timer = window.setTimeout(() => {
       setVideoAttempt((value) => value + 1);
       setVideoFailed(false);
@@ -324,7 +329,8 @@ export default function App() {
   const entry = (command?.entry_point ?? telemetry?.entry_point) as Point3D | undefined;
   const target = (command?.target_point ?? telemetry?.target_point) as Point3D | undefined;
   const currentTcp = telemetry?.current_tcp ?? session?.current_tcp;
-  const videoUrl = runtimeMode === "simulation" && session ? api.videoUrl(session.session_id, videoAttempt) : "";
+  const videoUrl = runtimeMode !== null && session ? api.videoUrl(session.session_id, videoAttempt) : "";
+  const realStale = runtimeMode === "real" && telemetry?.freshness !== "fresh";
 
   const statusTone = useMemo(() => {
     if (!session) return "neutral";
@@ -344,7 +350,7 @@ export default function App() {
   }
 
   async function updateCamera(payload: CameraControlPayload) {
-    if (!session || runtimeMode !== "simulation" || cameraRequestInFlight.current) return;
+    if (!session || runtimeMode === null || cameraRequestInFlight.current) return;
     cameraRequestInFlight.current = true;
     try {
       setCamera(await api.controlCamera(session.session_id, payload));
@@ -356,7 +362,7 @@ export default function App() {
     }
   }
   useEffect(() => {
-  if (runtimeMode !== "simulation") return;
+  if (runtimeMode === null) return;
   const element = videoStageRef.current;
   if (!element) return;
 
@@ -578,15 +584,15 @@ export default function App() {
           <div className="brand-mark">IS</div>
           <div>
             <h1>InternS2 手术导航控制台</h1>
-            <p>{runtimeMode === "real" ? "真实机械臂 · 仅观察 · 网关未连接" : runtimeMode === "simulation" ? "E05-Pro 仿真定位 · 人工确认模式" : "正在确认机器人运行模式"}</p>
+            <p>{runtimeMode === "real" ? "真实机械臂 · 仅观察 · 实际反馈数字孪生" : runtimeMode === "simulation" ? "E05-Pro 仿真定位 · 人工确认模式" : "正在确认机器人运行模式"}</p>
           </div>
         </div>
         <div className="topbar-actions">
           <span className={`connection ${connected ? "online" : "offline"}`}>
-            {runtimeMode === "real" ? (connected ? "控制台已连接 · 网关断开" : "控制台连接中 · 网关断开") : connected ? "状态已连接" : "状态连接中"}
+            {runtimeMode === "real" ? `网关 ${telemetry?.connections.gateway ?? "未知"} · DataSheet ${telemetry?.connections.datasheet ?? "未知"}` : connected ? "状态已连接" : "状态连接中"}
           </span>
-          <span className={`connection ${videoConnected && runtimeMode === "simulation" ? "online" : "offline"}`}>
-            {runtimeMode === "real" ? "真实画面不可用" : videoConnected ? "视频已连接" : "视频连接中"}
+          <span className={`connection ${videoConnected ? "online" : "offline"}`}>
+            {videoConnected ? "数字孪生画面已连接" : "视频连接中"}
           </span>
           <button
             className="button stop"
@@ -745,7 +751,7 @@ export default function App() {
             </div>
             <div className="safety-note">
               <strong>执行边界</strong>
-              <span>{runtimeMode === "real" ? "真实模式当前仅供观察；网关未连接，网页不能执行、停止、急停或复位。请使用现场物理装置保障安全。" : "确认只会移动机械臂并请求不可执行的路径预览，当前版本不会执行穿刺。"}</span>
+              <span>{runtimeMode === "real" ? "真实模式当前仅供观察；网页不能执行、停止、急停或复位。现场安全仍以物理急停和厂家页面为准。" : "确认只会移动机械臂并请求不可执行的路径预览，当前版本不会执行穿刺。"}</span>
             </div>
           </section>
 
@@ -759,7 +765,7 @@ export default function App() {
             </div>
             <CoordinateCard title="入点" point={entry} />
             <CoordinateCard title="靶点" point={target} />
-            <CoordinateCard title="当前针尖 TCP" point={currentTcp} />
+            <CoordinateCard title={runtimeMode === "real" ? "控制器实际 TCP（工具未标定）" : "当前针尖 TCP"} point={currentTcp} />
             {command?.relative_motion && (
               <div className="relative-card">
                 <span>相对运动</span>
@@ -775,26 +781,26 @@ export default function App() {
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">{runtimeMode === "real" ? "03 · 真实机械臂" : runtimeMode === "simulation" ? "03 · 远程仿真" : "03 · 模式未确认"}</span>
-                <h2>{runtimeMode === "real" ? "真实姿态尚不可用" : runtimeMode === "simulation" ? "E05-Pro 实时画面与遥测" : "等待运行模式确认"}</h2>
+                <h2>{runtimeMode === "real" ? "真实反馈驱动的 E05-Pro 数字孪生" : runtimeMode === "simulation" ? "E05-Pro 实时画面与遥测" : "等待运行模式确认"}</h2>
               </div>
               <span className={`step-badge ${telemetry?.connected ? "live" : ""}`}>
-                {telemetry?.connected ? `${telemetry.simulation_fps ?? 0} FPS` : "遥测断开"}
+                {telemetry?.connected ? (runtimeMode === "real" ? `FRESH · ${Math.round(telemetry.source_age_ms ?? 0)} ms` : `${telemetry.simulation_fps ?? 0} FPS`) : (telemetry?.freshness ?? "遥测断开").toUpperCase()}
               </span>
             </div>
             <div className="simulation-layout">
               <div
                 ref={videoStageRef}
-                className={`video-stage ${cameraDragging ? "dragging" : ""}`}
-                onPointerDown={runtimeMode === "simulation" ? beginCameraDrag : undefined}
-                onPointerMove={runtimeMode === "simulation" ? moveCamera : undefined}
-                onPointerUp={runtimeMode === "simulation" ? endCameraDrag : undefined}
-                onPointerCancel={runtimeMode === "simulation" ? endCameraDrag : undefined}
+                className={`video-stage ${cameraDragging ? "dragging" : ""} ${realStale ? "stale" : ""}`}
+                onPointerDown={runtimeMode !== null ? beginCameraDrag : undefined}
+                onPointerMove={runtimeMode !== null ? moveCamera : undefined}
+                onPointerUp={runtimeMode !== null ? endCameraDrag : undefined}
+                onPointerCancel={runtimeMode !== null ? endCameraDrag : undefined}
               >
                 {videoUrl && (
                   <img
                     key={videoUrl}
                     src={videoUrl}
-                    alt="远程 SOFA E05-Pro 仿真画面"
+                    alt={runtimeMode === "real" ? "真实反馈驱动的 SOFA E05-Pro 数字孪生" : "远程 SOFA E05-Pro 仿真画面"}
                     draggable={false}
                     onLoad={() => {
                       setVideoConnected(true);
@@ -806,31 +812,25 @@ export default function App() {
                     }}
                   />
                 )}
-                {runtimeMode === "real" && (
-                  <div className="video-fallback">
-                    <strong>REAL / OBSERVE ONLY</strong>
-                    <span>Mac 网关未连接；尚无可信的真实关节姿态与 SOFA 同步画面。此处不会显示仿真姿态冒充真机。</span>
-                  </div>
-                )}
                 {runtimeMode === null && (
                   <div className="video-fallback"><strong>运行模式未确认</strong><span>暂不显示机械臂画面。</span></div>
                 )}
-                {runtimeMode === "simulation" && <div className="video-overlay top-left">
+                {runtimeMode !== null && <div className="video-overlay top-left">
                   <span className={videoConnected ? "record-dot live" : "record-dot"} />
-                  {videoConnected ? "REMOTE SIMULATION" : "RECONNECTING"}
+                  {videoConnected ? (runtimeMode === "real" ? "REAL / OBSERVE ONLY" : "REMOTE SIMULATION") : "RECONNECTING"}
                 </div>}
-                {runtimeMode === "simulation" && <div className="video-overlay bottom-right">
+                {runtimeMode !== null && <div className="video-overlay bottom-right">
                   frame {telemetry?.frame_sequence ?? 0}
                 </div>}
-                {runtimeMode === "simulation" && <div className="camera-hint">
+                {runtimeMode !== null && <div className="camera-hint">
                   左键旋转 · 右键平移 · 滚轮缩放 · 双击复位
                 </div>}
-                {runtimeMode === "simulation" && <div className="camera-state">
+                {runtimeMode !== null && <div className="camera-state">
                   {camera
                     ? `方位 ${camera.yaw_deg.toFixed(0)}° · 俯仰 ${camera.pitch_deg.toFixed(0)}° · ${camera.distance_m.toFixed(2)} m`
                     : "正在读取相机状态"}
                 </div>}
-                {runtimeMode === "simulation" && <div
+                {runtimeMode !== null && <div
                   className="camera-presets"
                   onPointerDown={(event) => event.stopPropagation()}
                   onDoubleClick={(event) => event.stopPropagation()}
@@ -845,18 +845,47 @@ export default function App() {
                     </button>
                   ))}
                 </div>}
-                {videoFailed && runtimeMode === "simulation" && (
+                {videoFailed && runtimeMode !== null && (
                   <div className="video-fallback">
-                    <strong>仿真视频暂时不可用</strong>
-                    <span>系统将在 2 秒后自动重连，机械臂控制线程不受影响。</span>
+                    <strong>数字孪生视频暂时不可用</strong>
+                    <span>系统将在 2 秒后自动重连；真实模式不会因此向机械臂发送命令。</span>
                   </div>
                 )}
+                {realStale && <div className="stale-overlay"><strong>STALE · 画面已冻结</strong><span>请检查 Mac、10004 DataSheet 和 SSH 隧道</span></div>}
+                {runtimeMode === "real" && telemetry?.mirror_warning && <div className="calibration-warning">{telemetry.mirror_warning}</div>}
                 {cameraError && <div className="camera-error">{cameraError}</div>}
               </div>
 
               {runtimeMode === "real" ? (
                 <aside className="telemetry-board">
-                  <div className="telemetry-error">真实机械臂网关未连接；无可信关节角、TCP 或运动状态。后续只读网关联调完成前不显示仿真值。</div>
+                  <div className="connection-grid">
+                    {["server", "gateway", "datasheet", "command_socket", "controller_box"].map((name) => (
+                      <span key={name} className={telemetry?.connections[name] === "connected" ? "ok" : "bad"}>
+                        {name} <strong>{telemetry?.connections[name] ?? "unknown"}</strong>
+                      </span>
+                    ))}
+                  </div>
+                  <div className="telemetry-stats">
+                    <div><span>反馈新鲜度</span><strong>{telemetry?.freshness ?? "unknown"} · {telemetry?.source_age_ms != null ? `${telemetry.source_age_ms.toFixed(0)} ms` : "—"}</strong></div>
+                    <div><span>FSM / 运动状态</span><strong>{telemetry?.fsm_code ?? "—"} / {telemetry?.motion_state ?? "—"}</strong></div>
+                    <div><span>使能 / 上电</span><strong>{stateLabel(telemetry?.enabled)} / {stateLabel(telemetry?.electrified)}</strong></div>
+                    <div><span>Moving / InPos</span><strong>{stateLabel(telemetry?.moving)} / {stateLabel(telemetry?.in_position)}</strong></div>
+                    <div><span>急停 / 急停回路故障</span><strong>{stateLabel(telemetry?.physical_estop_active)} / {stateLabel(telemetry?.emergency_stop_circuit_fault)}</strong></div>
+                    <div><span>光幕 / 光幕回路故障</span><strong>{stateLabel(telemetry?.safeguard_active)} / {stateLabel(telemetry?.safeguard_circuit_fault)}</strong></div>
+                  </div>
+                  <div className="joint-strip">
+                    {(telemetry?.joint_positions_deg ?? []).map((joint, index) => (
+                      <span key={index}>J{index + 1} <strong>{joint.toFixed(3)}°</strong></span>
+                    ))}
+                  </div>
+                  <div className="actual-pose">
+                    <span>控制器 Actual_PCS_Base（工具 TCP 尚未标定）</span>
+                    <strong>{telemetry?.actual_tcp_robot_base ? `XYZ ${telemetry.actual_tcp_robot_base.translation_mm.map((value) => value.toFixed(3)).join(" / ")} mm` : "—"}</strong>
+                    <strong>{telemetry?.actual_tcp_robot_base ? `RPY ${telemetry.actual_tcp_robot_base.rotation_rpy_deg.map((value) => value.toFixed(3)).join(" / ")}°` : "—"}</strong>
+                  </div>
+                  {telemetry?.vendor_fault && <div className="telemetry-error">Vendor error {String(telemetry.vendor_fault.vendor_error_code ?? "unknown")}</div>}
+                  {!telemetry?.mirror_calibrated && <div className="telemetry-error">关节/Base 坐标尚未通过标定验收；当前画面不可用于定位。</div>}
+                  {telemetry?.error && <div className="telemetry-error">{String(telemetry.error.message ?? "真实遥测不可用")}</div>}
                 </aside>
               ) : <aside className="telemetry-board">
                 <div className="telemetry-stats">
@@ -915,8 +944,8 @@ export default function App() {
       </main>
 
       <footer>
-        <span>InternS2 Surgical Navigation · Simulation Only</span>
-        <strong>当前版本未执行穿刺</strong>
+        <span>InternS2 Surgical Navigation · {runtimeMode === "real" ? "REAL / OBSERVE ONLY" : "SIMULATION"}</span>
+        <strong>{runtimeMode === "real" ? "真机命令发送已禁用" : "当前版本未执行穿刺"}</strong>
       </footer>
     </div>
   );

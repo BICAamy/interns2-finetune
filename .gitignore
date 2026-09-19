@@ -89,6 +89,7 @@ Thumbs.db
 .env.*
 !.env.example
 /configs/robot-real.local.yaml
+/configs/robot-real-step8.local.yaml
 /configs/gateway-auth.local
 
 # ============================================================

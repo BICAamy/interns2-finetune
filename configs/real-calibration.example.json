@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0",
+  "calibration_id": "replace-with-date-and-robot-id",
+  "device_sn": "replace-with-controller-device-sn",
+  "robot_model": "replace-with-controller-model",
+  "package_version": "replace-with-package-version",
+  "captured_at": "replace-with-ISO-8601-time",
+  "thresholds": {
+    "joint_rms_deg": null,
+    "joint_max_deg": null,
+    "base_rms_mm": null,
+    "base_max_mm": null,
+    "base_orientation_rms_deg": null,
+    "base_orientation_max_deg": null
+  },
+  "samples": [
+    {"name":"reference","split":"fit","robot_joint_positions_deg":null,"visual_joint_positions_deg":null,"robot_base_point_mm":null,"sofa_world_point_mm":null,"robot_base_quaternion_xyzw":null,"sofa_world_quaternion_xyzw":null},
+    {"name":"j1-positive","split":"fit","robot_joint_positions_deg":null,"visual_joint_positions_deg":null,"robot_base_point_mm":null,"sofa_world_point_mm":null,"robot_base_quaternion_xyzw":null,"sofa_world_quaternion_xyzw":null},
+    {"name":"j2-positive","split":"fit","robot_joint_positions_deg":null,"visual_joint_positions_deg":null,"robot_base_point_mm":null,"sofa_world_point_mm":null,"robot_base_quaternion_xyzw":null,"sofa_world_quaternion_xyzw":null},
+    {"name":"j3-positive","split":"fit","robot_joint_positions_deg":null,"visual_joint_positions_deg":null,"robot_base_point_mm":null,"sofa_world_point_mm":null,"robot_base_quaternion_xyzw":null,"sofa_world_quaternion_xyzw":null},
+    {"name":"j4-positive","split":"fit","robot_joint_positions_deg":null,"visual_joint_positions_deg":null,"robot_base_point_mm":null,"sofa_world_point_mm":null,"robot_base_quaternion_xyzw":null,"sofa_world_quaternion_xyzw":null},
+    {"name":"j5-positive","split":"fit","robot_joint_positions_deg":null,"visual_joint_positions_deg":null,"robot_base_point_mm":null,"sofa_world_point_mm":null,"robot_base_quaternion_xyzw":null,"sofa_world_quaternion_xyzw":null},
+    {"name":"j6-positive","split":"fit","robot_joint_positions_deg":null,"visual_joint_positions_deg":null,"robot_base_point_mm":null,"sofa_world_point_mm":null,"robot_base_quaternion_xyzw":null,"sofa_world_quaternion_xyzw":null},
+    {"name":"combination-validation","split":"validation","robot_joint_positions_deg":null,"visual_joint_positions_deg":null,"robot_base_point_mm":null,"sofa_world_point_mm":null,"robot_base_quaternion_xyzw":null,"sofa_world_quaternion_xyzw":null}
+  ]
+}

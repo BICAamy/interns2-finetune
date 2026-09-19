@@ -12,6 +12,7 @@ from scipy.spatial.transform import Rotation
 from sofa_env.base import RenderFramework, RenderMode, SofaEnv
 
 from surgical_contracts import RobotTelemetry, SourceFreshness
+from surgical_contracts import SimulationCameraControlRequest, SimulationCameraState
 
 from .camera_controller import OrbitCameraController
 from .config import DEFAULT_CONFIG_PATH, EntryPointEnvConfig
@@ -32,6 +33,8 @@ class PassiveRealMirrorEnv(SofaEnv):
         stale_ms: int,
         sign: tuple[int, ...] | None = None,
         zero_offset_deg: tuple[float, ...] | None = None,
+        base_to_sofa_translation_mm: tuple[float, ...] | None = None,
+        base_to_sofa_quaternion_xyzw: tuple[float, ...] | None = None,
         config: EntryPointEnvConfig | None = None,
         config_path: str | Path = DEFAULT_CONFIG_PATH,
         model_dir: str | Path | None = None,
@@ -40,7 +43,12 @@ class PassiveRealMirrorEnv(SofaEnv):
     ) -> None:
         self.config = config or EntryPointEnvConfig.from_yaml(config_path)
         self.controller = ExternalJointStateController(
-            self.config, stale_ms=stale_ms, sign=sign, zero_offset_deg=zero_offset_deg
+            self.config,
+            stale_ms=stale_ms,
+            sign=sign,
+            zero_offset_deg=zero_offset_deg,
+            base_to_sofa_translation_mm=base_to_sofa_translation_mm,
+            base_to_sofa_quaternion_xyzw=base_to_sofa_quaternion_xyzw,
         )
         self.camera_controller = OrbitCameraController()
         self._renderer = TrajectoryRenderer()
@@ -94,6 +102,16 @@ class PassiveRealMirrorEnv(SofaEnv):
         self._camera.set_pose(self.camera_controller.pose)
         self._camera.set_look_at(np.asarray(state.target_m, dtype=np.float64))
 
+    def get_camera_state(self) -> SimulationCameraState:
+        return self.camera_controller.state()
+
+    def control_camera(
+        self, request: SimulationCameraControlRequest
+    ) -> SimulationCameraState:
+        state = self.camera_controller.apply(request)
+        self._apply_camera_pose()
+        return state
+
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None) -> None:
         super().reset(seed=seed, options=options)
         self._apply_camera_pose()
@@ -127,13 +145,17 @@ class PassiveRealMirrorEnv(SofaEnv):
         from sofa_env.utils.camera import world_to_pixel_coordinates
 
         freshness = self.controller.freshness
-        warning = "UNCALIBRATED / NOT FOR CONTROL"
+        warning = (
+            "COORDINATE CALIBRATED / TOOL TCP UNAVAILABLE / NOT FOR CONTROL"
+            if self.controller.coordinate_calibrated
+            else "UNCALIBRATED / NOT FOR CONTROL"
+        )
         if freshness != SourceFreshness.FRESH:
-            warning = f"{freshness.value.upper()} / UNCALIBRATED"
+            warning = f"{freshness.value.upper()} / FROZEN / NOT FOR CONTROL"
         return self._renderer.render(
             frame,
-            # Until Base-to-SOFA is calibrated, do not place the controller's
-            # actual TCP path into an assumed SOFA coordinate frame.
+            # Step 8 aligns the robot links, not the final surgical tool.
+            # Keep the TCP path/marker hidden until Step 9 validates the tool.
             trajectory_scene=(),
             tcp_scene=None,
             entry_scene=None,

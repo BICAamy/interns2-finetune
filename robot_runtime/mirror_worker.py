@@ -2,13 +2,31 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Condition, Event, Lock, Thread
 import time
 from typing import Any, Protocol
 
-from surgical_contracts import RobotTelemetry, SourceFreshness
+from surgical_contracts import (
+    RobotTelemetry,
+    SimulationCameraControlRequest,
+    SimulationCameraState,
+    SourceFreshness,
+)
+
+
+def _default_camera_state() -> SimulationCameraState:
+    return SimulationCameraState(
+        preset="front",
+        yaw_deg=0.0,
+        pitch_deg=0.0,
+        distance_m=1.65,
+        target_m=(0.35, 0.0, 0.42),
+        position_m=(0.35, -1.65, 0.42),
+        updated_at_ms=time.time_ns() // 1_000_000,
+    )
 
 
 class MirrorEnvironment(Protocol):
@@ -17,6 +35,8 @@ class MirrorEnvironment(Protocol):
     def reset(self) -> None: ...
     def apply_external_joint_state(self, telemetry: RobotTelemetry) -> Any | None: ...
     def refresh_frozen_frame(self) -> Any | None: ...
+    def get_camera_state(self) -> SimulationCameraState: ...
+    def control_camera(self, request: SimulationCameraControlRequest) -> SimulationCameraState: ...
     def close(self) -> None: ...
 
 
@@ -35,13 +55,22 @@ class MirrorStatus:
 
 
 def create_sofa_mirror_environment(
-    *, stale_ms: int, sign: tuple[int, ...] | None, zero_offset_deg: tuple[float, ...] | None,
+    *,
+    stale_ms: int,
+    sign: tuple[int, ...] | None,
+    zero_offset_deg: tuple[float, ...] | None,
+    base_to_sofa_translation_mm: tuple[float, ...] | None,
+    base_to_sofa_quaternion_xyzw: tuple[float, ...] | None,
 ) -> MirrorEnvironment:
     """Import SOFA only on the one thread that will own its scene and OpenGL."""
     from simulation.entry_point_env.passive_mirror_env import PassiveRealMirrorEnv
 
     return PassiveRealMirrorEnv(
-        stale_ms=stale_ms, sign=sign, zero_offset_deg=zero_offset_deg
+        stale_ms=stale_ms,
+        sign=sign,
+        zero_offset_deg=zero_offset_deg,
+        base_to_sofa_translation_mm=base_to_sofa_translation_mm,
+        base_to_sofa_quaternion_xyzw=base_to_sofa_quaternion_xyzw,
     )
 
 
@@ -53,15 +82,28 @@ class RealMirrorWorker:
         stale_ms: int,
         sign: tuple[int, ...] | None = None,
         zero_offset_deg: tuple[float, ...] | None = None,
+        base_to_sofa_translation_mm: tuple[float, ...] | None = None,
+        base_to_sofa_quaternion_xyzw: tuple[float, ...] | None = None,
         environment_factory: Callable[[], MirrorEnvironment] | None = None,
         tick_interval_s: float = 0.05,
     ) -> None:
         if tick_interval_s <= 0 or stale_ms <= 0:
             raise ValueError("mirror tick and stale deadline must be positive")
         self._telemetry_source = telemetry_source
+        if (sign is None) != (zero_offset_deg is None):
+            raise ValueError("joint sign and zero offset must be set together")
+        if (base_to_sofa_translation_mm is None) != (
+            base_to_sofa_quaternion_xyzw is None
+        ):
+            raise ValueError("Base-to-SOFA translation and quaternion must be set together")
+        self._calibrated = sign is not None and base_to_sofa_translation_mm is not None
         self._environment_factory = environment_factory or (
             lambda: create_sofa_mirror_environment(
-                stale_ms=stale_ms, sign=sign, zero_offset_deg=zero_offset_deg
+                stale_ms=stale_ms,
+                sign=sign,
+                zero_offset_deg=zero_offset_deg,
+                base_to_sofa_translation_mm=base_to_sofa_translation_mm,
+                base_to_sofa_quaternion_xyzw=base_to_sofa_quaternion_xyzw,
             )
         )
         self._tick_interval_s = tick_interval_s
@@ -77,6 +119,10 @@ class RealMirrorWorker:
         self._session_id: str | None = None
         self._freshness = SourceFreshness.DISCONNECTED
         self._reason = "no_actual_joint_sample"
+        self._camera_state: SimulationCameraState | None = _default_camera_state()
+        self._camera_requests: deque[
+            tuple[SimulationCameraControlRequest, Event, dict[str, Any]]
+        ] = deque()
 
     def start(self, *, timeout_s: float = 60.0) -> None:
         with self._lock:
@@ -91,6 +137,8 @@ class RealMirrorWorker:
             self._session_id = None
             self._freshness = SourceFreshness.DISCONNECTED
             self._reason = "no_actual_joint_sample"
+            self._camera_state = _default_camera_state()
+            self._camera_requests.clear()
             self._thread = Thread(target=self._run, name="real-sofa-mirror", daemon=True)
             self._thread.start()
         if not self._ready.wait(timeout_s):
@@ -119,8 +167,30 @@ class RealMirrorWorker:
         try:
             environment = self._environment_factory()
             environment.reset()
+            camera_getter = getattr(environment, "get_camera_state", None)
+            if camera_getter is not None:
+                with self._lock:
+                    self._camera_state = camera_getter()
             self._ready.set()
             while not self._stop.is_set():
+                while True:
+                    with self._lock:
+                        pending = self._camera_requests.popleft() if self._camera_requests else None
+                    if pending is None:
+                        break
+                    request, completed, holder = pending
+                    try:
+                        camera_control = getattr(environment, "control_camera", None)
+                        if camera_control is None:
+                            raise RuntimeError("mirror environment has no camera control")
+                        state = camera_control(request)
+                        with self._lock:
+                            self._camera_state = state
+                        holder["state"] = state
+                    except Exception as error:
+                        holder["error"] = error
+                    finally:
+                        completed.set()
                 telemetry = self._telemetry_source()
                 old_freshness = environment.controller.freshness
                 frame = environment.apply_external_joint_state(telemetry)
@@ -170,8 +240,12 @@ class RealMirrorWorker:
                 gateway_session_id=self._session_id,
                 frame_sequence=self._frame_sequence,
                 freshness=self._freshness,
-                calibrated=False,
-                warning="UNCALIBRATED / NOT FOR CONTROL",
+                calibrated=self._calibrated,
+                warning=(
+                    "COORDINATE CALIBRATED / TOOL TCP UNAVAILABLE / NOT FOR CONTROL"
+                    if self._calibrated
+                    else "UNCALIBRATED / NOT FOR CONTROL"
+                ),
                 reason=self._reason,
                 error=self._error,
             )
@@ -185,3 +259,30 @@ class RealMirrorWorker:
                     return self._frame_sequence, None
                 self._condition.wait(remaining)
             return self._frame_sequence, self._frame.copy() if self._frame is not None else None
+
+    def get_camera_state(self) -> SimulationCameraState:
+        with self._lock:
+            if self._camera_state is None:
+                raise RuntimeError("real SOFA mirror camera is not ready")
+            return self._camera_state.model_copy(deep=True)
+
+    def control_camera(
+        self,
+        request: SimulationCameraControlRequest,
+        *,
+        timeout_s: float = 2.0,
+    ) -> SimulationCameraState:
+        if self._thread is None or not self._thread.is_alive():
+            raise RuntimeError("real SOFA mirror is not running")
+        completed = Event()
+        holder: dict[str, Any] = {}
+        with self._lock:
+            self._camera_requests.append((request, completed, holder))
+        if not completed.wait(timeout_s):
+            raise RuntimeError("real SOFA mirror camera update timed out")
+        if "error" in holder:
+            raise RuntimeError("real SOFA mirror camera update failed") from holder["error"]
+        state = holder.get("state")
+        if not isinstance(state, SimulationCameraState):
+            raise RuntimeError("real SOFA mirror returned no camera state")
+        return state.model_copy(deep=True)

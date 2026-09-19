@@ -102,11 +102,17 @@ class HealthResponse(WebModel):
 
 
 class SimulationTelemetryView(WebModel):
-    """Downsampled browser telemetry; never contains control operations."""
+    """Provider-neutral browser telemetry; never contains control operations."""
 
     schema_version: Literal["1.0"] = "1.0"
     type: Literal["telemetry"] = "telemetry"
     connected: bool
+    runtime_mode: Literal["simulation", "real"] = "simulation"
+    control_mode: str | None = None
+    provider: str | None = None
+    freshness: str = "unknown"
+    source_age_ms: float | None = Field(default=None, ge=0)
+    connections: dict[str, str] = Field(default_factory=dict)
     sequence: int = Field(ge=0)
     received_at_ms: int = Field(ge=0)
     source_updated_at_ms: int | None = Field(default=None, ge=0)
@@ -116,6 +122,7 @@ class SimulationTelemetryView(WebModel):
     estop: bool = False
     active_command_id: str | None = None
     current_tcp: Point3D | None = None
+    actual_tcp_robot_base: dict[str, Any] | None = None
     entry_point: Point3D | None = None
     target_point: Point3D | None = None
     position_error_mm: float | None = Field(default=None, ge=0)
@@ -125,4 +132,22 @@ class SimulationTelemetryView(WebModel):
     trajectory_total_points: int = Field(default=0, ge=0)
     frame_sequence: int = Field(default=0, ge=0)
     simulation_fps: float | None = Field(default=None, ge=0)
+    fsm_code: int | None = None
+    enabled: bool | None = None
+    electrified: bool | None = None
+    moving: bool | None = None
+    in_position: bool | None = None
+    physical_estop_active: bool | None = None
+    emergency_stop_circuit_fault: bool | None = None
+    safeguard_active: bool | None = None
+    safeguard_circuit_fault: bool | None = None
+    vendor_fault: dict[str, Any] | None = None
+    mirror_calibrated: bool | None = None
+    mirror_warning: str | None = None
+    mirror_reason: str | None = None
+    mirror_source_sequence: int | None = Field(default=None, ge=0)
+    tool_tcp_calibrated: Literal[False] = False
     error: dict[str, Any] | None = None
+
+
+RobotTelemetryView = SimulationTelemetryView

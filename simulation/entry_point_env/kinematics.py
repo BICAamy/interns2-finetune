@@ -35,6 +35,28 @@ class KinematicSnapshot:
     tcp_transform: np.ndarray
 
 
+def transform_snapshot(
+    snapshot: KinematicSnapshot,
+    parent_from_robot_base: Sequence[Sequence[float]],
+) -> KinematicSnapshot:
+    """Place an FK snapshot in another frame without changing its joints."""
+    transform = np.asarray(parent_from_robot_base, dtype=np.float64)
+    if transform.shape != (4, 4) or not np.all(np.isfinite(transform)):
+        raise ValueError("parent_from_robot_base must be a finite 4x4 matrix")
+    if not np.allclose(transform[3], (0.0, 0.0, 0.0, 1.0), atol=1e-9):
+        raise ValueError("parent_from_robot_base must be homogeneous")
+    rotation = transform[:3, :3]
+    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-6) or not np.isclose(
+        np.linalg.det(rotation), 1.0, atol=1e-6
+    ):
+        raise ValueError("parent_from_robot_base must contain a proper rotation")
+    return KinematicSnapshot(
+        link_transforms=tuple(transform @ item for item in snapshot.link_transforms),
+        flange_transform=transform @ snapshot.flange_transform,
+        tcp_transform=transform @ snapshot.tcp_transform,
+    )
+
+
 def _transform(
     translation_mm: Sequence[float] = (0.0, 0.0, 0.0),
     rpy_rad: Sequence[float] = (0.0, 0.0, 0.0),
@@ -216,4 +238,3 @@ class E05ProKinematics:
             position_error_mm=position_error_mm,
             orientation_error_rad=orientation_error_rad,
         )
-

@@ -133,6 +133,10 @@ async def reset_estop(session_id: str, request: Request) -> SessionSnapshot:
 
 
 @router.get(
+    "/api/sessions/{session_id}/robot/telemetry",
+    response_model=SimulationTelemetryView,
+)
+@router.get(
     "/api/sessions/{session_id}/simulation/telemetry",
     response_model=SimulationTelemetryView,
 )
@@ -140,19 +144,23 @@ async def simulation_telemetry(session_id: str, request: Request):
     runtime = _runtime(request)
     try:
         return await asyncio.to_thread(
-            runtime.get_simulation_telemetry,
+            runtime.get_robot_telemetry,
             session_id,
         )
     except SimulationProxyError as error:
         return JSONResponse(
             status_code=502,
-            content=runtime.simulation_telemetry_error(
+            content=runtime.robot_telemetry_error(
                 session_id,
                 error,
             ).model_dump(mode="json"),
         )
 
 
+@router.get(
+    "/api/sessions/{session_id}/robot/camera",
+    response_model=SimulationCameraState,
+)
 @router.get(
     "/api/sessions/{session_id}/simulation/camera",
     response_model=SimulationCameraState,
@@ -163,7 +171,7 @@ async def simulation_camera_state(
 ) -> SimulationCameraState:
     try:
         return await asyncio.to_thread(
-            _runtime(request).get_simulation_camera,
+            _runtime(request).get_robot_camera,
             session_id,
         )
     except SimulationProxyError as error:
@@ -178,6 +186,10 @@ async def simulation_camera_state(
 
 
 @router.put(
+    "/api/sessions/{session_id}/robot/camera",
+    response_model=SimulationCameraState,
+)
+@router.put(
     "/api/sessions/{session_id}/simulation/camera",
     response_model=SimulationCameraState,
 )
@@ -188,7 +200,7 @@ async def control_simulation_camera(
 ) -> SimulationCameraState:
     try:
         return await asyncio.to_thread(
-            _runtime(request).control_simulation_camera,
+            _runtime(request).control_robot_camera,
             session_id,
             camera,
         )
@@ -203,11 +215,12 @@ async def control_simulation_camera(
         )
 
 
+@router.get("/api/sessions/{session_id}/robot/stream.mjpeg")
 @router.get("/api/sessions/{session_id}/simulation/stream.mjpeg")
 async def simulation_video(session_id: str, request: Request):
     runtime = _runtime(request)
     try:
-        upstream = await runtime.open_simulation_video(session_id)
+        upstream = await runtime.open_robot_video(session_id)
     except SimulationProxyError as error:
         return JSONResponse(
             status_code=502,

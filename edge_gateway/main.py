@@ -50,6 +50,8 @@ class EdgeGateway:
         self.package_version: str | None = None
         self.device_sn: str | None = None
         self.controller_is_simulation: bool | None = None
+        self.robot_status = None
+        self.emergency_status = None
 
     def _query_identity(self) -> None:
         self._command.connect()
@@ -70,6 +72,8 @@ class EdgeGateway:
             if self._real:
                 status = read_robot_state(self._command.request(ReadCommand.ROBOT_STATE))
                 emergency = read_emergency_info(self._command.request(ReadCommand.EMERGENCY_INFO))
+                self.robot_status = status
+                self.emergency_status = emergency
                 if (
                     status.moving or status.has_error or status.emergency_stop
                     or status.safeguard or not status.controller_box_connected
@@ -151,6 +155,12 @@ class EdgeGateway:
                 self._query_identity()
             else:
                 read_current_fsm(self._command.request(ReadCommand.CURRENT_FSM))
+                self.robot_status = read_robot_state(
+                    self._command.request(ReadCommand.ROBOT_STATE)
+                )
+                self.emergency_status = read_emergency_info(
+                    self._command.request(ReadCommand.EMERGENCY_INFO)
+                )
         except Exception as exc:
             self._command.close()
             self.state.command_connected = False
@@ -215,6 +225,8 @@ class EdgeGateway:
                                 controller_is_simulation=bool(self.controller_is_simulation),
                                 command_connected=self.state.command_connected,
                                 watchdog=self.watchdog,
+                                robot_status=self.robot_status,
+                                emergency_status=self.emergency_status,
                             )
                             self._cloud.send_state(telemetry)
                             self.state.acknowledged_through(record.sequence)

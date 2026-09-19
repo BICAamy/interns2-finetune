@@ -40,7 +40,10 @@ class HuayanRealStubProvider:
         self._commands = RejectedCommandStore()
         self.gateway_sessions = gateway_sessions
         self.mirror_worker = mirror_worker
-        self.capabilities = ProviderCapabilities(mjpeg=mirror_worker is not None)
+        self.capabilities = ProviderCapabilities(
+            camera=mirror_worker is not None,
+            mjpeg=mirror_worker is not None,
+        )
 
     def start(self) -> None:
         if self.mirror_worker is not None:
@@ -100,12 +103,16 @@ class HuayanRealStubProvider:
         )
 
     def get_camera_state(self) -> SimulationCameraState:
-        raise self._unavailable()
+        if self.mirror_worker is None:
+            raise self._unavailable()
+        return self.mirror_worker.get_camera_state()
 
     def control_camera(
         self, request: SimulationCameraControlRequest
     ) -> SimulationCameraState:
-        raise self._unavailable()
+        if self.mirror_worker is None:
+            raise self._unavailable()
+        return self.mirror_worker.control_camera(request)
 
     def submit(
         self, kind: RobotCommandKind, request: Any

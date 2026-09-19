@@ -13,7 +13,7 @@ import math
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _StrictModel(BaseModel):
@@ -41,10 +41,26 @@ class JointMapping(_StrictModel):
             raise ValueError("joint sign must be +1 or -1")
         return value
 
+    @model_validator(mode="after")
+    def validate_complete_pair(self) -> "JointMapping":
+        if (self.sign is None) != (self.zero_offset_deg is None):
+            raise ValueError("joint sign and zero offset must be set together")
+        return self
+
 
 class RigidTransform(_StrictModel):
     translation_mm: tuple[float, float, float] | None = None
     quaternion_xyzw: tuple[float, float, float, float] | None = None
+
+    @model_validator(mode="after")
+    def validate_complete_rigid_transform(self) -> "RigidTransform":
+        if (self.translation_mm is None) != (self.quaternion_xyzw is None):
+            raise ValueError("translation and quaternion must be set together")
+        if self.quaternion_xyzw is not None:
+            squared_norm = sum(value * value for value in self.quaternion_xyzw)
+            if abs(squared_norm - 1.0) > 1e-3:
+                raise ValueError("quaternion_xyzw must be a unit quaternion")
+        return self
 
 
 class ToolConfig(_StrictModel):

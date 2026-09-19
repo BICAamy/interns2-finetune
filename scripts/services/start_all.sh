@@ -125,6 +125,7 @@ export ROBOT_REAL_MIRROR
 
 CONFIG_SHA=""
 CONFIG_MISSING=0
+CONFIG_COORDINATE_CALIBRATED=false
 if [[ "$ROBOT_MODE" == simulation ]]; then
     [[ -z "$REAL_CONFIG_INPUT" && -z "${REAL_CONFIG_PATH:-}" && -z "${REAL_CONFIG_SHA256:-}" ]] \
         || fail "--real-config is not allowed in simulation mode."
@@ -157,6 +158,13 @@ else
         || fail "real config validation failed."
     read -r CONFIG_SHA CONFIG_ALLOWED CONFIG_MISSING <<<"$CONFIG_REPORT"
     [[ "$CONFIG_SHA" =~ ^[0-9a-f]{64}$ ]] || fail "real config digest is invalid."
+    CONFIG_COORDINATE_CALIBRATED="$(PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
+        "$CONFIG_PYTHON" -c '
+from robot_runtime.real_config import load_real_config
+import sys
+c = load_real_config(sys.argv[1])
+print(str(c.joint_mapping.sign is not None and c.base_to_sofa.translation_mm is not None).lower())
+' "$REAL_CONFIG_PATH")" || fail "could not inspect Step 8 calibration fields."
     [[ -z "${REAL_CONFIG_SHA256:-}" || "$REAL_CONFIG_SHA256" == "$CONFIG_SHA" ]] \
         || fail "REAL_CONFIG_SHA256 conflicts with --real-config."
     # Step 5 may authenticate a read-only gateway, but cannot ARM or move.
@@ -384,7 +392,11 @@ else
         echo "Gateway         = disconnected (no authentication configured)"
     fi
     if [[ "$ROBOT_REAL_MIRROR" == 1 ]]; then
-        echo "Passive SOFA    = uncalibrated preview / not for control"
+        if [[ "$CONFIG_COORDINATE_CALIBRATED" == true ]]; then
+            echo "Passive SOFA    = coordinate calibrated / tool TCP unavailable / not for control"
+        else
+            echo "Passive SOFA    = uncalibrated preview / not for control"
+        fi
     fi
 fi
 echo "ASR             = OK"

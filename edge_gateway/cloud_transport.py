@@ -25,11 +25,13 @@ from surgical_contracts import (
     RobotTelemetry,
     RuntimeMode,
     SourceFreshness,
+    VendorFault,
     hello_auth_tag,
     parse_wire_json,
 )
 
 from .huayan.adapter import fixed_xyz_quaternion
+from .huayan.adapter import EmergencyInfoRead, RobotStateRead
 from .state_machine import RejectOnlyLedger, SampleRecord
 from .watchdog import StateWatchdog
 
@@ -58,6 +60,8 @@ def telemetry_from_sample(
     controller_is_simulation: bool,
     command_connected: bool,
     watchdog: StateWatchdog,
+    robot_status: RobotStateRead | None = None,
+    emergency_status: EmergencyInfoRead | None = None,
 ) -> RobotTelemetry:
     sample = record.sample
     if controller_is_simulation:
@@ -84,7 +88,13 @@ def telemetry_from_sample(
             gateway=LinkState.CONNECTED,
             datasheet=LinkState.CONNECTED,
             command_socket=LinkState.CONNECTED if command_connected else LinkState.DISCONNECTED,
-            controller_box=LinkState.UNKNOWN,
+            controller_box=(
+                LinkState.CONNECTED
+                if robot_status is not None and robot_status.controller_box_connected
+                else LinkState.DISCONNECTED
+                if robot_status is not None
+                else LinkState.UNKNOWN
+            ),
         ),
         source_timestamp_ms=sample.source_timestamp_ms,
         gateway_received_at_ms=sample.received_wall_ms,
@@ -104,16 +114,53 @@ def telemetry_from_sample(
         ),
         potentially_moving=sample.moving or sample.fsm_code in (25, 26, 27, 47),
         fsm_code=sample.fsm_code,
-        enabled=sample.enabled,
-        brakes_released=all(sample.brake_states),
-        paused=sample.paused,
+        enabled=(robot_status.enabled if robot_status is not None else sample.enabled),
+        electrified=(robot_status.electrified if robot_status is not None else None),
+        brakes_released=(
+            robot_status.brakes_released
+            if robot_status is not None
+            else all(sample.brake_states)
+        ),
+        paused=(robot_status.paused if robot_status is not None else sample.paused),
         moving=sample.moving,
-        in_position=sample.in_position,
+        in_position=(robot_status.in_position if robot_status is not None else sample.in_position),
+        physical_estop_active=(
+            emergency_status.emergency_stop
+            if emergency_status is not None
+            else robot_status.emergency_stop
+            if robot_status is not None
+            else None
+        ),
+        emergency_stop_circuit_fault=(
+            emergency_status.emergency_circuit_fault
+            if emergency_status is not None
+            else None
+        ),
+        safeguard_active=(
+            emergency_status.safeguard
+            if emergency_status is not None
+            else robot_status.safeguard
+            if robot_status is not None
+            else None
+        ),
+        safeguard_circuit_fault=(
+            emergency_status.safeguard_circuit_fault
+            if emergency_status is not None
+            else None
+        ),
         reduced_mode=sample.reduced_mode,
         auto_mode=sample.auto_mode,
         free_drive_active=sample.free_drive_mode,
         force_control_active=bool(sample.force_control_state),
         controller_is_simulation=controller_is_simulation,
+        vendor_fault=(
+            VendorFault(
+                vendor_error_code=sample.error_code,
+                vendor_error_axis=sample.error_axis or None,
+            )
+            if sample.error_code
+            else None
+        ),
     )
 
 
