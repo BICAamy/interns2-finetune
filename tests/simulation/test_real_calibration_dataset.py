@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from edge_gateway.calibration import load_dataset, solve_calibration
+from edge_gateway.calibration_capture import model_flange_pose
 from simulation.entry_point_env.config import EntryPointEnvConfig
 from simulation.entry_point_env.external_joint_state_controller import (
     ExternalJointStateController,
@@ -60,3 +61,14 @@ def test_partial_coordinate_calibration_is_rejected() -> None:
             zero_offset_deg=(0, 0, 0, 0, 0, 0),
             base_to_sofa_translation_mm=(0, 0, 0),
         )
+
+
+def test_capture_reference_uses_zero_tool_flange_fk() -> None:
+    joints = (0.0, 0.0, 60.0, 0.0, 90.0, 0.0)
+    point, quaternion = model_flange_pose(joints)
+    controller = ExternalJointStateController(
+        EntryPointEnvConfig.from_yaml(), stale_ms=250
+    )
+    expected = controller.kinematics.forward(np.deg2rad(joints)).flange_transform
+    assert point == pytest.approx(tuple(expected[:3, 3]))
+    assert sum(value * value for value in quaternion) == pytest.approx(1.0)
