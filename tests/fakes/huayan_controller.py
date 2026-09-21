@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import socket
 import struct
 import threading
@@ -71,6 +72,8 @@ class FakeHuayanController:
         self,
         *,
         command_actions: dict[ReadCommand, list[CommandAction]] | None = None,
+        motion_actions: dict[str, list[CommandAction]] | None = None,
+        accept_fake_motion: bool = False,
         data_actions: list[bytes | float] | None = None,
         data_interval_s: float = 0.05,
         stamp_every_n_frames: int = 1,
@@ -87,6 +90,11 @@ class FakeHuayanController:
         self._command_actions = defaultdict(deque)
         for command, actions in (command_actions or {}).items():
             self._command_actions[command].extend(actions)
+        self._motion_actions = defaultdict(deque)
+        for command, actions in (motion_actions or {}).items():
+            self._motion_actions[command].extend(actions)
+        self.accept_fake_motion = accept_fake_motion
+        self._current_waypoint_id = "FAKE_ONLY"
         # Keep test diagnostics bounded during long-running gateway soak tests.
         self.received_commands: list[bytes] = []
         self._stop = threading.Event()
@@ -214,6 +222,47 @@ class FakeHuayanController:
                 continue
             fields = frame[:-2].split(b",")
             name = fields[0].decode("ascii", errors="replace")
+            if name == "FakeOnlyIdentity" and self.accept_fake_motion and not fast:
+                if fields != [b"FakeOnlyIdentity"]:
+                    connection.sendall(b"FakeOnlyIdentity,Fail,20006,invalid parameters,;")
+                else:
+                    connection.sendall(b"FakeOnlyIdentity,OK,INTERN-S2-FAKE-MOTION-V1,;")
+                continue
+            if name in ("WayPoint", "GrpStop") and self.accept_fake_motion and not fast:
+                if name == "WayPoint":
+                    valid = (
+                        len(fields) == 25 and fields[1] == b"0"
+                        and all(part == b"0" for part in fields[8:14])
+                        and fields[15] == b"Base"
+                        and fields[19:24] == [b"1", b"0", b"0", b"0", b"0"]
+                        and 1 <= len(fields[24]) <= 64
+                    )
+                    if valid:
+                        try:
+                            numeric = [float(value) for value in (*fields[2:8], fields[16], fields[17], fields[18])]
+                            valid = (all(math.isfinite(value) for value in numeric)
+                                     and numeric[6] > 0 and numeric[7] > 0 and numeric[8] == 0)
+                        except ValueError:
+                            valid = False
+                    if valid:
+                        self._current_waypoint_id = fields[24].decode("ascii", errors="replace")
+                else:
+                    valid = fields == [b"GrpStop", b"0"]
+                if not valid:
+                    connection.sendall(f"{name},Fail,20006,invalid parameters,;".encode())
+                    continue
+                action = self._motion_actions[name].popleft() if self._motion_actions[name] else None
+                if action is None:
+                    action = CommandAction((f"{name},OK,;".encode(),))
+                if action.delay_s and self._stop.wait(action.delay_s):
+                    return
+                if action.chunks is None:
+                    return
+                for part in action.chunks:
+                    connection.sendall(part)
+                if pipelined:
+                    return
+                continue
             try:
                 command = ReadCommand(name)
             except ValueError:
@@ -245,6 +294,8 @@ class FakeHuayanController:
                 reply = (
                     f"ReadFastCmdPort,OK,{self.fast_port},;".encode("ascii")
                     if command == ReadCommand.FAST_COMMAND_PORT
+                    else f"ReadCurWayPointID,OK,{self._current_waypoint_id},;".encode("ascii")
+                    if command == ReadCommand.CURRENT_WAYPOINT_ID and self.accept_fake_motion
                     else DEFAULT_REPLIES[command]
                 )
                 action = CommandAction((reply,))
