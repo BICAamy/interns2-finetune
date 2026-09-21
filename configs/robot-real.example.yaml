@@ -34,8 +34,8 @@ limits:
   joint_margin_deg: null # 离关节角deg边界留多少余量，单位：deg
   workspace_low_mm: null # 活动区域下边界 [x, y, z]，单位：mm
   workspace_high_mm: null # 活动区域上边界 [x, y, z]，单位：mm
-  max_speed_mm_s: null # 最高移动速deg，单位：mm/秒
-  max_acceleration_mm_s2: null # 最高移动加速deg，单位：mm/秒²
+  max_speed_mm_s: null # 最高移动速度，单位：mm/秒
+  max_acceleration_mm_s2: null # 最高移动加速度，单位：mm/秒²
   max_step_mm: null # 一次相对移动最多走多远，单位：mm
   max_rotation_deg: null # 一次最多转多少deg
   max_absolute_displacement_mm: null # 离参考位置最多多远，单位：mm

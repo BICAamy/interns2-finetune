@@ -63,6 +63,13 @@ class PayloadRead:
     center_of_gravity_mm: tuple[float, float, float]
 
 
+@dataclass(frozen=True)
+class LinearMaxMotionRead:
+    velocity_mm_s: float
+    acceleration_mm_s2: float
+    jerk_mm_s3: float
+
+
 def _values(reply: CommandReply, command: ReadCommand) -> tuple[str, ...]:
     if reply.command != command:
         raise ProtocolError("wrong command reply type")
@@ -158,6 +165,31 @@ def read_payload(reply: CommandReply) -> PayloadRead:
     if numbers[0] < 0:
         raise ProtocolError("payload mass cannot be negative")
     return PayloadRead(numbers[0], numbers[1:4])
+
+
+def _nonnegative_motion_values(reply: CommandReply, command: ReadCommand) -> tuple[float, ...]:
+    values = tuple(_float(value, f"{command.value}[{index}]") for index, value in enumerate(
+        _values(reply, command)
+    ))
+    if any(value < 0 for value in values):
+        raise ProtocolError(f"{command.value} contains a negative limit")
+    return values
+
+
+def read_joint_max_velocity(reply: CommandReply) -> tuple[float, ...]:
+    """Controller-configured maxima in degrees/second, not project approval."""
+    return _nonnegative_motion_values(reply, ReadCommand.JOINT_MAX_VELOCITY)
+
+
+def read_joint_max_acceleration(reply: CommandReply) -> tuple[float, ...]:
+    """Controller-configured maxima in degrees/second squared."""
+    return _nonnegative_motion_values(reply, ReadCommand.JOINT_MAX_ACCELERATION)
+
+
+def read_linear_max_motion(reply: CommandReply) -> LinearMaxMotionRead:
+    """Controller linear velocity, acceleration and jerk in mm/s^1..3."""
+    values = _nonnegative_motion_values(reply, ReadCommand.LINEAR_MAX_MOTION)
+    return LinearMaxMotionRead(*values)
 
 
 def read_base_installing_angle(reply: CommandReply) -> tuple[int, int]:

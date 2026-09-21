@@ -30,6 +30,9 @@ class ReadCommand(str, Enum):
     CURRENT_WAYPOINT_ID = "ReadCurWayPointID"
     AXIS_ERROR_CODE = "ReadAxisErrorCode"
     PAYLOAD = "ReadPayload"
+    JOINT_MAX_VELOCITY = "ReadJointMaxVel"
+    JOINT_MAX_ACCELERATION = "ReadJointMaxAcc"
+    LINEAR_MAX_MOTION = "ReadLinearMaxVel"
     BASE_INSTALLING_ANGLE = "GetBaseInstallingAngle"
     CURRENT_TCP = "ReadCurTCP"
     CURRENT_UCS = "ReadCurUCS"
@@ -45,6 +48,9 @@ ROBOT_ID_COMMANDS = frozenset({
     ReadCommand.CURRENT_WAYPOINT_ID,
     ReadCommand.AXIS_ERROR_CODE,
     ReadCommand.PAYLOAD,
+    ReadCommand.JOINT_MAX_VELOCITY,
+    ReadCommand.JOINT_MAX_ACCELERATION,
+    ReadCommand.LINEAR_MAX_MOTION,
     ReadCommand.BASE_INSTALLING_ANGLE,
     ReadCommand.CURRENT_TCP,
     ReadCommand.CURRENT_UCS,
@@ -66,6 +72,9 @@ FAST_PORT_COMMANDS = frozenset({
     ReadCommand.CURRENT_WAYPOINT_ID,
     ReadCommand.AXIS_ERROR_CODE,
     ReadCommand.PAYLOAD,
+    ReadCommand.JOINT_MAX_VELOCITY,
+    ReadCommand.JOINT_MAX_ACCELERATION,
+    ReadCommand.LINEAR_MAX_MOTION,
     ReadCommand.CURRENT_TCP,
     ReadCommand.CURRENT_UCS,
     ReadCommand.TCP_BY_NAME,
@@ -85,6 +94,11 @@ REPLY_FIELD_COUNTS = {
     ReadCommand.CURRENT_WAYPOINT_ID: 1,
     ReadCommand.AXIS_ERROR_CODE: 7,
     ReadCommand.PAYLOAD: 4,
+    ReadCommand.JOINT_MAX_VELOCITY: 6,
+    ReadCommand.JOINT_MAX_ACCELERATION: 6,
+    # The V6 PDF's success-line labels are erroneous; its return table,
+    # example and vendor CPS.py all describe three linear values.
+    ReadCommand.LINEAR_MAX_MOTION: 3,
     ReadCommand.BASE_INSTALLING_ANGLE: 2,
     ReadCommand.CURRENT_TCP: 6,
     ReadCommand.CURRENT_UCS: 6,
