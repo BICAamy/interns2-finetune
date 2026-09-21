@@ -43,7 +43,7 @@ entry_point_env:
       rpy_deg: [0.0, 0.0, 0.0] # 针尖 TCP 相对于 flange 坐标系的旋转矩阵Roll、Pitch、Yaw
       provisional: true # 意思是临时的，表示这个 150mm 只是当前仿真的临时工具参数，不是实际针架安装后的真实标定结果。
       real_robot_motion_allowed: false # 使用这套 TCP 参数时，不允许认为系统已经可以安全控制真实机器人。
-      note: 仿真临时值；实机前必须安装针架后通过厂家TCP标定流程替换
+      note: 仅供仿真使用的临时 150mm 针；无工具真机另用法兰中心零 TCP 配置，装针后再单独标定
   # K 数值求解器的参数
   inverse_kinematics:
     orientation_weight_mm_per_rad: 100.0

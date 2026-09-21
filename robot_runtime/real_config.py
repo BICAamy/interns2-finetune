@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -64,11 +65,38 @@ class RigidTransform(_StrictModel):
 
 
 class ToolConfig(_StrictModel):
+    setup: Literal["flange_only_no_tool"] | None = None
     tcp_name: str | None = None
     flange_to_tcp: RigidTransform = Field(default_factory=RigidTransform)
     payload_kg: float | None = Field(default=None, ge=0)
     center_of_gravity_mm: tuple[float, float, float] | None = None
-    mount_angle_deg: float | None = None
+    # GetBaseInstallingAngle returns two angles, not one scalar.
+    mount_angle_deg: tuple[float, float] | None = None
+
+    @field_validator("mount_angle_deg")
+    @classmethod
+    def validate_mount_angles(
+        cls, value: tuple[float, float] | None,
+    ) -> tuple[float, float] | None:
+        if value is not None and any(not -360 <= angle <= 360 for angle in value):
+            raise ValueError("base installing angles must be finite and within -360..360 degrees")
+        return value
+
+    @model_validator(mode="after")
+    def validate_no_tool_setup(self) -> "ToolConfig":
+        if self.setup is None:
+            return self
+        if self.tcp_name is None or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", self.tcp_name) is None:
+            raise ValueError("flange_only_no_tool requires a safe, confirmed TCP name")
+        if self.flange_to_tcp.translation_mm != (0.0, 0.0, 0.0):
+            raise ValueError("flange_only_no_tool requires zero flange-to-TCP translation")
+        if self.flange_to_tcp.quaternion_xyzw != (0.0, 0.0, 0.0, 1.0):
+            raise ValueError("flange_only_no_tool requires identity flange-to-TCP rotation")
+        if self.payload_kg != 0.0 or self.center_of_gravity_mm != (0.0, 0.0, 0.0):
+            raise ValueError("flange_only_no_tool requires zero payload and center of gravity")
+        if self.mount_angle_deg is None:
+            raise ValueError("flange_only_no_tool requires both measured base installing angles")
+        return self
 
 
 class MotionLimits(_StrictModel):
@@ -128,7 +156,7 @@ class RealRobotConfig(_StrictModel):
             "controller.device_sn", "controller.asset_id", "controller.model",
             "joint_mapping.sign", "joint_mapping.zero_offset_deg",
             "base_to_sofa.translation_mm", "base_to_sofa.quaternion_xyzw",
-            "tool.tcp_name", "tool.flange_to_tcp.translation_mm",
+            "tool.setup", "tool.tcp_name", "tool.flange_to_tcp.translation_mm",
             "tool.flange_to_tcp.quaternion_xyzw", "tool.payload_kg",
             "tool.center_of_gravity_mm", "tool.mount_angle_deg",
             "limits.joint_soft_limits_deg", "limits.joint_margin_deg",
@@ -154,8 +182,13 @@ class RealRobotConfig(_StrictModel):
         return tuple(missing)
 
     def digest(self) -> str:
+        data = self.model_dump(mode="json")
+        # Preserve existing observe-only session hashes until a setup is
+        # explicitly selected; selecting one intentionally changes the hash.
+        if data["tool"]["setup"] is None:
+            del data["tool"]["setup"]
         canonical = json.dumps(
-            self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"),
+            data, sort_keys=True, separators=(",", ":"),
             ensure_ascii=False, allow_nan=False,
         ).encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()

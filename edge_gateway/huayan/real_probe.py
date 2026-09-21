@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import socket
 import struct
@@ -79,6 +80,46 @@ def read_one_datasheet_frame(
         return header + _recv_exact(connection, json_length)
 
 
+def validate_no_tool_probe_summary(summary: dict[str, object], config: RealRobotConfig) -> None:
+    """Check the recorded read-only controller values for a no-tool profile.
+
+    This proves value agreement, not that the flange is physically bare or
+    that Gate C / a particular motion has been authorized.
+    """
+    if config.tool.setup != "flange_only_no_tool":
+        return
+
+    def matches(value: object, expected: tuple[float, ...]) -> bool:
+        return (
+            isinstance(value, (list, tuple)) and len(value) == len(expected)
+            and all(
+                type(actual) in (int, float) and math.isfinite(actual)
+                and abs(actual - wanted) <= 1e-6
+                for actual, wanted in zip(value, expected)
+            )
+        )
+
+    payload = summary.get("payload")
+    expected_zero6 = (0.0,) * 6
+    expected_zero3 = (0.0,) * 3
+    if (
+        summary.get("approved_tcp_name") != config.tool.tcp_name
+        or summary.get("approved_ucs_name") != "Base"
+        or not matches(summary.get("current_tcp"), expected_zero6)
+        or not matches(summary.get("approved_tcp_value"), expected_zero6)
+        or not matches(summary.get("current_ucs"), expected_zero6)
+        or not matches(summary.get("approved_ucs_value"), expected_zero6)
+        or not isinstance(payload, dict)
+        or type(payload.get("mass_kg")) not in (int, float)
+        or not math.isfinite(payload["mass_kg"])
+        or abs(payload["mass_kg"]) > 1e-6
+        or not matches(payload.get("center_of_gravity_mm"), expected_zero3)
+        or config.tool.mount_angle_deg is None
+        or not matches(summary.get("base_installing_angle_deg"), config.tool.mount_angle_deg)
+    ):
+        raise ValueError("no-tool TCP/UCS/payload/installing-angle readback disagrees with real config")
+
+
 def probe_once(
     config: RealRobotConfig,
     *,
@@ -99,6 +140,13 @@ def probe_once(
         validate_identifier(approved_tcp_name)
     if approved_ucs_name is not None:
         validate_identifier(approved_ucs_name)
+    if config.tool.setup == "flange_only_no_tool":
+        if approved_tcp_name is not None and approved_tcp_name != config.tool.tcp_name:
+            raise ValueError("approved TCP name disagrees with no-tool real config")
+        if approved_ucs_name is not None and approved_ucs_name != "Base":
+            raise ValueError("approved UCS name must be Base for no-tool real config")
+        approved_tcp_name = config.tool.tcp_name
+        approved_ucs_name = "Base"
 
     with CommandClient(
         controller.host, controller.command_port, timeout_s=2.0, scope=scope,
@@ -189,6 +237,9 @@ def probe_once(
         "approved_ucs_name": approved_ucs_name,
         "approved_ucs_value": named_ucs,
     }
+    validate_no_tool_probe_summary(summary, config)
+    if config.tool.setup == "flange_only_no_tool":
+        summary["no_tool_readback_verified"] = True
     return ProbeResult(summary, raw_frame)
 
 
@@ -231,6 +282,7 @@ def validate_probe_summary(
         or emergency.get("safeguard") is not False
     ):
         raise ValueError("probe summary has an unsafe or incomplete state")
+    validate_no_tool_probe_summary(summary, config)
 
 
 def _save_probe_result(result: ProbeResult) -> Path:

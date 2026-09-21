@@ -1,7 +1,7 @@
 """Pure, fail-closed motion checks for an isolated fake-controller trial.
 
-No production entry point imports this module. A temporary flange-as-tip
-assumption may exist in fake fixtures, never in real robot configuration.
+No production entry point imports this module. A bare-flange real profile is
+validated separately; fake approvals in this module never authorize it.
 """
 
 from __future__ import annotations

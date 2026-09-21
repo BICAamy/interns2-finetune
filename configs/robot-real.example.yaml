@@ -20,13 +20,14 @@ base_to_sofa: # 真机底座在仿真场景中的位置和朝向
   quaternion_xyzw: null # Step 8 标定生成的 [qx, qy, qz, qw]
 
 tool:
+  setup: null # 无工具且已现场核对时填 flange_only_no_tool；不代表已经安装穿刺针
   tcp_name: null # 控制器里选用的工具中心点名称
   flange_to_tcp: # 法兰到工具中心点的变换
     translation_mm: null # 位置 [x, y, z]，单位：mm
     quaternion_xyzw: null # 朝向 [qx, qy, qz, qw]
   payload_kg: null # 工具重量，单位：千克
   center_of_gravity_mm: null # 工具重心 [x, y, z]，单位：mm
-  mount_angle_deg: null # 机器人安装角deg，单位：deg
+  mount_angle_deg: null # 控制器读回的两个底座安装角 [角1, 角2]，单位：deg
 
 limits:
   joint_soft_limits_deg: null # J1～J6 各自的 [最小角, 最大角]，单位：deg
