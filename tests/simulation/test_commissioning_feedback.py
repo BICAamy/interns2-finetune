@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,11 @@ from edge_gateway import commissioning_runtime as runtime
 from surgical_contracts import RobotTelemetry
 from tests.integration.test_real_motion_fake import readback, telemetry
 from tests.unit.edge_gateway.test_commissioning_cli import config
+
+
+def test_gate_d_stationary_observation_defaults_to_five_seconds():
+    assert runtime.STATIONARY_OBSERVATION_S == 5.0
+    assert inspect.signature(runtime.observe_stationary).parameters["duration_s"].default == 5.0
 
 
 def test_motion_feedback_does_not_hide_a_warning_from_either_channel(monkeypatch):

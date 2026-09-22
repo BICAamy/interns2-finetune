@@ -33,6 +33,9 @@ from .watchdog import SourceStampWatchdog, StateWatchdog
 from surgical_contracts import Pose6D, RobotTelemetry
 
 
+STATIONARY_OBSERVATION_S = 5.0
+
+
 @dataclass(frozen=True)
 class LocalObservation:
     telemetry: RobotTelemetry
@@ -216,10 +219,10 @@ def read_motion_feedback(
 
 
 def observe_stationary(
-    sampler: LocalDataSheetSampler, *, duration_s: float = 120.0,
+    sampler: LocalDataSheetSampler, *, duration_s: float = STATIONARY_OBSERVATION_S,
     poll_s: float = 0.05,
 ) -> None:
-    """Two-minute stationary observation; any unexpected motion aborts."""
+    """Short pre-motion stationary observation; any unexpected motion aborts."""
     initial = sampler.snapshot().sample
     start_pose = initial.base_pose[:3]
     start_joints = initial.joint_positions_deg

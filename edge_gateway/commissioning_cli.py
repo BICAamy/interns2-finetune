@@ -177,7 +177,8 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
         raise ValueError("configured cap cannot permit the fixed 1 mm / 2 mm/s trial")
     validate_probe_config(config)
     from .commissioning_runtime import (
-        LocalDataSheetSampler, make_approval, make_path_ik, observe_stationary,
+        STATIONARY_OBSERVATION_S, LocalDataSheetSampler,
+        make_approval, make_path_ik, observe_stationary,
         read_local_observation, validate_final_observation,
     )
     commit = subprocess.run(
@@ -206,8 +207,8 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
         with LocalRealMotionClient(config, timeout_s=timeout_s) as client:
             session_id = secrets.token_hex(16)
             with LocalDataSheetSampler(config, byte_order=args.byte_order) as sampler:
-                print("Observing stationary real feedback for 120 seconds; any motion/change aborts.")
-                observe_stationary(sampler, duration_s=120.0)
+                print(f"Observing stationary real feedback for {STATIONARY_OBSERVATION_S:g} seconds; any motion/change aborts.")
+                observe_stationary(sampler, duration_s=STATIONARY_OBSERVATION_S)
                 proposal = read_local_observation(config, client, sampler, session_id=session_id)
                 approval = make_approval(config, package_version=client.package_version)
                 pose = proposal.telemetry.actual_pose_robot_base
