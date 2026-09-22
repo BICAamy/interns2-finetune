@@ -1,8 +1,4 @@
-"""Pure, fail-closed motion checks for an isolated fake-controller trial.
-
-No production entry point imports this module. A bare-flange real profile is
-validated separately; fake approvals in this module never authorize it.
-"""
+"""Pure, fail-closed checks shared by fake and local-only commissioning."""
 
 from __future__ import annotations
 
@@ -27,8 +23,8 @@ def fingerprint(envelope: RobotCommandEnvelope) -> str:
 
 
 @dataclass(frozen=True)
-class FakeMotionApproval:
-    """Synthetic values only; never derived from an uncalibrated real config."""
+class MotionApproval:
+    """Limits from a tested fake or a separately verified bare-flange config."""
 
     device_sn: str
     robot_model: str
@@ -55,11 +51,11 @@ class FakeMotionApproval:
 
     def __post_init__(self) -> None:
         if len(self.config_sha256) != 64 or any(c not in "0123456789abcdef" for c in self.config_sha256):
-            raise ValueError("invalid synthetic config digest")
+            raise ValueError("invalid motion config digest")
         if not self.device_sn or not self.robot_model or not self.package_version or not self.tcp_name:
-            raise ValueError("incomplete fake motion identity")
+            raise ValueError("incomplete local motion identity")
         if len(self.joint_soft_limits_deg) != 6:
-            raise ValueError("fake joint limits require six axes")
+            raise ValueError("local joint limits require six axes")
         numeric = (
             *self.tcp_xyzrpy, *self.ucs_xyzrpy, self.payload_kg,
             *self.center_of_gravity_mm, *self.base_installing_angle_deg,
@@ -69,21 +65,21 @@ class FakeMotionApproval:
             self.max_start_drift_mm, self.max_start_rotation_deg, self.state_stale_ms,
         )
         if any(not math.isfinite(value) for value in numeric):
-            raise ValueError("fake motion limits must be finite")
+            raise ValueError("local motion limits must be finite")
         if any(value <= 0 for value in (
             self.joint_margin_deg, self.max_speed_mm_s, self.max_acceleration_mm_s2,
             self.max_step_mm, self.max_start_drift_mm, self.max_start_rotation_deg,
             self.state_stale_ms,
         )) or self.payload_kg < 0:
-            raise ValueError("invalid fake motion limits")
+            raise ValueError("invalid local motion limits")
         if any(low >= high for low, high in self.joint_soft_limits_deg) or any(
             low >= high for low, high in zip(self.workspace_low_mm, self.workspace_high_mm)
         ):
-            raise ValueError("invalid fake motion bounds")
+            raise ValueError("invalid local motion bounds")
 
 
 @dataclass(frozen=True)
-class FakeControllerReadback:
+class ControllerReadback:
     config_sha256: str
     tcp_name: str
     ucs_name: str
@@ -168,14 +164,15 @@ class FakeExternalWriterGuard:
         return reason
 
 
-def safety_state_hash(snapshot: RobotTelemetry, readback: FakeControllerReadback) -> str:
+def safety_state_hash(snapshot: RobotTelemetry, readback: ControllerReadback) -> str:
+    # This controller's 3PE is vendor-confirmed inactive; it is not a gate or
+    # ARM binding field. Reassess this policy before supporting another robot.
     fields = {
         "device_sn": snapshot.device_sn, "robot_model": snapshot.robot_model,
         "package_version": snapshot.package_version,
         "enabled": snapshot.enabled, "electrified": snapshot.electrified,
         "brakes_released": snapshot.brakes_released, "fsm_code": snapshot.fsm_code,
         "auto_mode": snapshot.auto_mode, "reduced_mode": snapshot.reduced_mode,
-        "three_position_enable": snapshot.three_position_enable,
         "physical_estop_active": snapshot.physical_estop_active,
         "emergency_stop_circuit_fault": snapshot.emergency_stop_circuit_fault,
         "safeguard_active": snapshot.safeguard_active,
@@ -198,9 +195,9 @@ def _angle_deg(a: tuple[float, ...], b: tuple[float, ...]) -> float:
     return math.degrees(2 * math.acos(min(1.0, max(-1.0, dot))))
 
 
-def preflight_fake_relative(
+def preflight_relative(
     envelope: RobotCommandEnvelope, snapshot: RobotTelemetry,
-    readback: FakeControllerReadback, approval: FakeMotionApproval,
+    readback: ControllerReadback, approval: MotionApproval,
     arm: LocalArm, leases: tuple[MotionLease, ...],
     path_ik: Callable[[tuple[float, float, float]], tuple[float, ...] | None],
     *, now_ms: int | None = None, now_monotonic_ns: int | None = None,
@@ -209,26 +206,28 @@ def preflight_fake_relative(
     now_ms = time.time_ns() // 1_000_000 if now_ms is None else now_ms
     now_monotonic_ns = time.monotonic_ns() if now_monotonic_ns is None else now_monotonic_ns
     if envelope.command_kind != GatewayCommandKind.MOVE_RELATIVE or not isinstance(envelope.payload, MoveRelativeRequest):
-        raise ValueError("fake trial supports only single-axis move_relative")
+        raise ValueError("local trial supports only single-axis move_relative")
     if not envelope.created_at_ms <= now_ms < envelope.expires_at_ms:
         raise ValueError("motion envelope expired or has a future creation time")
     if snapshot.runtime_mode != RuntimeMode.REAL or snapshot.control_mode != "enabled":
-        raise ValueError("synthetic enabled telemetry required for fake trial")
+        raise ValueError("local motion telemetry must be enabled")
     if snapshot.freshness != SourceFreshness.FRESH or snapshot.state_age_ms is None or snapshot.state_age_ms > approval.state_stale_ms:
-        raise ValueError("fake DataSheet is stale")
+        raise ValueError("DataSheet is stale")
     if any(link != LinkState.CONNECTED for link in (
         snapshot.connections.gateway, snapshot.connections.datasheet,
         snapshot.connections.command_socket, snapshot.connections.controller_box,
     )):
-        raise ValueError("fake connection is incomplete")
+        raise ValueError("controller connection is incomplete")
     if (snapshot.device_sn, snapshot.robot_model, snapshot.package_version) != (
         approval.device_sn, approval.robot_model, approval.package_version,
     ) or snapshot.controller_is_simulation is not False:
         raise ValueError("controller identity is not approved")
+    # Vendor-confirmed E05_Pro behavior: enabled manual and AutoMode are both
+    # valid; reduced mode defaults off and 3PE is currently inactive.
     safety_flags = (
         snapshot.enabled is True, snapshot.electrified is True,
-        snapshot.brakes_released is True, snapshot.auto_mode is True,
-        snapshot.reduced_mode is True, snapshot.three_position_enable is True,
+        snapshot.brakes_released is True,
+        type(snapshot.auto_mode) is bool, type(snapshot.reduced_mode) is bool,
         snapshot.physical_estop_active is False,
         snapshot.emergency_stop_circuit_fault is False,
         snapshot.safeguard_active is False,
@@ -239,13 +238,13 @@ def preflight_fake_relative(
         snapshot.vendor_fault is None, snapshot.fsm_code == approval.ready_fsm_code,
     )
     if not all(safety_flags) or readback.active_program or readback.group_error_code != 0 or any(readback.axis_error_codes):
-        raise ValueError("fake controller is not in approved ready state")
+        raise ValueError("controller is not in approved ready state")
     if snapshot.active_command_id is not None:
         raise ValueError("another command is already active")
     if readback.tcp_name != approval.tcp_name or readback.ucs_name != approval.ucs_name:
         raise ValueError("TCP/UCS name changed")
     if readback.config_sha256 != approval.config_sha256:
-        raise ValueError("loaded fake safety configuration changed")
+        raise ValueError("loaded safety configuration changed")
     if any(_distance(a, b) > 1e-6 for a, b in (
         (readback.tcp_xyzrpy, approval.tcp_xyzrpy),
         (readback.ucs_xyzrpy, approval.ucs_xyzrpy),
@@ -253,7 +252,7 @@ def preflight_fake_relative(
          (approval.payload_kg, *approval.center_of_gravity_mm)),
         (readback.base_installing_angle_deg, approval.base_installing_angle_deg),
     )):
-        raise ValueError("fake controller setup differs from approval")
+        raise ValueError("controller setup differs from approval")
     if envelope.expected_tcp_name != approval.tcp_name or envelope.expected_ucs_name != approval.ucs_name:
         raise ValueError("command TCP/UCS differs from approval")
     if envelope.safety_limits is None or envelope.safety_limits.max_speed_mm_s > approval.max_speed_mm_s or envelope.safety_limits.max_step_mm > approval.max_step_mm:
@@ -279,7 +278,7 @@ def preflight_fake_relative(
         raise ValueError("local single-use ARM is missing, stale, or mismatched")
     translation = tuple(float(value) for value in envelope.payload.translation_mm)
     if sum(abs(value) > 1e-12 for value in translation) != 1:
-        raise ValueError("first fake motion supports exactly one Cartesian axis")
+        raise ValueError("first motion supports exactly one Cartesian axis")
     if _distance((0, 0, 0), translation) > approval.max_step_mm:
         raise ValueError("relative step exceeds approval")
     target_xyz = tuple(float(a + b) for a, b in zip(pose.translation_mm, translation))
@@ -290,12 +289,18 @@ def preflight_fake_relative(
         if any(not low <= value <= high for value, low, high in zip(
             point, approval.workspace_low_mm, approval.workspace_high_mm
         )):
-            raise ValueError("fake path leaves approved workspace")
+            raise ValueError("path leaves approved workspace")
         joints = path_ik(point)
         if joints is None or len(joints) != 6 or any(not math.isfinite(value) for value in joints):
-            raise ValueError("fake path IK failed")
+            raise ValueError("path IK failed")
         if any(not low + approval.joint_margin_deg <= value <= high - approval.joint_margin_deg
                for value, (low, high) in zip(joints, approval.joint_soft_limits_deg)):
-            raise ValueError("fake path crosses joint margin")
+            raise ValueError("path crosses joint margin")
     arm.used = True
     return pose.model_copy(update={"translation_mm": target_xyz})
+
+
+# Keep Step 10 test imports stable while the same checks are reused locally.
+FakeMotionApproval = MotionApproval
+FakeControllerReadback = ControllerReadback
+preflight_fake_relative = preflight_relative

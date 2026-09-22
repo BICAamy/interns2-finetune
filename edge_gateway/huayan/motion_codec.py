@@ -1,8 +1,4 @@
-"""Typed V6 frames for *loopback fake-controller tests only*.
-
-The production CommandClient remains read-only. Nothing in this module opens a
-socket or grants permission to send a frame to a physical controller.
-"""
+"""Typed V6 motion frames; encoding alone never opens a controller socket."""
 
 from __future__ import annotations
 
@@ -34,15 +30,17 @@ class LinearWaypoint:
     speed_mm_s: float
     acceleration_mm_s2: float
     waypoint_id: str
+    reference_joints_deg: tuple[float, float, float, float, float, float]
 
     def encode(self) -> bytes:
-        if len(self.pose_xyzrpy) != 6:
-            raise ValueError("WayPoint requires XYZ and Rx/Ry/Rz")
+        if len(self.pose_xyzrpy) != 6 or len(self.reference_joints_deg) != 6:
+            raise ValueError("WayPoint requires six pose and reference-joint values")
         if not _NAME.fullmatch(self.tcp_name) or self.ucs_name != "Base":
             raise ValueError("WayPoint requires an approved TCP and Base UCS")
         fields = [
             "WayPoint", "0", *(_number(value) for value in self.pose_xyzrpy),
-            *("0" for _ in range(6)), self.tcp_name, self.ucs_name,
+            *(_number(value) for value in self.reference_joints_deg),
+            self.tcp_name, self.ucs_name,
             _number(self.speed_mm_s, positive=True),
             _number(self.acceleration_mm_s2, positive=True),
             "0",  # blend radius
@@ -53,7 +51,7 @@ class LinearWaypoint:
         ]
         frame = (",".join(fields) + ",;").encode("ascii")
         if len(frame) > 512:
-            raise ValueError("WayPoint exceeds fake-test frame limit")
+            raise ValueError("WayPoint exceeds bounded frame limit")
         return frame
 
 

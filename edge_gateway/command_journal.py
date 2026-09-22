@@ -1,4 +1,4 @@
-"""Fail-closed write-ahead journal for offline fake motion trials.
+"""Fail-closed write-ahead journal for fake and Mac-local motion trials.
 
 This journal is deliberately not wired into the real observe-only gateway.
 Every transition is append-only and fsynced before the caller may continue.
@@ -23,7 +23,7 @@ _STATES = frozenset({
 _TERMINAL = frozenset({"succeeded", "stopped", "not_sent", "rejected"})
 _TRANSITIONS = {
     "prepared": {"send_started", "not_sent"},
-    "send_started": {"accepted", "unknown", "stopping"},
+    "send_started": {"accepted", "rejected", "unknown", "stopping"},
     "accepted": {"executing", "stopping", "unknown"},
     "executing": {"succeeded", "stopping", "unknown"},
     "stopping": {"stopped", "stop_unconfirmed", "unknown"},
@@ -38,7 +38,7 @@ class JournalError(RuntimeError):
 
 
 class CommandJournal:
-    """Single-process offline journal; unresolved entries block every new trial."""
+    """Single-process local journal; unresolved entries block every new trial."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)

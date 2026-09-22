@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import socket
 import threading
 import time
 
@@ -11,6 +12,7 @@ import pytest
 from edge_gateway.command_journal import CommandJournal, JournalError
 from edge_gateway.fake_motion import FakeMotionTiming, FakeMotionTrial
 from edge_gateway.huayan.fake_motion_client import FakeMotionClient
+from edge_gateway.huayan.real_motion_client import LocalRealMotionClient
 from edge_gateway.huayan.datasheet_client import DatasheetClient
 from edge_gateway.huayan.motion_codec import LinearWaypoint, encode_software_stop
 from edge_gateway.preflight import (
@@ -154,6 +156,61 @@ def test_fake_motion_client_refuses_private_controller_host() -> None:
         FakeMotionClient("192.168.0.10", 10003)
 
 
+def test_real_writer_uses_same_guarded_trial_against_loopback_fake(monkeypatch, tmp_path) -> None:
+    from edge_gateway import commissioning_cli
+    from tests.unit.edge_gateway.test_real_motion_client import real_shaped_config
+
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        original_connect = socket.create_connection
+
+        def fake_private_connect(address, timeout=None):
+            assert address == ("192.168.0.10", 10003)
+            return original_connect(("127.0.0.1", fake.command_port), timeout)
+
+        monkeypatch.setattr(socket, "create_connection", fake_private_connect)
+        monkeypatch.setattr(commissioning_cli, "require_local_mac_terminal", lambda: None)
+        with LocalRealMotionClient(real_shaped_config(), timeout_s=0.1) as client:
+            with CommandJournal(tmp_path / "local-real-fake.journal") as journal:
+                allowed = replace(
+                    approval(), robot_model="E05-Pro", package_version="6.3.6.20240305",
+                    tcp_name="TCP",
+                )
+                actual = telemetry().model_copy(update={
+                    "robot_model": "E05-Pro", "package_version": "6.3.6.20240305",
+                })
+                setup = replace(readback(), tcp_name="TCP")
+                command = envelope().model_copy(update={"expected_tcp_name": "TCP"})
+                local_arm = LocalArm(
+                    test_id="local-test-1", command_fingerprint=fingerprint(command),
+                    session_id=SESSION, base_sequence=actual.sequence,
+                    safety_state_hash=safety_state_hash(actual, setup),
+                    expected_start=pose(), expires_monotonic_ns=BASE_NS + 1_000_000_000,
+                )
+                trial = FakeMotionTrial(
+                    client=client, journal=journal, timing=timing(),
+                    approval=allowed, path_ik=ik,
+                )
+                assert trial.submit(
+                    command, actual, setup, local_arm, lease(),
+                    now_ms=BASE_MS, now_monotonic_ns=BASE_NS,
+                ) == "accepted"
+                assert trial.observe(
+                    actual.model_copy(update={"sequence": 11, "moving": True, "fsm_code": 25,
+                                              "in_position": False}),
+                    now_monotonic_ns=BASE_NS + 10_000_000,
+                ) == "executing"
+                assert trial.observe(
+                    actual.model_copy(update={"sequence": 12, "actual_pose_robot_base": pose(101)}),
+                    now_monotonic_ns=BASE_NS + 20_000_000,
+                ) == "executing"
+                assert trial.observe(
+                    actual.model_copy(update={"sequence": 13, "actual_pose_robot_base": pose(101)}),
+                    now_monotonic_ns=BASE_NS + 45_000_000,
+                ) == "succeeded"
+                assert journal.unresolved() == ()
+        assert len([frame for frame in fake.received_commands if frame.startswith(b"WayPoint,")]) == 1
+
+
 def test_motion_client_requires_fake_only_identity_before_any_write() -> None:
     with FakeHuayanController() as fake:
         client = FakeMotionClient("127.0.0.1", fake.command_port)
@@ -163,10 +220,11 @@ def test_motion_client_requires_fake_only_identity_before_any_write() -> None:
 
 
 def test_waypoint_frame_is_move_l_without_blend_seek_or_joint_target() -> None:
-    frame = LinearWaypoint((1, 2, 3, 4, 5, 6), "FAKE_FLANGE", "Base", 2, 10, "F123").encode()
+    frame = LinearWaypoint((1, 2, 3, 4, 5, 6), "FAKE_FLANGE", "Base", 2, 10,
+                           "F123", (11, 12, 13, 14, 15, 16)).encode()
     fields = frame[:-2].decode().split(",")
     assert fields[:2] == ["WayPoint", "0"]
-    assert fields[8:14] == ["0"] * 6
+    assert fields[8:14] == ["11", "12", "13", "14", "15", "16"]
     assert fields[18:24] == ["0", "1", "0", "0", "0", "0"]
     assert fields[24] == "F123"
     assert encode_software_stop() == b"GrpStop,0,;"
@@ -194,6 +252,26 @@ def test_ok_is_only_accepted_then_feedback_confirms_success(tmp_path) -> None:
                 assert recovered.unresolved() == ()
         finally:
             client.close()
+
+
+def test_waypoint_fail_is_not_proof_of_no_motion_and_requests_stop(tmp_path) -> None:
+    with FakeHuayanController(
+        accept_fake_motion=True,
+        motion_actions={"WayPoint": [CommandAction((b"WayPoint,Fail,20006,rejected,;",))]},
+    ) as fake:
+        client, journal, trial = make_trial(fake, tmp_path)
+        try:
+            command = envelope()
+            assert trial.submit(command, telemetry(), readback(), arm(command), lease(),
+                                now_ms=BASE_MS, now_monotonic_ns=BASE_NS) == "stopping"
+            assert journal.record(command.command_id)["state"] == "stopping"
+            assert trial.potentially_moving
+            assert len([frame for frame in fake.received_commands if frame.startswith(b"GrpStop,")]) == 1
+            assert trial.observe(telemetry(sequence=11), now_monotonic_ns=BASE_NS + 10_000_000) == "stopping"
+            assert trial.observe(telemetry(sequence=12), now_monotonic_ns=BASE_NS + 20_000_000) == "stopped"
+        finally:
+            client.close()
+            journal.close()
 
 
 def test_fake_tcp_waypoint_then_actual_datasheet_frames_complete_motion(tmp_path) -> None:
@@ -324,7 +402,8 @@ def test_unowned_changes_revoke_local_arm(snapshot, waypoint, expected) -> None:
 
 
 @pytest.mark.parametrize("change", [
-    {"three_position_enable": None},
+    {"auto_mode": None},
+    {"reduced_mode": None},
     {"safeguard_active": True},
     {"freshness": SourceFreshness.STALE},
     {"state_age_ms": 300},
@@ -337,10 +416,76 @@ def test_fail_closed_safety_fields_prevent_any_write(tmp_path, change) -> None:
             command = envelope()
             sample = telemetry().model_copy(update=change)
             with pytest.raises(ValueError):
-                trial.submit(command, sample, readback(), arm(command), lease(),
+                trial.submit(command, sample, readback(), arm(command, sample), lease(),
                              now_ms=BASE_MS, now_monotonic_ns=BASE_NS)
             assert_no_motion_write(fake)
             assert journal.unresolved() == ()
+        finally:
+            client.close()
+
+
+@pytest.mark.parametrize("auto_mode", [False, True])
+def test_confirmed_modes_do_not_require_reduced_mode_or_inactive_3pe(tmp_path, auto_mode) -> None:
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client, journal, trial = make_trial(fake, tmp_path)
+        try:
+            command = envelope()
+            initial = telemetry().model_copy(update={
+                "auto_mode": auto_mode, "reduced_mode": False,
+                "three_position_enable": None,
+            })
+            assert trial.submit(command, initial, readback(), arm(command, initial), lease(),
+                                now_ms=BASE_MS, now_monotonic_ns=BASE_NS) == "accepted"
+            moving = initial.model_copy(update={
+                "sequence": 11, "moving": True, "fsm_code": 25, "in_position": False,
+            })
+            assert trial.observe(moving, now_monotonic_ns=BASE_NS + 10_000_000) == "executing"
+            arrived = initial.model_copy(update={"sequence": 12, "actual_pose_robot_base": pose(101)})
+            assert trial.observe(arrived, now_monotonic_ns=BASE_NS + 20_000_000) == "executing"
+            assert trial.observe(arrived.model_copy(update={"sequence": 13}),
+                                 now_monotonic_ns=BASE_NS + 45_000_000) == "succeeded"
+            assert journal.unresolved() == ()
+        finally:
+            client.close()
+
+
+@pytest.mark.parametrize("change", [
+    {"auto_mode": True},
+    {"reduced_mode": True},
+])
+def test_mode_change_during_owned_motion_requests_stop(tmp_path, change) -> None:
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client, journal, trial = make_trial(fake, tmp_path)
+        try:
+            command = envelope()
+            initial = telemetry().model_copy(update={
+                "auto_mode": False, "reduced_mode": False,
+                "three_position_enable": None,
+            })
+            assert trial.submit(command, initial, readback(), arm(command, initial), lease(),
+                                now_ms=BASE_MS, now_monotonic_ns=BASE_NS) == "accepted"
+            changed = initial.model_copy(update={"sequence": 11, **change})
+            assert trial.observe(changed, now_monotonic_ns=BASE_NS + 10_000_000) == "stopping"
+            assert trial.stop_delivery == "sent"
+            assert trial.potentially_moving
+        finally:
+            client.close()
+
+
+def test_inactive_3pe_is_not_a_motion_gate(tmp_path) -> None:
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client, journal, trial = make_trial(fake, tmp_path)
+        try:
+            command = envelope()
+            initial = telemetry().model_copy(update={"three_position_enable": None})
+            assert trial.submit(command, initial, readback(), arm(command, initial), lease(),
+                                now_ms=BASE_MS, now_monotonic_ns=BASE_NS) == "accepted"
+            changed = initial.model_copy(update={
+                "sequence": 11, "three_position_enable": False,
+                "moving": True, "fsm_code": 25, "in_position": False,
+            })
+            assert trial.observe(changed, now_monotonic_ns=BASE_NS + 10_000_000) == "executing"
+            assert fake.received_commands.count(b"GrpStop,0,;") == 0
         finally:
             client.close()
 
@@ -539,6 +684,24 @@ def test_lost_stop_reply_cannot_be_reported_as_confirmed(tmp_path) -> None:
             assert journal.record("move-1")["state"] == "stop_unconfirmed"
             assert trial.potentially_moving
             assert fake.received_commands.count(b"GrpStop,0,;") == 1
+        finally:
+            client.close()
+
+
+def test_command_socket_loss_after_waypoint_does_not_imply_robot_stopped(tmp_path) -> None:
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client, journal, trial = make_trial(fake, tmp_path)
+        try:
+            command = envelope()
+            assert trial.submit(command, telemetry(), readback(), arm(command), lease(),
+                                now_ms=BASE_MS, now_monotonic_ns=BASE_NS) == "accepted"
+            client.close()  # Vendor says the controller continues the current WayPoint.
+            moving = telemetry(sequence=11, moving=True, fsm=25, in_position=False)
+            assert trial.observe(moving, now_monotonic_ns=BASE_NS + 10_000_000) == "stop_unconfirmed"
+            assert trial.potentially_moving
+            assert journal.unresolved() == ("move-1",)
+            assert fake.received_commands.count(b"GrpStop,0,;") == 0
+            assert len([frame for frame in fake.received_commands if frame.startswith(b"WayPoint,")]) == 1
         finally:
             client.close()
 

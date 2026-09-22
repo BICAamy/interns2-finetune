@@ -235,7 +235,7 @@ class FakeHuayanController:
                 if name == "WayPoint":
                     valid = (
                         len(fields) == 25 and fields[1] == b"0"
-                        and all(part == b"0" for part in fields[8:14])
+                        and all(part and part.isascii() for part in fields[8:14])
                         and fields[15] == b"Base"
                         and fields[19:24] == [b"1", b"0", b"0", b"0", b"0"]
                         and 1 <= len(fields[24]) <= 64
@@ -243,7 +243,9 @@ class FakeHuayanController:
                     if valid:
                         try:
                             numeric = [float(value) for value in (*fields[2:8], fields[16], fields[17], fields[18])]
+                            reference_joints = [float(value) for value in fields[8:14]]
                             valid = (all(math.isfinite(value) for value in numeric)
+                                     and all(math.isfinite(value) for value in reference_joints)
                                      and numeric[6] > 0 and numeric[7] > 0 and numeric[8] == 0)
                         except ValueError:
                             valid = False

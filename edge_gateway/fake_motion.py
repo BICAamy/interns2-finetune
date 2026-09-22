@@ -1,7 +1,7 @@
-"""Offline-only WayPoint lifecycle driven by fake-controller feedback.
+"""Local WayPoint lifecycle, exercised on fake before Mac commissioning.
 
-This deliberately cannot load a real config or accept a private controller
-address. It is not imported by the running Mac gateway or robot-runtime.
+The observe-only gateway and robot-runtime do not import this module. The
+real writer itself requires a Mac-local interactive terminal.
 """
 
 from __future__ import annotations
@@ -21,15 +21,16 @@ from surgical_contracts import (
 from .command_journal import CommandJournal, JournalError
 from .huayan.command_codec import validate_identifier
 from .huayan.fake_motion_client import FakeMotionClient
+from .huayan.real_motion_client import LocalRealMotionClient
 from .huayan.motion_codec import LinearWaypoint
 from .preflight import (
-    FakeControllerReadback, FakeMotionApproval, LocalArm, MotionLease,
-    fingerprint, preflight_fake_relative, safety_state_hash,
+    ControllerReadback, LocalArm, MotionApproval, MotionLease,
+    fingerprint, preflight_relative, safety_state_hash,
 )
 
 
 @dataclass(frozen=True)
-class FakeMotionTiming:
+class LocalMotionTiming:
     response_ms: int
     start_ms: int
     motion_ms: int
@@ -45,21 +46,21 @@ class FakeMotionTiming:
             self.stop_confirmation_ms, self.stable_samples, self.dwell_ms,
             self.position_tolerance_mm, self.orientation_tolerance_deg,
         )) or self.stable_samples < 2:
-            raise ValueError("fake motion deadlines and tolerances must be positive")
+            raise ValueError("local motion deadlines and tolerances must be positive")
 
 
-class FakeMotionTrial:
-    """One active fake command; acceptance cannot be mistaken for completion."""
+class LocalMotionTrial:
+    """One active local command; acceptance cannot be mistaken for completion."""
 
     def __init__(
-        self, *, client: FakeMotionClient, journal: CommandJournal,
-        timing: FakeMotionTiming, approval: FakeMotionApproval,
+        self, *, client: FakeMotionClient | LocalRealMotionClient, journal: CommandJournal,
+        timing: LocalMotionTiming, approval: MotionApproval,
         path_ik: Callable[[tuple[float, float, float]], tuple[float, ...] | None],
     ) -> None:
-        if not isinstance(client, FakeMotionClient):
-            raise TypeError("fake motion trial requires the loopback-only client")
+        if not isinstance(client, (FakeMotionClient, LocalRealMotionClient)):
+            raise TypeError("local motion trial requires an approved typed client")
         if client.timeout_s * 1000 > timing.response_ms:
-            raise ValueError("fake socket timeout exceeds motion response deadline")
+            raise ValueError("local socket timeout exceeds motion response deadline")
         self.client = client
         self.journal = journal
         self.timing = timing
@@ -80,6 +81,8 @@ class FakeMotionTrial:
         self.stop_delivery: str | None = None
         self._lease: MotionLease | None = None
         self.external_writer_detected = False
+        self._initial_auto_mode: bool | None = None
+        self._initial_reduced_mode: bool | None = None
         self._stop_requests: dict[str, str] = {}
         self._last_stop_request_ns: int | None = None
 
@@ -90,24 +93,42 @@ class FakeMotionTrial:
         record = self.journal.record(self.command_id)
         return bool(record and record["potentially_moving"])
 
+    @property
+    def lease_active(self) -> bool:
+        return bool(
+            self._lease is not None and self._lease.active
+            and time.monotonic_ns() < self._lease.expires_monotonic_ns
+        )
+
     def submit(
         self, envelope: RobotCommandEnvelope, snapshot: RobotTelemetry,
-        readback: FakeControllerReadback, arm: LocalArm,
+        readback: ControllerReadback, arm: LocalArm,
         leases: tuple[MotionLease, ...], *, now_ms: int | None = None,
         now_monotonic_ns: int | None = None,
+        final_guard: Callable[[], None] | None = None,
     ) -> str:
         if self.command_id is not None or self.journal.unresolved():
-            raise JournalError("active or unresolved fake command blocks submission")
+            raise JournalError("active or unresolved local command blocks submission")
+        clock_injected = now_monotonic_ns is not None
         now_monotonic_ns = time.monotonic_ns() if now_monotonic_ns is None else now_monotonic_ns
         try:
-            target = preflight_fake_relative(
+            target = preflight_relative(
                 envelope, snapshot, readback, self.approval, arm, leases,
                 self.path_ik, now_ms=now_ms, now_monotonic_ns=now_monotonic_ns,
             )
         except Exception:
             arm.revoke()
             raise
+        if final_guard is not None:
+            try:
+                final_guard()
+            except Exception:
+                arm.revoke()
+                raise
+        send_now_ns = now_monotonic_ns if clock_injected else time.monotonic_ns()
         self._lease = leases[0]
+        self._initial_auto_mode = snapshot.auto_mode
+        self._initial_reduced_mode = snapshot.reduced_mode
         waypoint_id = "F" + hashlib.sha256(envelope.command_id.encode()).hexdigest()[:16]
         frame = LinearWaypoint(
             pose_xyzrpy=(*target.translation_mm, *target.rotation_rpy_deg),
@@ -115,6 +136,7 @@ class FakeMotionTrial:
             speed_mm_s=envelope.payload.speed_mm_s,
             acceleration_mm_s2=self.approval.max_acceleration_mm_s2,
             waypoint_id=waypoint_id,
+            reference_joints_deg=snapshot.joint_positions_deg,
         )
         encoded = frame.encode()
         self.journal.prepare(
@@ -131,11 +153,11 @@ class FakeMotionTrial:
         # This fsynced transition precedes the first byte. A crash afterwards
         # is ambiguous and must not cause an automatic replay.
         self.journal.transition(self.command_id, "send_started")
-        self.sent_monotonic_ns = now_monotonic_ns
-        self.last_feedback_monotonic_ns = now_monotonic_ns
+        self.sent_monotonic_ns = send_now_ns
+        self.last_feedback_monotonic_ns = send_now_ns
         try:
             accepted = self.client.waypoint(frame)
-        except Exception:
+        except BaseException:
             if self.journal.record(self.command_id)["state"] == "send_started":
                 self.journal.transition(self.command_id, "unknown", evidence="write reply unavailable")
             self._lease.revoke()
@@ -144,9 +166,11 @@ class FakeMotionTrial:
             self._lease.revoke()
             raise JournalError("stop or fault raced with WayPoint reply; outcome remains uncertain")
         if not accepted:
-            self.journal.transition(self.command_id, "rejected", evidence="vendor Fail reply")
-            self._lease.revoke()
-            return "rejected"
+            # A Fail reply is not proof of physical non-movement. Require
+            # direct observation/reconciliation before another local trial.
+            self.journal.transition(self.command_id, "unknown", evidence="vendor Fail reply; motion unverified")
+            delivered = self.request_stop()
+            return "stopping" if delivered == "sent" else "stop_unconfirmed"
         self.journal.transition(self.command_id, "accepted")
         return "accepted"
 
@@ -166,8 +190,8 @@ class FakeMotionTrial:
             and sample.controller_is_simulation is False
             and sample.enabled is True and sample.electrified is True
             and sample.brakes_released is True
-            and sample.auto_mode is True and sample.reduced_mode is True
-            and sample.three_position_enable is True
+            and sample.auto_mode is self._initial_auto_mode
+            and sample.reduced_mode is self._initial_reduced_mode
             and sample.free_drive_active is False
             and sample.force_control_active is False
             and sample.paused is False
@@ -184,7 +208,7 @@ class FakeMotionTrial:
 
     def observe(self, sample: RobotTelemetry, *, now_monotonic_ns: int | None = None) -> str:
         if self.command_id is None or self.target is None or self.sent_monotonic_ns is None:
-            raise RuntimeError("no fake command has been submitted")
+            raise RuntimeError("no local command has been submitted")
         now_monotonic_ns = time.monotonic_ns() if now_monotonic_ns is None else now_monotonic_ns
         record = self.journal.record(self.command_id)
         if record is None:
@@ -250,7 +274,7 @@ class FakeMotionTrial:
         return "executing"
 
     def request_stop(self, *, now_monotonic_ns: int | None = None) -> str:
-        """Only an owned unresolved fake command may request ordinary TCP stop."""
+        """Only this process's unresolved command may request ordinary TCP stop."""
         now_monotonic_ns = time.monotonic_ns() if now_monotonic_ns is None else now_monotonic_ns
         if self.command_id is None or not self.potentially_moving:
             return "not_sent"
@@ -354,3 +378,7 @@ class FakeMotionTrial:
             self.request_stop(now_monotonic_ns=now_monotonic_ns)
         record = self.journal.record(self.command_id)
         return record["state"] if record else "unknown"
+
+
+FakeMotionTiming = LocalMotionTiming
+FakeMotionTrial = LocalMotionTrial

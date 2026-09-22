@@ -1,4 +1,4 @@
-"""Step 11 preparation must remain local and read-only until Gate C is proven."""
+"""Step 11 local writer requires explicit per-command human authorization."""
 
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ def test_check_config_never_opens_a_socket(monkeypatch, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["motion_authorized"] is False
     assert report["no_tool_readback_verified"] is None
-    assert report["three_position_enable_verified"] is False
+    assert report["three_position_enable_required"] is False
     assert report["read_only_record"] is None
 
 
@@ -146,3 +146,40 @@ def test_preflight_uses_fixed_read_only_probe_and_never_arms(monkeypatch, capsys
     assert report["no_tool_readback_verified"] is True
     assert report["effective_first_motion_caps"]["max_step_mm"] == 1.0
     assert report["read_only_record"] == "read-only-summary.json"
+
+
+def test_execute_denies_remote_terminal_before_network(monkeypatch):
+    monkeypatch.setattr(cli, "load_real_config", lambda _path: config())
+    monkeypatch.setattr(cli, "probe_once", lambda *_a, **_kw: pytest.fail("probe opened"))
+    monkeypatch.setattr(cli, "require_local_mac_terminal", lambda: (_ for _ in ()).throw(
+        PermissionError("SSH is not local")))
+    assert cli.main([
+        "--config", "ignored.yaml", "--control", "local-only", "--execute-relative",
+        "--byte-order", "little", "--vendor-compatibility-confirmed", "--operator-ready",
+        "--axis=+X", "--test-id", "trial-1",
+        "--expected-config-sha256", config().digest(),
+    ]) == 2
+
+
+def test_execute_requires_matching_config_digest_before_network(monkeypatch):
+    monkeypatch.setattr(cli, "load_real_config", lambda _path: config())
+    monkeypatch.setattr(cli, "require_local_mac_terminal", lambda: None)
+    monkeypatch.setattr(cli, "probe_once", lambda *_a, **_kw: pytest.fail("probe opened"))
+    assert cli.main([
+        "--config", "ignored.yaml", "--control", "local-only", "--execute-relative",
+        "--byte-order", "little", "--vendor-compatibility-confirmed", "--operator-ready",
+        "--axis=+X", "--test-id", "trial-1",
+        "--expected-config-sha256", "0" * 64,
+    ]) == 2
+
+
+def test_persistent_journal_path_has_no_date_component():
+    assert cli._journal_path().parts[-3:] == (
+        "real_robot_commissioning", "step11", "commands.journal",
+    )
+
+
+def test_config_change_before_write_is_rejected(monkeypatch):
+    monkeypatch.setattr(cli, "load_real_config", lambda _path: config(speed=4))
+    with pytest.raises(ValueError, match="changed before WayPoint"):
+        cli._require_unchanged_config(Path("ignored.yaml"), config(speed=5))
