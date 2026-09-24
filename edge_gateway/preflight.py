@@ -226,7 +226,9 @@ def preflight_relative(
     # valid; reduced mode defaults off and 3PE is currently inactive.
     safety_flags = (
         snapshot.enabled is True, snapshot.electrified is True,
-        snapshot.brakes_released is True,
+        # E05-Pro holds all axis brakes while enabled, READY and stationary;
+        # WayPoint releases them automatically after the command is accepted.
+        snapshot.brakes_released is False,
         type(snapshot.auto_mode) is bool, type(snapshot.reduced_mode) is bool,
         snapshot.physical_estop_active is False,
         snapshot.emergency_stop_circuit_fault is False,

@@ -187,6 +187,9 @@ def test_fake_reproduces_motion_feedback_scenarios(scenario: str, expected: list
             assert client.latest.fsm_code == expected[-1]
             if scenario == "delayed_start":
                 assert [event.fsm_code for event in client.drain_events()] == expected
+                assert client.latest.brake_states == (0, 0, 0, 0, 0, 0)
+            if scenario == "never_arrive":
+                assert client.latest.brake_states == (1, 1, 1, 1, 1, 1)
             if scenario == "contradictory_state":
                 assert client.latest.moving and client.latest.fsm_code == 33
 

@@ -1,4 +1,3 @@
-"""Mac-initiated, authenticated WebSocket over a local SSH tunnel."""
 """云桥文件是将机械臂发送过来的数据经过处理，处理完成之后再发给服务器"""
 from __future__ import annotations
 

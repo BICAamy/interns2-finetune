@@ -43,6 +43,25 @@ class LocalObservation:
     source_sample: DatasheetSample
 
 
+def _datasheet_brakes_released(sample: DatasheetSample) -> bool | None:
+    """Return a release consensus for all axes; mixed feedback is unknown."""
+    if all(sample.brake_states):
+        return True
+    if not any(sample.brake_states):
+        return False
+    return None
+
+
+def _brake_release_consensus(
+    sample: DatasheetSample, *, command_released: bool,
+) -> bool | None:
+    """Combine 10003 and 10004 without hiding disagreement or mixed axes."""
+    datasheet_released = _datasheet_brakes_released(sample)
+    if datasheet_released is None or datasheet_released is not command_released:
+        return None
+    return datasheet_released
+
+
 class LocalDataSheetSampler:
     """Continuously drain 10004 while the operator reads and confirms."""
 
@@ -168,8 +187,13 @@ def read_local_observation(
     ).model_copy(update={"control_mode": "enabled"})
     if telemetry.state_age_ms is None or telemetry.state_age_ms > config.deadlines.state_stale_ms:
         raise ValueError("DataSheet became stale during 10003 cross-check")
-    if sample.enabled is not True or not all(sample.brake_states):
-        raise ValueError("DataSheet reports disabled robot or held brake")
+    brakes_released = _brake_release_consensus(
+        sample, command_released=state.brakes_released,
+    )
+    if sample.enabled is not True or brakes_released is not False:
+        raise ValueError(
+            "READY preflight requires all brakes held and matching 10003/10004 feedback"
+        )
     readback = ControllerReadback(
         config_sha256=config.digest(), tcp_name=config.tool.tcp_name,
         ucs_name="Base", tcp_xyzrpy=named_tcp, ucs_xyzrpy=named_ucs,
@@ -198,6 +222,9 @@ def read_motion_feedback(
     sample = record.sample
     if client.package_version is None:
         raise RuntimeError("commissioning command socket disconnected")
+    brakes_released = _brake_release_consensus(
+        sample, command_released=state.brakes_released,
+    )
     base_telemetry = telemetry_from_sample(
         record, session_id=session_id, device_sn=config.controller.device_sn,
         robot_model=config.controller.model, package_version=client.package_version,
@@ -208,7 +235,7 @@ def read_motion_feedback(
         "control_mode": "enabled",
         # Never let one channel's optimistic value hide the other's warning.
         "enabled": state.enabled and sample.enabled,
-        "brakes_released": state.brakes_released and all(sample.brake_states),
+        "brakes_released": brakes_released,
         "in_position": state.in_position and sample.in_position,
         "moving": state.moving or sample.moving,
         "potentially_moving": state.moving or sample.moving or base_telemetry.potentially_moving,
@@ -230,7 +257,7 @@ def observe_stationary(
     mode = (initial.auto_mode, initial.reduced_mode)
     if (
         initial.moving or initial.fsm_code != 33 or not initial.enabled
-        or not initial.in_position or not all(initial.brake_states)
+        or not initial.in_position or any(initial.brake_states)
         or initial.free_drive_mode or initial.force_control_state or initial.paused
     ):
         raise ValueError("robot is not stationary, enabled and READY")
@@ -240,7 +267,7 @@ def observe_stationary(
         if (
             sample.moving or sample.fsm_code != 33 or not sample.enabled
             or not sample.in_position or sample.paused
-            or not all(sample.brake_states) or sample.free_drive_mode or sample.force_control_state
+            or any(sample.brake_states) or sample.free_drive_mode or sample.force_control_state
             or (sample.auto_mode, sample.reduced_mode) != mode
             or math.dist(sample.base_pose[:3], start_pose) > 0.25
             or max(abs(a - b) for a, b in zip(sample.joint_positions_deg, start_joints)) > 0.1

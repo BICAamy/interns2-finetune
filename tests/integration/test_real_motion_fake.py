@@ -45,7 +45,10 @@ def pose(x: float = 100.0) -> Pose6D:
 
 def telemetry(*, sequence: int = 10, x: float = 100.0,
               moving: bool = False, fsm: int = 33,
-              in_position: bool = True) -> RobotTelemetry:
+              in_position: bool = True,
+              brakes_released: bool | None = None) -> RobotTelemetry:
+    if brakes_released is None:
+        brakes_released = moving
     return RobotTelemetry(
         runtime_mode=RuntimeMode.REAL, provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
         control_mode="enabled", sequence=sequence, freshness=SourceFreshness.FRESH,
@@ -57,7 +60,7 @@ def telemetry(*, sequence: int = 10, x: float = 100.0,
         robot_model="FAKE-E05", package_version="fake-v1",
         joint_positions_deg=(0, 0, 90, 0, 90, 0),
         actual_pose_robot_base=pose(x), controller_is_simulation=False,
-        enabled=True, electrified=True, brakes_released=True, auto_mode=True,
+        enabled=True, electrified=True, brakes_released=brakes_released, auto_mode=True,
         reduced_mode=True, three_position_enable=True,
         physical_estop_active=False, emergency_stop_circuit_fault=False,
         safeguard_active=False, safeguard_circuit_fault=False,
@@ -196,7 +199,8 @@ def test_real_writer_uses_same_guarded_trial_against_loopback_fake(monkeypatch, 
                 ) == "accepted"
                 assert trial.observe(
                     actual.model_copy(update={"sequence": 11, "moving": True, "fsm_code": 25,
-                                              "in_position": False}),
+                                              "in_position": False,
+                                              "brakes_released": True}),
                     now_monotonic_ns=BASE_NS + 10_000_000,
                 ) == "executing"
                 assert trial.observe(
@@ -282,6 +286,7 @@ def test_fake_tcp_waypoint_then_actual_datasheet_frames_complete_motion(tmp_path
         document["StateAndError"].update({
             "robotState": fsm, "robotMoving": int(moving),
             "InPos": int(in_position),
+            "BrakeState": [int(moving)] * 6,
         })
         return datasheet_frame(document)
 
@@ -404,6 +409,8 @@ def test_unowned_changes_revoke_local_arm(snapshot, waypoint, expected) -> None:
 @pytest.mark.parametrize("change", [
     {"auto_mode": None},
     {"reduced_mode": None},
+    {"brakes_released": True},
+    {"brakes_released": None},
     {"safeguard_active": True},
     {"freshness": SourceFreshness.STALE},
     {"state_age_ms": 300},
@@ -437,7 +444,8 @@ def test_confirmed_modes_do_not_require_reduced_mode_or_inactive_3pe(tmp_path, a
             assert trial.submit(command, initial, readback(), arm(command, initial), lease(),
                                 now_ms=BASE_MS, now_monotonic_ns=BASE_NS) == "accepted"
             moving = initial.model_copy(update={
-                "sequence": 11, "moving": True, "fsm_code": 25, "in_position": False,
+                "sequence": 11, "moving": True, "fsm_code": 25,
+                "in_position": False, "brakes_released": True,
             })
             assert trial.observe(moving, now_monotonic_ns=BASE_NS + 10_000_000) == "executing"
             arrived = initial.model_copy(update={"sequence": 12, "actual_pose_robot_base": pose(101)})
@@ -447,6 +455,64 @@ def test_confirmed_modes_do_not_require_reduced_mode_or_inactive_3pe(tmp_path, a
             assert journal.unresolved() == ()
         finally:
             client.close()
+
+
+def test_moving_without_automatic_brake_release_requests_stop(tmp_path) -> None:
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client, journal, trial = make_trial(fake, tmp_path)
+        try:
+            command = envelope()
+            initial = telemetry()
+            assert initial.brakes_released is False
+            assert trial.submit(command, initial, readback(), arm(command, initial), lease(),
+                                now_ms=BASE_MS, now_monotonic_ns=BASE_NS) == "accepted"
+            unsafe = telemetry(
+                sequence=11, moving=True, fsm=25, in_position=False,
+                brakes_released=False,
+            )
+            assert trial.observe(
+                unsafe, now_monotonic_ns=BASE_NS + 10_000_000,
+            ) == "stopping"
+            assert trial.stop_delivery == "sent"
+            assert journal.unresolved() == (command.command_id,)
+        finally:
+            client.close()
+            journal.close()
+
+
+def test_arrival_is_not_success_until_brakes_are_held_again(tmp_path) -> None:
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client, journal, trial = make_trial(fake, tmp_path)
+        try:
+            command = envelope()
+            assert trial.submit(command, telemetry(), readback(), arm(command), lease(),
+                                now_ms=BASE_MS, now_monotonic_ns=BASE_NS) == "accepted"
+            assert trial.observe(
+                telemetry(sequence=11, moving=True, fsm=25, in_position=False),
+                now_monotonic_ns=BASE_NS + 10_000_000,
+            ) == "executing"
+            not_braked = telemetry(
+                sequence=12, x=101, brakes_released=True,
+            )
+            assert trial.observe(
+                not_braked, now_monotonic_ns=BASE_NS + 20_000_000,
+            ) == "executing"
+            assert trial.observe(
+                not_braked.model_copy(update={"sequence": 13}),
+                now_monotonic_ns=BASE_NS + 45_000_000,
+            ) == "executing"
+            braked = telemetry(sequence=14, x=101, brakes_released=False)
+            assert trial.observe(
+                braked, now_monotonic_ns=BASE_NS + 55_000_000,
+            ) == "executing"
+            assert trial.observe(
+                braked.model_copy(update={"sequence": 15}),
+                now_monotonic_ns=BASE_NS + 80_000_000,
+            ) == "succeeded"
+            assert journal.unresolved() == ()
+        finally:
+            client.close()
+            journal.close()
 
 
 @pytest.mark.parametrize("change", [
@@ -483,6 +549,7 @@ def test_inactive_3pe_is_not_a_motion_gate(tmp_path) -> None:
             changed = initial.model_copy(update={
                 "sequence": 11, "three_position_enable": False,
                 "moving": True, "fsm_code": 25, "in_position": False,
+                "brakes_released": True,
             })
             assert trial.observe(changed, now_monotonic_ns=BASE_NS + 10_000_000) == "executing"
             assert fake.received_commands.count(b"GrpStop,0,;") == 0

@@ -189,7 +189,9 @@ class LocalMotionTrial:
             and sample.device_sn == self.approval.device_sn
             and sample.controller_is_simulation is False
             and sample.enabled is True and sample.electrified is True
-            and sample.brakes_released is True
+            # Before motion starts the E05-Pro may still hold its brakes. Once
+            # moving, both feedback channels must agree that they are released.
+            and not (sample.moving is True and sample.brakes_released is not True)
             and sample.auto_mode is self._initial_auto_mode
             and sample.reduced_mode is self._initial_reduced_mode
             and sample.free_drive_active is False
@@ -246,7 +248,11 @@ class LocalMotionTrial:
             return "executing"
         if not self.moving_seen:
             return "accepted"
-        if sample.in_position is not True or sample.fsm_code != self.approval.ready_fsm_code:
+        if (
+            sample.in_position is not True
+            or sample.fsm_code != self.approval.ready_fsm_code
+            or sample.brakes_released is not False
+        ):
             self.stable_count = 0
             self.stable_since_ns = None
             return "executing"
@@ -346,7 +352,11 @@ class LocalMotionTrial:
             if self.journal.record(self.command_id)["state"] == "stopping":
                 self.journal.transition(self.command_id, "stop_unconfirmed", evidence="external waypoint ownership unknown")
             return "stop_unconfirmed"
-        if sample.moving is False and sample.fsm_code == self.approval.ready_fsm_code:
+        if (
+            sample.moving is False
+            and sample.fsm_code == self.approval.ready_fsm_code
+            and sample.brakes_released is False
+        ):
             self.stop_stable_count += 1
         else:
             self.stop_stable_count = 0

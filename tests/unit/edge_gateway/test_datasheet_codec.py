@@ -23,6 +23,7 @@ def test_documented_datasheet_sample_parses_only_with_explicit_byte_order(byte_o
     assert sample.base_pose[0] == 367.945
     assert sample.device_sn == "FAKE-E05-001"
     assert sample.fsm_code == 33
+    assert sample.brake_states == (0, 0, 0, 0, 0, 0)
     assert sample.received_wall_ms > 0
     assert sample.received_monotonic_ns > 0
 

@@ -19,7 +19,7 @@
     "IsReduceMode": 0,
     "IsFreeDriveMode": 0,
     "AutoMode": "1",
-    "BrakeState": [1, 1, 1, 1, 1, 1],
+    "BrakeState": [0, 0, 0, 0, 0, 0],
     "nAxisErrorCode": [0, 0, 0, 0, 0, 0]
   },
   "FTData": {"FTControlState": 0},

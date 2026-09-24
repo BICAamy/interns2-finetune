@@ -23,6 +23,7 @@ def test_documented_robot_state_and_emergency_fields_are_mapped() -> None:
     ))
     assert not state.moving
     assert state.enabled
+    assert state.brakes_released is False
     assert state.electrified
     assert state.controller_box_connected
     assert state.in_position
