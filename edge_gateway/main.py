@@ -37,10 +37,10 @@ class EdgeGateway:
         self._command_port = config.command_port if self._real else config.fake_command_port
         self._datasheet_port = config.datasheet_port if self._real else config.fake_datasheet_port
         self._scope = "private-read-only" if self._real else "loopback"
-        self._command = CommandClient(
+        self._command = CommandClient( #一问一答，10003
             self._controller_host, self._command_port, timeout_s=0.5, scope=self._scope,
         )
-        self._cloud = CloudTransport(
+        self._cloud = CloudTransport( # mac与服务器连接（通过websocket）
             config.server_url,
             secret=self.secret,
             gateway_id=config.gateway_id,
@@ -52,7 +52,7 @@ class EdgeGateway:
         self.controller_is_simulation: bool | None = None
         self.robot_status = None
         self.emergency_status = None
-
+    # 10003 连接处
     def _query_identity(self) -> None:
         self._command.connect()
         try:
@@ -95,7 +95,7 @@ class EdgeGateway:
             self._command.close()
             self.state.command_connected = False
             raise
-
+    # 10004连接处
     def _poll_datasheet(self) -> None:
         while not self._stop.is_set() and not self.state.fault:
             try:
@@ -115,6 +115,7 @@ class EdgeGateway:
                     while not self._stop.is_set():
                         reader.poll()
                         for sample in reader.last_batch:
+                            # device_sn是设备编号，这里主要是检查设备编号是否与配置文件中规定的编号一致，以确保连接的机械臂是对应的。
                             if not sample.device_sn:
                                 raise ValueError("DataSheet DeviceSN is missing")
                             if self._real and sample.device_sn != self.config.expected_device_sn:
@@ -135,7 +136,7 @@ class EdgeGateway:
                             elif sample.device_sn != self.device_sn:
                                 self.state.fault = True
                                 raise ValueError("DataSheet DeviceSN changed")
-                            self.state.observe(sample)
+                            self.state.observe(sample) # 记录当前机械臂最新真实状态
                         reader.drain_events()  # EdgeState owns the bounded alert queue.
             except (OSError, ConnectionError, ValueError, RuntimeError) as exc:
                 self.state.datasheet_connected = False
@@ -145,7 +146,9 @@ class EdgeGateway:
                 self._stop.wait(0.2)
 
     def start(self) -> None:
+        # 启动 10003 连接
         self._query_identity()
+        # 10004 为后台线程，主线程是10003 -> websocket -> 服务器
         self._producer = threading.Thread(target=self._poll_datasheet, daemon=True)
         self._producer.start()
 
@@ -177,7 +180,7 @@ class EdgeGateway:
 
     def run(self, *, max_runtime_s: float | None = None) -> None:
         try:
-            self.start()
+            self.start() # 连接 10003 与 10004
             self._wait_for_identity()
             started_at = time.monotonic()
             last_command_check = 0.0
@@ -188,6 +191,7 @@ class EdgeGateway:
                     self._check_command_socket()
                     last_command_check = time.monotonic()
                 try:
+                    # 连接服务器
                     session_id = self._cloud.connect(
                         device_sn=self.device_sn or "",
                         robot_model=self.robot_model or "",
@@ -216,6 +220,7 @@ class EdgeGateway:
                                 self.state.acknowledged_through(record.sequence)
                                 last_sent = record.sequence
                                 continue
+                            # 将 DatasheetSample -> RobotTelemetry
                             telemetry = telemetry_from_sample(
                                 record,
                                 session_id=session_id,
@@ -233,6 +238,7 @@ class EdgeGateway:
                             last_sent = record.sequence
                             sent = True
                         if not sent and time.monotonic() - last_heartbeat >= 0.3:
+                            # heartbeat 不是完整机器人数据，只是说机械臂没有新状态发送过来了。
                             self._cloud.send_heartbeat(
                                 datasheet=(LinkState.CONNECTED if self.state.datasheet_connected else LinkState.DISCONNECTED),
                                 command_socket=(LinkState.CONNECTED if self.state.command_connected else LinkState.DISCONNECTED),

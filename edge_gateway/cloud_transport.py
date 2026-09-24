@@ -1,5 +1,5 @@
 """Mac-initiated, authenticated WebSocket over a local SSH tunnel."""
-
+"""云桥文件是将机械臂发送过来的数据经过处理，处理完成之后再发给服务器"""
 from __future__ import annotations
 
 import ipaddress
@@ -49,7 +49,7 @@ def validate_cloud_url(url: str) -> str:
         raise ValueError("cloud WebSocket host must be a literal loopback address") from exc
     return url
 
-
+# 将DatasheetSample转化为RobotTelemetry（华沿厂商协议世界 -> 项目统一协议世界）
 def telemetry_from_sample(
     record: SampleRecord,
     *,
@@ -248,7 +248,7 @@ class CloudTransport:
             if response.get("type") != "ack" or response.get("message_sequence") != payload.message_sequence:
                 raise ValueError("gateway acknowledgement is missing or mismatched")
             return
-
+    # 将 RobotTelemetry 转化为 GatewayStateFrame，准备发送给服务器
     def send_state(self, state: RobotTelemetry) -> None:
         if self.session_id is None:
             raise RuntimeError("cloud is disconnected")

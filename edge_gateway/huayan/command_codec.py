@@ -21,7 +21,7 @@ def validate_identifier(value: str) -> str:
         raise ValueError("identifier must be 1..64 safe ASCII characters")
     return value
 
-
+# 制造数据包（想发给控制器）
 def encode_read(command: ReadCommand, *, robot_id: int = 0, name: str | None = None) -> bytes:
     if not isinstance(command, ReadCommand):
         raise TypeError("only listed read-only commands are allowed")
@@ -43,7 +43,7 @@ def encode_read(command: ReadCommand, *, robot_id: int = 0, name: str | None = N
         raise ValueError("command exceeds maximum length")
     return frame
 
-
+# 确保收到完整数据包frame
 class CommandFrameDecoder:
     """Incremental semicolon framing; keeps unconsumed bytes across recv calls."""
 
@@ -73,7 +73,7 @@ class CommandFrameDecoder:
             raise ProtocolError("unterminated reply exceeds maximum length")
         return frames
 
-
+# 检查完整数据包frame是否合理合规：是不是预期的命令？有没有 OK？字段数量对不对？...
 def decode_reply(frame: bytes, *, expected: ReadCommand) -> CommandReply:
     if not isinstance(expected, ReadCommand):
         raise TypeError("expected must be a read command")

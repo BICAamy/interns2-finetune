@@ -16,7 +16,7 @@ class ResponseUnknown(RuntimeError):
     Callers must never infer success or automatically replay a request.
     """
 
-
+# 把huayan厂商那边的字符串整理为项目内统一的Enum
 class ReadCommand(str, Enum):
     IS_SIMULATION = "IsSimulation"
     CONTROLLER_STATE = "ReadControllerState"
@@ -80,7 +80,7 @@ FAST_PORT_COMMANDS = frozenset({
     ReadCommand.TCP_BY_NAME,
     ReadCommand.UCS_BY_NAME,
 })
-
+# 对应命令正常返回时，我期望后面有几个数据字段，比如：ReadCurFSM,OK,33,; 就只有1个返回值
 REPLY_FIELD_COUNTS = {
     ReadCommand.IS_SIMULATION: 1,
     ReadCommand.CONTROLLER_STATE: 1,
@@ -106,7 +106,7 @@ REPLY_FIELD_COUNTS = {
     ReadCommand.UCS_BY_NAME: 6,
 }
 
-
+# 解析10003控制器那边返回的命令成醒目中的python格式对象 （一问一答）
 @dataclass(frozen=True)
 class CommandReply:
     command: ReadCommand
@@ -119,7 +119,7 @@ class CommandReply:
     def ok(self) -> bool:
         return self.vendor_error_code is None
 
-
+# 10004 持续推过来的实时状态数据解析之后的 Python 对象格式。（持续推流）
 @dataclass(frozen=True)
 class DatasheetSample:
     source_timestamp_ms: int

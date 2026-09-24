@@ -88,7 +88,7 @@ class CommandClient:
             self._socket.close()
         self._socket = None
         self._decoder = CommandFrameDecoder()
-
+    # 用 10003向服务器发送命令
     def request(
         self, command: ReadCommand, *, robot_id: int = 0, name: str | None = None,
     ) -> CommandReply:
