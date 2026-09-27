@@ -173,6 +173,49 @@ def test_execute_requires_matching_config_digest_before_network(monkeypatch):
     ]) == 2
 
 
+def test_enable_disable_routes_only_through_explicit_local_cli_action(monkeypatch):
+    monkeypatch.setattr(cli, "load_real_config", lambda _path: config())
+    calls = []
+
+    def execute(loaded, args):
+        calls.append((loaded, args.set_enabled, args.control))
+        return 0
+
+    monkeypatch.setattr(cli, "_execute_enabled_state", execute)
+    assert cli.main([
+        "--config", "ignored.yaml", "--control", "local-only",
+        "--set-enabled", "false", "--byte-order", "little",
+        "--vendor-compatibility-confirmed", "--operator-ready",
+        "--expected-config-sha256", config().digest(),
+    ]) == 0
+    assert calls == [(config(), "false", "local-only")]
+
+
+def test_enable_disable_denies_remote_terminal_before_network(monkeypatch):
+    monkeypatch.setattr(cli, "load_real_config", lambda _path: config())
+    monkeypatch.setattr(cli, "probe_once", lambda *_a, **_kw: pytest.fail("probe opened"))
+    monkeypatch.setattr(cli, "require_local_mac_terminal", lambda: (_ for _ in ()).throw(
+        PermissionError("SSH is not local")))
+    assert cli.main([
+        "--config", "ignored.yaml", "--control", "local-only",
+        "--set-enabled", "true", "--byte-order", "little",
+        "--vendor-compatibility-confirmed", "--operator-ready",
+        "--expected-config-sha256", config().digest(),
+    ]) == 2
+
+
+def test_enable_disable_requires_matching_config_digest_before_network(monkeypatch):
+    monkeypatch.setattr(cli, "load_real_config", lambda _path: config())
+    monkeypatch.setattr(cli, "require_local_mac_terminal", lambda: None)
+    monkeypatch.setattr(cli, "probe_once", lambda *_a, **_kw: pytest.fail("probe opened"))
+    assert cli.main([
+        "--config", "ignored.yaml", "--control", "local-only",
+        "--set-enabled", "false", "--byte-order", "little",
+        "--vendor-compatibility-confirmed", "--operator-ready",
+        "--expected-config-sha256", "0" * 64,
+    ]) == 2
+
+
 def test_persistent_journal_path_has_no_date_component():
     assert cli._journal_path().parts[-3:] == (
         "real_robot_commissioning", "step11", "commands.journal",
@@ -181,5 +224,5 @@ def test_persistent_journal_path_has_no_date_component():
 
 def test_config_change_before_write_is_rejected(monkeypatch):
     monkeypatch.setattr(cli, "load_real_config", lambda _path: config(speed=4))
-    with pytest.raises(ValueError, match="changed before WayPoint"):
+    with pytest.raises(ValueError, match="changed before controller write"):
         cli._require_unchanged_config(Path("ignored.yaml"), config(speed=5))

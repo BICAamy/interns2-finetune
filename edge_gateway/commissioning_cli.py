@@ -301,9 +301,59 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
                 return _monitor_one_motion(trial, sampler, client, config, session_id=session_id)
 
 
+def _execute_enabled_state(config: RealRobotConfig, args: argparse.Namespace) -> int:
+    """One Mac-local enable/disable write followed by dual-channel proof."""
+    require_local_mac_terminal()
+    if args.expected_config_sha256 != config.digest():
+        raise ValueError("explicit config SHA-256 does not match the loaded profile")
+    if first_motion_config_blockers(config):
+        raise ValueError("commissioning config has missing or incompatible fields")
+    validate_probe_config(config)
+    enabled = args.set_enabled == "true"
+    command = "GrpEnable,0,;" if enabled else "GrpDisable,0,;"
+    verb = "enable" if enabled else "disable"
+    print(json.dumps({
+        "mode": "mac-local-manual-enablement",
+        "device_sn": config.controller.device_sn,
+        "config_sha256": config.digest(),
+        "requested_enabled": enabled,
+        "exact_controller_command": command,
+        "remote_trigger_available": False,
+    }, ensure_ascii=False, indent=2))
+    print("This action is available only in this Mac terminal; gateway/web/InternS2 cannot call it.")
+    if not enabled:
+        print("GrpDisable will not be sent unless both 10003 and 10004 confirm the robot is stationary.")
+
+    probe = probe_once(config, byte_order=args.byte_order, scope="private-read-only")
+    record_path = _save_probe_result(probe)
+    print(f"Fresh read-only probe: {record_path}")
+    _require_phrase(
+        f"Type {verb} to send {command}: ",
+        f"{verb}",
+    )
+    _require_unchanged_config(args.config, config)
+
+    from .commissioning_runtime import set_enabled_and_confirm
+
+    confirmation = set_enabled_and_confirm(
+        config, enabled=enabled, byte_order=args.byte_order,
+    )
+    print(json.dumps({
+        "status": "confirmed",
+        "requested_enabled": confirmation.requested_enabled,
+        "read_robot_state_enabled": confirmation.command_enabled,
+        "datasheet_robot_enabled": confirmation.datasheet_enabled,
+        "read_robot_state_moving": confirmation.command_moving,
+        "datasheet_robot_moving": confirmation.datasheet_moving,
+        "datasheet_sequence": confirmation.datasheet_sequence,
+        "message": "10003 ReadRobotState and a newer 10004 DataSheet frame agree",
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def _require_unchanged_config(path: Path, loaded: RealRobotConfig) -> None:
     if load_real_config(path).digest() != loaded.digest():
-        raise ValueError("commissioning configuration changed before WayPoint")
+        raise ValueError("commissioning configuration changed before controller write")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -314,6 +364,10 @@ def main(argv: list[str] | None = None) -> int:
     action.add_argument("--check-config", action="store_true", help="offline, no controller connection")
     action.add_argument("--preflight-read-only", action="store_true", help="fixed read-only controller probe")
     action.add_argument("--execute-relative", action="store_true", help="one local 1 mm Base-axis trial")
+    action.add_argument(
+        "--set-enabled", choices=("true", "false"),
+        help="one Mac-local GrpEnable/GrpDisable write with live confirmation",
+    )
     parser.add_argument("--byte-order", choices=("little", "big"))
     parser.add_argument("--operator-ready", action="store_true")
     parser.add_argument("--vendor-compatibility-confirmed", action="store_true")
@@ -347,6 +401,24 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError, RuntimeError, PermissionError) as exc:
             print(f"LOCAL MOTION BLOCKED/FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
             print("If any WayPoint may have been sent, check the physical robot and journal before another trial.", file=sys.stderr)
+            return 2
+    if args.set_enabled is not None:
+        if not args.expected_config_sha256:
+            parser.error("enable/disable requires explicit matching config SHA-256")
+        try:
+            return _execute_enabled_state(config, args)
+        except KeyboardInterrupt:
+            print(
+                "LOCAL ENABLE/DISABLE INTERRUPTED: command outcome may be unknown; "
+                "inspect the physical robot and both feedback channels.",
+                file=sys.stderr,
+            )
+            return 2
+        except (OSError, ValueError, RuntimeError, PermissionError) as exc:
+            print(
+                f"LOCAL ENABLE/DISABLE BLOCKED/FAILED: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
             return 2
     try:
         require_local_mac_terminal()

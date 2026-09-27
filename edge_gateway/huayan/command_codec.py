@@ -62,6 +62,8 @@ class CommandFrameDecoder:
             raise TypeError("TCP data must be bytes")
         if len(self._pending) + len(data) > self.max_reply_bytes * 2:
             raise ProtocolError("reply receive chunk exceeds bounded buffer")
+        if not self._pending and data.startswith(b"LTBR"):
+            raise ProtocolError("DataSheet LTBR frame received on 10003 command socket")
         self._pending.extend(data)
         frames: list[bytes] = []
         while (end := self._pending.find(b";")) >= 0:
@@ -83,8 +85,16 @@ def decode_reply(frame: bytes, *, expected: ReadCommand) -> CommandReply:
         message = frame.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise ProtocolError(f"invalid UTF-8 reply (prefix={frame[:32].hex()})") from exc
-    if any(ord(char) < 32 or ord(char) == 127 for char in message):
-        raise ProtocolError("control character in reply")
+    controls = [
+        (index, ord(char)) for index, char in enumerate(message)
+        if ord(char) < 32 or ord(char) == 127
+    ]
+    if controls:
+        index, value = controls[0]
+        raise ProtocolError(
+            f"control character 0x{value:02x} at byte {index} inside reply "
+            f"(prefix_hex={frame[:96].hex()})"
+        )
     canonical = message.endswith(",;")
     fields = message[:-2].split(",") if canonical else message[:-1].split(",")
     if len(fields) < 2 or fields[0] != expected.value:

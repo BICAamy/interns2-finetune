@@ -38,6 +38,26 @@ def test_half_and_sticky_packets_keep_exact_frame_boundaries() -> None:
     assert decode_reply(frames[0], expected=ReadCommand.CURRENT_FSM).values == ("33",)
 
 
+def test_datasheet_magic_is_rejected_on_command_decoder() -> None:
+    decoder = CommandFrameDecoder()
+    with pytest.raises(ProtocolError, match="DataSheet LTBR.*10003"):
+        decoder.feed(b"LTBR\x73\x0b\x00\x00\x67\x0b\x00\x00{}")
+
+
+def test_crlf_inside_a_reply_is_not_sanitized() -> None:
+    decoder = CommandFrameDecoder()
+    frame = decoder.feed(b"ReadCurFSM,OK,\r\n33,;")[0]
+    with pytest.raises(ProtocolError, match="0x0d at byte 14 inside reply"):
+        decode_reply(frame, expected=ReadCommand.CURRENT_FSM)
+
+
+def test_vertical_tab_inside_a_reply_field_is_not_sanitized() -> None:
+    decoder = CommandFrameDecoder()
+    frame = decoder.feed(b"ReadCurFSM,OK,3\x0b3,;")[0]
+    with pytest.raises(ProtocolError, match="0x0b at byte 15 inside reply"):
+        decode_reply(frame, expected=ReadCommand.CURRENT_FSM)
+
+
 def test_failure_preserves_vendor_code_and_comma_in_explanation() -> None:
     response = decode_reply(
         b"ReadCurFSM,Fail,20018,forbidden, while moving,;",

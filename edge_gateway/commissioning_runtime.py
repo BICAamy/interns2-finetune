@@ -43,6 +43,18 @@ class LocalObservation:
     source_sample: DatasheetSample
 
 
+@dataclass(frozen=True)
+class EnablementConfirmation:
+    """Post-write agreement from a fresh 10003 read and a newer 10004 frame."""
+
+    requested_enabled: bool
+    command_enabled: bool
+    datasheet_enabled: bool
+    command_moving: bool
+    datasheet_moving: bool
+    datasheet_sequence: int
+
+
 def _datasheet_brakes_released(sample: DatasheetSample) -> bool | None:
     """Return a release consensus for all axes; mixed feedback is unknown."""
     if all(sample.brake_states):
@@ -139,6 +151,94 @@ class LocalDataSheetSampler:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+def set_enabled_and_confirm(
+    config: RealRobotConfig,
+    *,
+    enabled: bool,
+    byte_order: str,
+) -> EnablementConfirmation:
+    """Write once, then prove the requested state through sequential channels.
+
+    The method never writes a local enabled flag. Disable is rejected before
+    transmission unless fresh 10004 and 10003 feedback both report stationary.
+    The sockets are intentionally not open together: the commissioned
+    controller has emitted an LTBR DataSheet frame on the 10003 connection
+    while both channels were connected concurrently.
+    """
+    if type(enabled) is not bool:
+        raise TypeError("enabled must be a bool")
+    timeout_ms = config.deadlines.startup_ms
+    if timeout_ms is None:
+        raise ValueError("startup_ms is required for enabled-state confirmation")
+
+    with LocalDataSheetSampler(config, byte_order=byte_order) as sampler:
+        before_record = sampler.snapshot()
+    before_sample = before_record.sample
+    if not enabled and before_sample.moving:
+        raise PermissionError("GrpDisable requires stationary 10004 feedback")
+
+    response_ms = config.deadlines.response_ms
+    if response_ms is None:
+        raise ValueError("response_ms is required for enabled-state confirmation")
+    socket_timeout_s = response_ms / 1000
+    with LocalRealMotionClient(config, timeout_s=socket_timeout_s) as client:
+        before_state = read_robot_state(client.request(ReadCommand.ROBOT_STATE))
+        if before_state.has_error or before_state.error_code:
+            raise ValueError("controller error prevents group enable/disable")
+        if not enabled and before_state.moving:
+            raise PermissionError("GrpDisable requires stationary 10003 feedback")
+        if not client.set_enabled(
+            enabled,
+            disable_stationary_confirmed=(
+                not before_state.moving and not before_sample.moving
+            ),
+        ):
+            raise RuntimeError("controller rejected group enable/disable")
+
+        deadline_ns = time.monotonic_ns() + timeout_ms * 1_000_000
+        last_state = before_state
+        while time.monotonic_ns() < deadline_ns:
+            last_state = read_robot_state(client.request(ReadCommand.ROBOT_STATE))
+            if last_state.has_error or last_state.error_code:
+                raise ValueError("controller error while confirming enabled state")
+            if last_state.moving:
+                raise RuntimeError("robot moved while changing enabled state")
+            if last_state.enabled is enabled:
+                break
+            time.sleep(0.02)
+        else:
+            raise TimeoutError(
+                "10003 enabled-state confirmation timed out: "
+                f"enabled={last_state.enabled}, moving={last_state.moving}"
+            )
+
+    with LocalDataSheetSampler(config, byte_order=byte_order) as sampler:
+        last_record = sampler.snapshot()
+        while time.monotonic_ns() < deadline_ns:
+            last_record = sampler.snapshot()
+            sample = last_record.sample
+            if sample.moving:
+                raise RuntimeError("robot moved while confirming 10004 enabled state")
+            if (
+                sample.received_monotonic_ns > before_sample.received_monotonic_ns
+                and sample.enabled is enabled
+            ):
+                return EnablementConfirmation(
+                    requested_enabled=enabled,
+                    command_enabled=last_state.enabled,
+                    datasheet_enabled=sample.enabled,
+                    command_moving=last_state.moving,
+                    datasheet_moving=sample.moving,
+                    datasheet_sequence=last_record.sequence,
+                )
+            time.sleep(0.02)
+    sample = last_record.sample
+    raise TimeoutError(
+        "10004 enabled-state confirmation timed out: "
+        f"enabled={sample.enabled}, moving={sample.moving}, sequence={last_record.sequence}"
+    )
 
 
 def read_local_observation(

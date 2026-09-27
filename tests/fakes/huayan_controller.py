@@ -82,6 +82,9 @@ class FakeHuayanController:
         data_interval_s: float = 0.05,
         stamp_every_n_frames: int = 1,
         byte_order: str = "little",
+        initial_enabled: bool = True,
+        initial_moving: bool = False,
+        apply_group_state_changes: bool = True,
     ) -> None:
         if data_interval_s <= 0:
             raise ValueError("data_interval_s must be positive")
@@ -99,6 +102,10 @@ class FakeHuayanController:
             self._motion_actions[command].extend(actions)
         self.accept_fake_motion = accept_fake_motion
         self._current_waypoint_id = "FAKE_ONLY"
+        self._state_lock = threading.Lock()
+        self._enabled = initial_enabled
+        self._moving = initial_moving
+        self._apply_group_state_changes = apply_group_state_changes
         # Keep test diagnostics bounded during long-running gateway soak tests.
         self.received_commands: list[bytes] = []
         self._stop = threading.Event()
@@ -233,7 +240,7 @@ class FakeHuayanController:
                 else:
                     connection.sendall(b"FakeOnlyIdentity,OK,INTERN-S2-FAKE-MOTION-V1,;")
                 continue
-            if name in ("WayPoint", "GrpStop") and self.accept_fake_motion and not fast:
+            if name in ("WayPoint", "GrpStop", "GrpEnable", "GrpDisable") and self.accept_fake_motion and not fast:
                 if name == "WayPoint":
                     valid = (
                         len(fields) == 25 and fields[1] == b"0"
@@ -253,8 +260,10 @@ class FakeHuayanController:
                             valid = False
                     if valid:
                         self._current_waypoint_id = fields[24].decode("ascii", errors="replace")
-                else:
+                elif name == "GrpStop":
                     valid = fields == [b"GrpStop", b"0"]
+                else:
+                    valid = fields == [name.encode("ascii"), b"0"]
                 if not valid:
                     connection.sendall(f"{name},Fail,20006,invalid parameters,;".encode())
                     continue
@@ -267,6 +276,15 @@ class FakeHuayanController:
                     return
                 for part in action.chunks:
                     connection.sendall(part)
+                if (
+                    self._apply_group_state_changes
+                    and b"".join(action.chunks) == f"{name},OK,;".encode("ascii")
+                ):
+                    with self._state_lock:
+                        if name == "GrpEnable":
+                            self._enabled = True
+                        elif name == "GrpDisable":
+                            self._enabled = False
                 if pipelined:
                     return
                 continue
@@ -298,13 +316,22 @@ class FakeHuayanController:
                 continue
             action = self._command_actions[command].popleft() if self._command_actions[command] else None
             if action is None:
-                reply = (
-                    f"ReadFastCmdPort,OK,{self.fast_port},;".encode("ascii")
-                    if command == ReadCommand.FAST_COMMAND_PORT
-                    else f"ReadCurWayPointID,OK,{self._current_waypoint_id},;".encode("ascii")
-                    if command == ReadCommand.CURRENT_WAYPOINT_ID and self.accept_fake_motion
-                    else DEFAULT_REPLIES[command]
-                )
+                if command == ReadCommand.ROBOT_STATE and self.accept_fake_motion:
+                    with self._state_lock:
+                        enabled, moving = self._enabled, self._moving
+                    reply = (
+                        "ReadRobotState,OK,"
+                        f"{int(moving)},{int(enabled)},0,0,0,{int(moving)},0,0,0,1,1,"
+                        f"{int(not moving)},{int(not moving)},;"
+                    ).encode("ascii")
+                else:
+                    reply = (
+                        f"ReadFastCmdPort,OK,{self.fast_port},;".encode("ascii")
+                        if command == ReadCommand.FAST_COMMAND_PORT
+                        else f"ReadCurWayPointID,OK,{self._current_waypoint_id},;".encode("ascii")
+                        if command == ReadCommand.CURRENT_WAYPOINT_ID and self.accept_fake_motion
+                        else DEFAULT_REPLIES[command]
+                    )
                 action = CommandAction((reply,))
             if action.delay_s:
                 if self._stop.wait(action.delay_s):
@@ -331,6 +358,16 @@ class FakeHuayanController:
         source_stamp_ms = 0
         while not self._stop.is_set():
             document = datasheet_document()
+            if self.accept_fake_motion:
+                with self._state_lock:
+                    enabled, moving = self._enabled, self._moving
+                state = document["StateAndError"]
+                state["robotEnabled"] = int(enabled)
+                state["robotMoving"] = int(moving)
+                state["robotState"] = 25 if moving else 33
+                state["robotBlendingDone"] = int(not moving)
+                state["InPos"] = int(not moving)
+                state["BrakeState"] = [int(moving)] * 6
             if frame_index % self._stamp_every_n_frames == 0:
                 source_stamp_ms = time.time_ns() // 1_000_000
             document["MsgTitle"]["Stamp"] = str(source_stamp_ms)

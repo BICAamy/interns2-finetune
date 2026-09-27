@@ -7,10 +7,13 @@ import socket
 import pytest
 
 from edge_gateway import commissioning_cli
-from edge_gateway.huayan.models import ResponseUnknown
+from edge_gateway.huayan.adapter import read_robot_state
+from edge_gateway.huayan.models import ProtocolError, ReadCommand, ResponseUnknown
 from edge_gateway.huayan.motion_codec import LinearWaypoint
 from edge_gateway.huayan.real_motion_client import LocalRealMotionClient
-from tests.fakes.huayan_controller import CommandAction, FakeHuayanController
+from tests.fakes.huayan_controller import (
+    CommandAction, FakeHuayanController, datasheet_document, datasheet_frame,
+)
 from tests.unit.edge_gateway.test_commissioning_cli import config as sample_config
 
 
@@ -50,6 +53,9 @@ def test_real_writer_rejects_loopback_and_does_not_connect_on_construction():
         }), timeout_s=0.1)
     client = LocalRealMotionClient(config, timeout_s=0.1)
     assert client._socket is None
+    assert LocalRealMotionClient(config, timeout_s=3.0).timeout_s == 3.0
+    with pytest.raises(ValueError, match="response_ms"):
+        LocalRealMotionClient(config, timeout_s=3.001)
 
 
 def test_real_writer_requires_mac_terminal_before_opening_socket(monkeypatch):
@@ -106,3 +112,63 @@ def test_real_writer_rejects_unapproved_limits_before_write(monkeypatch):
             with pytest.raises(ValueError, match="speed"):
                 client.waypoint(unsafe)
         assert not any(frame.startswith((b"WayPoint,", b"GrpStop,")) for frame in fake.received_commands)
+
+
+@pytest.mark.parametrize("target,frame", [
+    (True, b"GrpEnable,0,;"),
+    (False, b"GrpDisable,0,;"),
+])
+def test_real_writer_sends_one_exact_group_state_command(monkeypatch, target, frame):
+    with FakeHuayanController(
+        accept_fake_motion=True, initial_enabled=not target,
+    ) as fake:
+        redirect_controller(monkeypatch, fake)
+        with LocalRealMotionClient(real_shaped_config(), timeout_s=0.1) as client:
+            assert client.set_enabled(
+                target, disable_stationary_confirmed=not target,
+            ) is True
+            assert read_robot_state(client.request(ReadCommand.ROBOT_STATE)).enabled is target
+            with pytest.raises(RuntimeError, match="single-use"):
+                client.set_enabled(target)
+            with pytest.raises(RuntimeError, match="single-use"):
+                client.waypoint(waypoint())
+            with pytest.raises(PermissionError, match="own attempted WayPoint"):
+                client.software_stop()
+        assert fake.received_commands.count(frame) == 1
+
+
+def test_real_writer_never_retries_unknown_group_state_write(monkeypatch):
+    with FakeHuayanController(
+        accept_fake_motion=True,
+        initial_enabled=False,
+        motion_actions={"GrpEnable": [CommandAction(None)]},
+    ) as fake:
+        redirect_controller(monkeypatch, fake)
+        with LocalRealMotionClient(real_shaped_config(), timeout_s=0.1) as client:
+            with pytest.raises(ResponseUnknown, match="GrpEnable outcome unknown"):
+                client.set_enabled(True)
+            with pytest.raises(RuntimeError, match="single-use"):
+                client.set_enabled(True)
+        assert fake.received_commands.count(b"GrpEnable,0,;") == 1
+
+
+def test_real_writer_refuses_disable_without_stationary_confirmation(monkeypatch):
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        redirect_controller(monkeypatch, fake)
+        with LocalRealMotionClient(real_shaped_config(), timeout_s=0.1) as client:
+            with pytest.raises(PermissionError, match="stationary confirmation"):
+                client.set_enabled(False)
+        assert b"GrpDisable,0,;" not in fake.received_commands
+
+
+def test_real_writer_rejects_datasheet_stream_on_command_socket(monkeypatch):
+    with FakeHuayanController(
+        accept_fake_motion=True,
+        command_actions={ReadCommand.ROBOT_STATE: [CommandAction((
+            datasheet_frame(datasheet_document()),
+        ))]},
+    ) as fake:
+        redirect_controller(monkeypatch, fake)
+        with LocalRealMotionClient(real_shaped_config(), timeout_s=0.1) as client:
+            with pytest.raises(ProtocolError, match="DataSheet LTBR.*10003"):
+                client.request(ReadCommand.ROBOT_STATE)

@@ -95,13 +95,13 @@ class CommandClient:
         frame = encode_read(command, robot_id=robot_id, name=name)
         if self.fast_port and command not in FAST_PORT_COMMANDS:
             raise ValueError("command is not documented for the fast port")
-        with self._lock:
-            if self._socket is None:
-                raise RuntimeError("command socket is not connected")
-            if self._decoder.pending:
-                self._close_unlocked()
-                raise ProtocolError("unexpected bytes before next command")
-            try:
+        try:
+            with self._lock:
+                if self._socket is None:
+                    raise RuntimeError("command socket is not connected")
+                if self._decoder.pending:
+                    self._close_unlocked()
+                    raise ProtocolError("unexpected bytes before next command")
                 self._socket.sendall(frame)
                 while True:
                     chunk = self._socket.recv(4096)
@@ -112,12 +112,14 @@ class CommandClient:
                         raise ProtocolError("unsolicited or pipelined reply data")
                     if replies:
                         return decode_reply(replies[0], expected=command)
-            except (OSError, ResponseUnknown) as exc:
+        except (OSError, ResponseUnknown) as exc:
+            with self._lock:
                 self._close_unlocked()
-                raise ResponseUnknown("reply unknown after command send; do not retry") from exc
-            except ProtocolError:
+            raise ResponseUnknown("reply unknown after command send; do not retry") from exc
+        except ProtocolError as exc:
+            with self._lock:
                 self._close_unlocked()
-                raise
+            raise ProtocolError(f"{command.value} reply invalid: {exc}") from exc
 
     def discover_fast_port(self) -> int:
         if self.fast_port:

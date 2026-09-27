@@ -2,7 +2,9 @@
 
 The regular gateway imports only the read-only CommandClient. Constructing
 this class does not connect; connect() checks the local terminal and controller
-identity again. It never enables, resets, changes IO, or sends scripts.
+identity again. Only this Mac-local client exposes explicit group enable,
+disable, WayPoint and owned-stop writes. It never resets, changes IO, or sends
+scripts.
 """
 
 from __future__ import annotations
@@ -19,7 +21,10 @@ from .adapter import (
 from .command_client import _private_controller_host
 from .command_codec import CommandFrameDecoder, decode_reply, encode_read
 from .models import CommandReply, ProtocolError, ReadCommand, ResponseUnknown
-from .motion_codec import LinearWaypoint, decode_write_reply, encode_software_stop
+from .motion_codec import (
+    LinearWaypoint, decode_write_reply, encode_group_enabled,
+    encode_software_stop,
+)
 
 
 class LocalRealMotionClient:
@@ -33,15 +38,16 @@ class LocalRealMotionClient:
             raise ValueError("real commissioning requires the private 10003 controller")
         self.host = _private_controller_host(controller.host)
         self.port = controller.command_port
-        if not 0 < timeout_s <= 0.5:
-            raise ValueError("real commissioning socket timeout must be at most 500 ms")
+        response_ms = config.deadlines.response_ms
+        if response_ms is None or not 0 < timeout_s <= response_ms / 1000:
+            raise ValueError("socket timeout must not exceed configured response_ms")
         self.timeout_s = timeout_s
         self.config = config
         self._socket: socket.socket | None = None
         self._decoder = CommandFrameDecoder()
         self._lock = threading.Lock()
         self._identified = False
-        self._write_attempted = False
+        self._write_command: str | None = None
         self.package_version: str | None = None
 
     def connect(self) -> None:
@@ -99,10 +105,22 @@ class LocalRealMotionClient:
                         raise ProtocolError("unsolicited or pipelined controller reply")
                     if replies:
                         return replies[0]
-            except (OSError, ResponseUnknown) as exc:
+            except socket.timeout as exc:
                 self._socket.close()
                 self._socket = None
-                raise ResponseUnknown("10003 outcome unknown; never replay") from exc
+                raise ResponseUnknown(
+                    f"10003 response timed out after {self.timeout_s:g}s; never replay"
+                ) from exc
+            except ResponseUnknown:
+                self._socket.close()
+                self._socket = None
+                raise
+            except OSError as exc:
+                self._socket.close()
+                self._socket = None
+                raise ResponseUnknown(
+                    f"10003 transport failed with {type(exc).__name__}; never replay"
+                ) from exc
             except ProtocolError:
                 self._socket.close()
                 self._socket = None
@@ -117,13 +135,20 @@ class LocalRealMotionClient:
             self._lock.release()
 
     def request(self, command: ReadCommand, *, name: str | None = None) -> CommandReply:
-        return decode_reply(self._exchange(encode_read(command, name=name)), expected=command)
+        try:
+            return decode_reply(
+                self._exchange(encode_read(command, name=name)), expected=command,
+            )
+        except ProtocolError as exc:
+            raise ProtocolError(f"{command.value} reply invalid: {exc}") from exc
+        except ResponseUnknown as exc:
+            raise ResponseUnknown(f"{command.value} read failed: {exc}") from exc
 
     def current_waypoint_id(self) -> str:
         return read_waypoint_id(self.request(ReadCommand.CURRENT_WAYPOINT_ID))
 
     def waypoint(self, waypoint: LinearWaypoint) -> bool:
-        if not self._identified or self._write_attempted:
+        if not self._identified or self._write_command is not None:
             raise RuntimeError("real WayPoint requires an identified, single-use local session")
         if waypoint.tcp_name != self.config.tool.tcp_name or waypoint.ucs_name != "Base":
             raise ValueError("WayPoint TCP/UCS disagrees with bare-flange config")
@@ -142,13 +167,38 @@ class LocalRealMotionClient:
         )):
             raise ValueError("WayPoint reference joints exceed approved margin")
         encoded = waypoint.encode()
-        self._write_attempted = True  # Set before first byte; disconnect is ambiguous.
-        return decode_write_reply(self._exchange(encoded), command="WayPoint")
+        self._write_command = "WayPoint"  # Set before first byte; disconnect is ambiguous.
+        try:
+            return decode_write_reply(self._exchange(encoded), command="WayPoint")
+        except ResponseUnknown as exc:
+            raise ResponseUnknown(f"WayPoint outcome unknown: {exc}") from exc
 
     def software_stop(self) -> bool:
-        if not self._identified or not self._write_attempted:
+        if not self._identified or self._write_command != "WayPoint":
             raise PermissionError("ordinary stop is only for this process's own attempted WayPoint")
-        return decode_write_reply(self._exchange(encode_software_stop()), command="GrpStop")
+        try:
+            return decode_write_reply(self._exchange(encode_software_stop()), command="GrpStop")
+        except ResponseUnknown as exc:
+            raise ResponseUnknown(f"GrpStop outcome unknown: {exc}") from exc
+
+    def set_enabled(
+        self, enabled: bool, *, disable_stationary_confirmed: bool = False,
+    ) -> bool:
+        """Send one explicit lifecycle write; callers must verify real feedback."""
+        if type(enabled) is not bool:
+            raise TypeError("enabled must be a bool")
+        if not self._identified or self._write_command is not None:
+            raise RuntimeError("group enable/disable requires an identified, single-use local session")
+        if not enabled and not disable_stationary_confirmed:
+            raise PermissionError("GrpDisable requires prior dual-channel stationary confirmation")
+        command = "GrpEnable" if enabled else "GrpDisable"
+        self._write_command = command  # Set before first byte; disconnect is ambiguous.
+        try:
+            return decode_write_reply(
+                self._exchange(encode_group_enabled(enabled)), command=command,
+            )
+        except ResponseUnknown as exc:
+            raise ResponseUnknown(f"{command} outcome unknown: {exc}") from exc
 
     def __enter__(self) -> "LocalRealMotionClient":
         self.connect()

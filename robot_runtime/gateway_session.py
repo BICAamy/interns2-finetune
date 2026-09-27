@@ -90,6 +90,8 @@ class GatewaySessionManager:
             self._command_socket = LinkState.DISCONNECTED
 
     def open(self, hello: GatewayHello, *, challenge: str, connection_key: str) -> None:
+        # hello 是mac过来的，self是服务器自身此时的配置文件中的信息
+        # hmac验证
         expected_tag = hello_auth_tag(
             self._secret,
             gateway_id=hello.gateway_id,
@@ -99,6 +101,7 @@ class GatewaySessionManager:
         identity = hello.handshake
         if hello.challenge != challenge or not hmac.compare_digest(hello.auth_tag, expected_tag):
             raise GatewaySessionError("gateway authentication failed")
+        # 验证机器人身份
         if (
             hello.gateway_id != self.gateway_id
             or identity.device_sn != self.device_sn
@@ -113,6 +116,7 @@ class GatewaySessionManager:
         now_ns = self._clock_ns()
         with self._lock:
             self._expire_if_needed(now_ns)
+            # 这里要求 connection_key 是空的，是为了保证同一时刻只允许1个gateway
             if self._connection_key is not None:
                 raise GatewaySessionError("another gateway session is active")
             if session_id in self._used_ids:
@@ -143,6 +147,7 @@ class GatewaySessionManager:
         self._last_contact_ns = now_ns
 
     def ingest_state(self, frame: GatewayStateFrame, *, connection_key: str) -> None:
+        # ingest_state() 是接收每一帧的真机状态
         state = frame.state
         if (
             state.provider != RobotProvider.HUAYAN_EDGE_GATEWAY
@@ -169,6 +174,7 @@ class GatewaySessionManager:
             if state.sequence <= self._source_sequence:
                 raise GatewaySessionError("duplicate or out-of-order source sequence")
             self._source_sequence = state.sequence
+            # 服务器正式接受这帧 RobotTelemetry，并把它作为当前最新真实机器人状态。
             self._latest = state.model_copy(deep=True)
             self._last_state_received_ns = now_ns
             self._last_state_wall_ms = time.time_ns() // 1_000_000
@@ -192,6 +198,7 @@ class GatewaySessionManager:
                 self._command_socket = LinkState.DISCONNECTED
 
     def _snapshot(self) -> tuple[SourceFreshness, RobotConnectionState, str | None, float | None]:
+        # 服务器当前视角看，这台机器现在到底 healthy、fresh、stale 还是 disconnected？
         now_ns = self._clock_ns()
         with self._lock:
             self._expire_if_needed(now_ns)
@@ -230,6 +237,7 @@ class GatewaySessionManager:
         )
 
     def telemetry(self) -> RobotTelemetry:
+        # 给其他服务器模块提供当前最新真机状态。
         freshness, connections, _error, age_ms = self._snapshot()
         with self._lock:
             latest = self._latest.model_copy(deep=True) if self._latest is not None else None

@@ -60,16 +60,23 @@ def encode_software_stop() -> bytes:
     return b"GrpStop,0,;"
 
 
+def encode_group_enabled(enabled: bool) -> bytes:
+    """Encode the documented group enable/disable command for robot group 0."""
+    if type(enabled) is not bool:
+        raise TypeError("enabled must be a bool")
+    return b"GrpEnable,0,;" if enabled else b"GrpDisable,0,;"
+
+
 def decode_write_reply(frame: bytes, *, command: str) -> bool:
-    """Return acceptance only. An OK reply is never motion completion."""
-    if command not in ("WayPoint", "GrpStop"):
+    """Return acceptance only. An OK reply is never physical-state proof."""
+    if command not in ("WayPoint", "GrpStop", "GrpEnable", "GrpDisable"):
         raise ValueError("unsupported write reply")
     if len(frame) > MAX_REPLY_BYTES or not frame.endswith(b",;"):
-        raise ProtocolError("invalid motion reply framing")
+        raise ProtocolError("invalid write reply framing")
     try:
         fields = frame[:-2].decode("ascii").split(",")
     except UnicodeDecodeError as exc:
-        raise ProtocolError("motion reply is not ASCII") from exc
+        raise ProtocolError("write reply is not ASCII") from exc
     if fields == [command, "OK"]:
         return True
     if len(fields) >= 3 and fields[0] == command and fields[1] == "Fail" and fields[2].isdecimal():

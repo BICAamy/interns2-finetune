@@ -1,4 +1,4 @@
-"""Mac-local freshness checks; never compare monotonic clocks across hosts."""
+"""判断“真机状态是不是还新鲜”，以及“机械臂自己上报的时间戳是不是正常往前走”"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ class StateWatchdog:
     ) -> None:
         if stale_ms <= 0:
             raise ValueError("stale_ms must be positive")
-        self.stale_ms = stale_ms
+        self.stale_ms = stale_ms # 允许这一帧能老多长时间
         self._clock_ns = clock_ns
 
     def age_ms(self, sample: DatasheetSample) -> float:
@@ -28,10 +28,7 @@ class StateWatchdog:
 
 
 class SourceStampWatchdog:
-    """Reject a stream of newly received frames carrying an old source stamp.
-
-    The controller's wall-clock offset from the Mac is irrelevant: only stamp
-    advancement and elapsed Mac monotonic time are compared.
+    """这里检查DataSheet 自己带的 source_timestamp_ms 有没有正常变化
     """
 
     def __init__(self, *, stale_ms: int) -> None:
