@@ -67,9 +67,19 @@ def encode_group_enabled(enabled: bool) -> bytes:
     return b"GrpEnable,0,;" if enabled else b"GrpDisable,0,;"
 
 
+def encode_speed_override(value: float) -> bytes:
+    """Encode the documented controller-wide speed ratio for robot group 0."""
+    if (
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        or not math.isfinite(value) or not 0.01 <= value <= 1.0
+    ):
+        raise ValueError("controller speed override must be within 0.01..1")
+    return f"SetOverride,0,{_number(value)},;".encode("ascii")
+
+
 def decode_write_reply(frame: bytes, *, command: str) -> bool:
     """Return acceptance only. An OK reply is never physical-state proof."""
-    if command not in ("WayPoint", "GrpStop", "GrpEnable", "GrpDisable"):
+    if command not in ("WayPoint", "GrpStop", "GrpEnable", "GrpDisable", "SetOverride"):
         raise ValueError("unsupported write reply")
     if len(frame) > MAX_REPLY_BYTES or not frame.endswith(b",;"):
         raise ProtocolError("invalid write reply framing")

@@ -51,15 +51,9 @@ def main() -> int:
     )
     parser.add_argument("--byte-order", choices=("little", "big"), required=True)
     parser.add_argument("--connect-real-read-only", action="store_true")
-    parser.add_argument("--vendor-compatibility-confirmed", action="store_true")
-    parser.add_argument("--operator-ready", action="store_true")
     arguments = parser.parse_args()
-    if not (
-        arguments.connect_real_read_only
-        and arguments.vendor_compatibility_confirmed
-        and arguments.operator_ready
-    ):
-        parser.error("capture requires all three explicit read-only/operator confirmations")
+    if not arguments.connect_real_read_only:
+        parser.error("capture requires --connect-real-read-only")
     config = load_real_config(arguments.real_config)
     if (
         config.controller.host is None

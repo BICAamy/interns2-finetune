@@ -84,8 +84,6 @@ def main() -> int:
     action.add_argument("--check-config", action="store_true", help="validate only; no network")
     action.add_argument("--connect-real-read-only", action="store_true")
     parser.add_argument("--byte-order", choices=("little", "big"))
-    parser.add_argument("--vendor-compatibility-confirmed", action="store_true")
-    parser.add_argument("--operator-ready", action="store_true", help="robot stationary and local safety checks completed")
     args = parser.parse_args()
 
     config = load_real_config(args.real_config)
@@ -99,8 +97,8 @@ def main() -> int:
     if args.check_config:
         print("READ-ONLY CONFIG OK; no controller connection was opened")
         return 0
-    if not args.vendor_compatibility_confirmed or not args.operator_ready or not args.byte_order:
-        parser.error("real connection requires vendor compatibility, operator readiness and explicit byte order")
+    if not args.byte_order:
+        parser.error("real connection requires explicit --byte-order")
     result = read_motion_limits(config, byte_order=args.byte_order, scope="private-read-only")
     print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
     return 0

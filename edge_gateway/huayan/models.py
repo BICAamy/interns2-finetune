@@ -28,6 +28,7 @@ class ReadCommand(str, Enum):
     ACTUAL_POSITION = "ReadActPos"
     EMERGENCY_INFO = "ReadEmergencyInfo"
     CURRENT_WAYPOINT_ID = "ReadCurWayPointID"
+    OVERRIDE = "ReadOverride"
     AXIS_ERROR_CODE = "ReadAxisErrorCode"
     PAYLOAD = "ReadPayload"
     JOINT_MAX_VELOCITY = "ReadJointMaxVel"
@@ -46,6 +47,7 @@ ROBOT_ID_COMMANDS = frozenset({
     ReadCommand.ACTUAL_POSITION,
     ReadCommand.EMERGENCY_INFO,
     ReadCommand.CURRENT_WAYPOINT_ID,
+    ReadCommand.OVERRIDE,
     ReadCommand.AXIS_ERROR_CODE,
     ReadCommand.PAYLOAD,
     ReadCommand.JOINT_MAX_VELOCITY,
@@ -70,6 +72,7 @@ FAST_PORT_COMMANDS = frozenset({
     ReadCommand.CURRENT_FSM,
     ReadCommand.ACTUAL_POSITION,
     ReadCommand.CURRENT_WAYPOINT_ID,
+    ReadCommand.OVERRIDE,
     ReadCommand.AXIS_ERROR_CODE,
     ReadCommand.PAYLOAD,
     ReadCommand.JOINT_MAX_VELOCITY,
@@ -92,6 +95,7 @@ REPLY_FIELD_COUNTS = {
     ReadCommand.ACTUAL_POSITION: 24,
     ReadCommand.EMERGENCY_INFO: 4,
     ReadCommand.CURRENT_WAYPOINT_ID: 1,
+    ReadCommand.OVERRIDE: 1,
     ReadCommand.AXIS_ERROR_CODE: 7,
     ReadCommand.PAYLOAD: 4,
     ReadCommand.JOINT_MAX_VELOCITY: 6,

@@ -102,9 +102,13 @@ def decode_reply(frame: bytes, *, expected: ReadCommand) -> CommandReply:
     if fields[1] == "OK":
         if not canonical or len(fields[2:]) != REPLY_FIELD_COUNTS[expected]:
             raise ProtocolError("wrong number of success fields")
-        if any(not field for field in fields[2:]):
+        values = fields[2:]
+        empty_current_waypoint = (
+            expected == ReadCommand.CURRENT_WAYPOINT_ID and values == [""]
+        )
+        if any(not field for field in values) and not empty_current_waypoint:
             raise ProtocolError("empty success field")
-        return CommandReply(expected, tuple(fields[2:]))
+        return CommandReply(expected, tuple(values))
     if fields[1] != "Fail" or len(fields) < 3 or not _ERROR_CODE.fullmatch(fields[2]):
         raise ProtocolError("invalid reply status or failure code")
     # Explanations are vendor-controlled and may contain commas. Bound them.

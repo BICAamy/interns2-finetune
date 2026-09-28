@@ -206,7 +206,7 @@ def test_probe_stops_on_unapproved_version_before_other_queries() -> None:
         assert fake.received_commands == [b"PackageVersion,;"]
 
 
-def test_real_probe_cli_requires_explicit_gate_and_check_config_never_connects(
+def test_real_probe_check_config_never_connects_and_gateway_requires_read_only_flag(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path = tmp_path / "robot-real.local.yaml"
@@ -231,13 +231,6 @@ deadlines:
         "probe", "--real-config", str(config_path), "--check-config",
     ])
     assert main() == 0
-    monkeypatch.setattr(sys, "argv", [
-        "probe", "--real-config", str(config_path), "--connect-real-read-only",
-        "--byte-order", "little",
-    ])
-    with pytest.raises(SystemExit, match="2"):
-        main()
-
     monkeypatch.setattr(sys, "argv", [
         "gateway", "--real-config", str(config_path),
         "--server-url", "ws://127.0.0.1:18001/v1/gateway/connect",

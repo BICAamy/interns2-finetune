@@ -104,7 +104,7 @@ deadlines:
     assert "No network connection was opened" in capsys.readouterr().out or action == "--check-config"
     monkeypatch.setattr(sys, "argv", [
         "read_huayan_motion_limits", "--real-config", str(config_path),
-        "--connect-real-read-only", "--byte-order", "little",
+        "--connect-real-read-only",
     ])
     with pytest.raises(SystemExit, match="2"):
         main()

@@ -47,6 +47,7 @@ class MotionApproval:
     max_start_rotation_deg: float
     state_stale_ms: float
     ready_fsm_code: int
+    controller_override: float
 
     def __post_init__(self) -> None:
         if not self.device_sn or not self.robot_model or not self.package_version or not self.tcp_name:
@@ -60,6 +61,7 @@ class MotionApproval:
             self.joint_margin_deg, *self.workspace_low_mm, *self.workspace_high_mm,
             self.max_speed_mm_s, self.max_acceleration_mm_s2, self.max_step_mm,
             self.max_start_drift_mm, self.max_start_rotation_deg, self.state_stale_ms,
+            self.controller_override,
         )
         if any(not math.isfinite(value) for value in numeric):
             raise ValueError("local motion limits must be finite")
@@ -69,6 +71,8 @@ class MotionApproval:
             self.state_stale_ms,
         )) or self.payload_kg < 0:
             raise ValueError("invalid local motion limits")
+        if not 0.01 <= self.controller_override <= 1.0:
+            raise ValueError("invalid controller speed override")
         if any(low >= high for low, high in self.joint_soft_limits_deg) or any(
             low >= high for low, high in zip(self.workspace_low_mm, self.workspace_high_mm)
         ):
@@ -87,7 +91,8 @@ class ControllerReadback:
     group_error_code: int
     axis_error_codes: tuple[int, int, int, int, int, int]
     active_program: bool
-    waypoint_id: str
+    waypoint_id: str | None
+    controller_override: float
 
 
 @dataclass
@@ -129,9 +134,9 @@ class FakeExternalWriterGuard:
 
     def __init__(
         self, *, arm: LocalArm, baseline: RobotTelemetry,
-        baseline_waypoint_id: str, noise_threshold_mm: float,
+        baseline_waypoint_id: str | None, noise_threshold_mm: float,
     ) -> None:
-        if baseline.actual_pose_robot_base is None or not baseline_waypoint_id:
+        if baseline.actual_pose_robot_base is None:
             raise ValueError("external-writer baseline is incomplete")
         if not math.isfinite(noise_threshold_mm) or noise_threshold_mm <= 0:
             raise ValueError("noise threshold must be positive")
@@ -140,7 +145,7 @@ class FakeExternalWriterGuard:
         self.baseline_waypoint_id = baseline_waypoint_id
         self.noise_threshold_mm = noise_threshold_mm
 
-    def observe(self, snapshot: RobotTelemetry, *, waypoint_id: str) -> str | None:
+    def observe(self, snapshot: RobotTelemetry, *, waypoint_id: str | None) -> str | None:
         if self.arm.used:
             return "arm_inactive"
         reason = None
@@ -244,6 +249,7 @@ def preflight_relative(
         ((readback.payload_kg, *readback.center_of_gravity_mm),
          (approval.payload_kg, *approval.center_of_gravity_mm)),
         (readback.base_installing_angle_deg, approval.base_installing_angle_deg),
+        ((readback.controller_override,), (approval.controller_override,)),
     )):
         raise ValueError("controller setup differs from approval")
     if envelope.expected_tcp_name != approval.tcp_name or envelope.expected_ucs_name != approval.ucs_name:

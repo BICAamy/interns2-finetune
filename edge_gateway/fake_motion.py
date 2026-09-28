@@ -79,6 +79,9 @@ class LocalMotionTrial:
         self.stable_since_ns: int | None = None
         self.stop_stable_count = 0
         self.stop_delivery: str | None = None
+        self.stop_reason: str | None = None
+        self.last_feedback_debug: str | None = None
+        self.ownership_confirmed = False
         self._lease: MotionLease | None = None
         self.external_writer_detected = False
         self._initial_auto_mode: bool | None = None
@@ -169,72 +172,129 @@ class LocalMotionTrial:
             # A Fail reply is not proof of physical non-movement. Require
             # direct observation/reconciliation before another local trial.
             self.journal.transition(self.command_id, "unknown", evidence="vendor Fail reply; motion unverified")
-            delivered = self.request_stop()
+            delivered = self.request_stop(reason="vendor rejected WayPoint; motion unverified")
             return "stopping" if delivered == "sent" else "stop_unconfirmed"
         self.journal.transition(self.command_id, "accepted")
         return "accepted"
 
-    def _feedback_is_safe(self, sample: RobotTelemetry) -> bool:
-        return (
-            sample.runtime_mode == RuntimeMode.REAL
-            and sample.provider == RobotProvider.HUAYAN_EDGE_GATEWAY
-            and sample.freshness == SourceFreshness.FRESH
-            and sample.state_age_ms is not None
-            and sample.state_age_ms <= self.approval.state_stale_ms
-            and all(link == LinkState.CONNECTED for link in (
-                sample.connections.gateway, sample.connections.datasheet,
-                sample.connections.command_socket, sample.connections.controller_box,
-            ))
-            and sample.gateway_session_id == self.session_id
-            and sample.device_sn == self.approval.device_sn
-            and sample.controller_is_simulation is False
-            and sample.enabled is True and sample.electrified is True
-            and sample.auto_mode is self._initial_auto_mode
-            and sample.reduced_mode is self._initial_reduced_mode
-            and sample.free_drive_active is False
-            and sample.force_control_active is False
-            and sample.paused is False
-            and sample.physical_estop_active is False
-            and sample.emergency_stop_circuit_fault is False
-            and sample.safeguard_active is False
-            and sample.safeguard_circuit_fault is False
-            and sample.vendor_fault is None
-            and type(sample.moving) is bool
-            and type(sample.in_position) is bool
-            and sample.fsm_code is not None
-            and not (sample.moving is True and sample.fsm_code == self.approval.ready_fsm_code)
-        )
+    def _feedback_safety_failure(self, sample: RobotTelemetry) -> str | None:
+        """Return the exact fail-closed reason instead of an opaque boolean."""
+        if sample.runtime_mode != RuntimeMode.REAL or sample.provider != RobotProvider.HUAYAN_EDGE_GATEWAY:
+            return "runtime mode or provider changed"
+        if sample.freshness != SourceFreshness.FRESH:
+            return f"feedback freshness is {sample.freshness.value}"
+        if sample.state_age_ms is None or sample.state_age_ms > self.approval.state_stale_ms:
+            return f"feedback age is unsafe: {sample.state_age_ms!r} ms"
+        links = {
+            "gateway": sample.connections.gateway,
+            "datasheet": sample.connections.datasheet,
+            "command_socket": sample.connections.command_socket,
+            "controller_box": sample.connections.controller_box,
+        }
+        disconnected = [name for name, value in links.items() if value != LinkState.CONNECTED]
+        if disconnected:
+            return "connection not ready: " + ",".join(disconnected)
+        if sample.gateway_session_id != self.session_id:
+            return "gateway session changed"
+        if sample.device_sn != self.approval.device_sn or sample.controller_is_simulation is not False:
+            return "controller identity or simulation mode changed"
+        safety_values = {
+            "enabled": sample.enabled,
+            "electrified": sample.electrified,
+            "auto_mode": sample.auto_mode,
+            "reduced_mode": sample.reduced_mode,
+            "free_drive_active": sample.free_drive_active,
+            "force_control_active": sample.force_control_active,
+            "paused": sample.paused,
+            "physical_estop_active": sample.physical_estop_active,
+            "emergency_stop_circuit_fault": sample.emergency_stop_circuit_fault,
+            "safeguard_active": sample.safeguard_active,
+            "safeguard_circuit_fault": sample.safeguard_circuit_fault,
+        }
+        expected = {
+            "enabled": True, "electrified": True,
+            "auto_mode": self._initial_auto_mode,
+            "reduced_mode": self._initial_reduced_mode,
+            "free_drive_active": False, "force_control_active": False,
+            "paused": False, "physical_estop_active": False,
+            "emergency_stop_circuit_fault": False,
+            "safeguard_active": False, "safeguard_circuit_fault": False,
+        }
+        for name, value in safety_values.items():
+            if value is not expected[name]:
+                return f"unsafe feedback {name}={value!r}, expected {expected[name]!r}"
+        if sample.vendor_fault is not None:
+            return "controller reported a vendor fault"
+        if type(sample.moving) is not bool or type(sample.in_position) is not bool:
+            return "moving or InPos feedback is unknown"
+        if sample.fsm_code is None:
+            return "FSM feedback is unknown"
+        return None
 
-    def observe(self, sample: RobotTelemetry, *, now_monotonic_ns: int | None = None) -> str:
+    def _stop_evidence(self, suffix: str | None = None) -> str:
+        parts = [
+            part for part in (self.stop_reason, self.last_feedback_debug, suffix)
+            if part
+        ]
+        return "; ".join(parts)[:128]
+
+    def observe(
+        self, sample: RobotTelemetry, *, feedback_debug: str | None = None,
+        now_monotonic_ns: int | None = None,
+    ) -> str:
         if self.command_id is None or self.target is None or self.sent_monotonic_ns is None:
             raise RuntimeError("no local command has been submitted")
+        if feedback_debug is not None:
+            self.last_feedback_debug = feedback_debug
         now_monotonic_ns = time.monotonic_ns() if now_monotonic_ns is None else now_monotonic_ns
         record = self.journal.record(self.command_id)
         if record is None:
             raise JournalError("active command missing from journal")
         if record["state"] in ("succeeded", "rejected", "stopped"):
             return record["state"]
-        if sample.sequence <= self.last_sequence or not self._feedback_is_safe(sample):
-            self.request_stop(now_monotonic_ns=now_monotonic_ns)
+        if sample.sequence <= self.last_sequence:
+            self.request_stop(
+                reason=(
+                    f"feedback sequence did not advance: "
+                    f"received={sample.sequence}, previous={self.last_sequence}"
+                ),
+                now_monotonic_ns=now_monotonic_ns,
+            )
+            return "stopping" if self.stop_delivery == "sent" else "stop_unconfirmed"
+        safety_failure = self._feedback_safety_failure(sample)
+        if safety_failure is not None:
+            self.request_stop(reason=safety_failure, now_monotonic_ns=now_monotonic_ns)
             return "stopping" if self.stop_delivery == "sent" else "stop_unconfirmed"
         self.last_sequence = sample.sequence
         self.last_feedback_monotonic_ns = now_monotonic_ns
         if record["state"] in ("stopping", "stop_unconfirmed"):
             return self._observe_stop(sample, now_monotonic_ns)
         elapsed_ms = (now_monotonic_ns - self.sent_monotonic_ns) / 1_000_000
-        if elapsed_ms > self.timing.motion_ms or (
-            not self.moving_seen and elapsed_ms > self.timing.start_ms
-        ):
-            self.request_stop(now_monotonic_ns=now_monotonic_ns)
+        if elapsed_ms > self.timing.motion_ms:
+            self.request_stop(reason="motion deadline expired", now_monotonic_ns=now_monotonic_ns)
+            return "stopping" if self.stop_delivery == "sent" else "stop_unconfirmed"
+        if elapsed_ms > self.timing.start_ms and not self.moving_seen:
+            self.request_stop(
+                reason="startup deadline expired without motion start",
+                now_monotonic_ns=now_monotonic_ns,
+            )
             return "stopping" if self.stop_delivery == "sent" else "stop_unconfirmed"
         try:
             reported_id = self.client.current_waypoint_id()
-        except Exception:
-            self.request_stop(now_monotonic_ns=now_monotonic_ns)
+        except Exception as exc:
+            self.request_stop(
+                reason=f"ReadCurWayPointID failed: {type(exc).__name__}: {exc}",
+                now_monotonic_ns=now_monotonic_ns,
+            )
             return "stopping" if self.stop_delivery == "sent" else "stop_unconfirmed"
-        if reported_id != self.waypoint_id:
+        if reported_id == self.waypoint_id:
+            self.ownership_confirmed = True
+        elif reported_id is not None:
             self.external_writer_detected = True
-            self.request_stop(now_monotonic_ns=now_monotonic_ns)
+            self.request_stop(
+                reason=f"unexpected WayPoint ID: {reported_id}",
+                now_monotonic_ns=now_monotonic_ns,
+            )
             return "stopping" if self.stop_delivery == "sent" else "stop_unconfirmed"
         if sample.moving is True:
             self.moving_seen = True
@@ -254,7 +314,10 @@ class LocalMotionTrial:
             return "executing"
         pose = sample.actual_pose_robot_base
         if pose is None:
-            self.request_stop(now_monotonic_ns=now_monotonic_ns)
+            self.request_stop(
+                reason="actual Base pose became unavailable",
+                now_monotonic_ns=now_monotonic_ns,
+            )
             return "stopping" if self.stop_delivery == "sent" else "stop_unconfirmed"
         position_error = math.dist(pose.translation_mm, self.target.translation_mm)
         dot = abs(sum(a*b for a, b in zip(pose.quaternion_xyzw, self.target.quaternion_xyzw)))
@@ -269,17 +332,22 @@ class LocalMotionTrial:
         if self.stable_count >= self.timing.stable_samples and (
             now_monotonic_ns - self.stable_since_ns
         ) / 1_000_000 >= self.timing.dwell_ms:
-            self.journal.transition(self.command_id, "succeeded", evidence="owned ID, READY, InPos, stable pose")
+            self.journal.transition(self.command_id, "succeeded", evidence="READY, InPos, stable pose")
             if self._lease is not None:
                 self._lease.revoke()
             return "succeeded"
         return "executing"
 
-    def request_stop(self, *, now_monotonic_ns: int | None = None) -> str:
+    def request_stop(
+        self, *, reason: str = "software stop requested",
+        now_monotonic_ns: int | None = None,
+    ) -> str:
         """Only this process's unresolved command may request ordinary TCP stop."""
         now_monotonic_ns = time.monotonic_ns() if now_monotonic_ns is None else now_monotonic_ns
         if self.command_id is None or not self.potentially_moving:
             return "not_sent"
+        if self.stop_reason is None:
+            self.stop_reason = reason
         if self._lease is not None:
             self._lease.revoke()
         record = self.journal.record(self.command_id)
@@ -290,17 +358,25 @@ class LocalMotionTrial:
             return "not_sent"
         if record["state"] in ("stopping", "stop_unconfirmed"):
             return self.stop_delivery or "unknown"
-        self.journal.transition(self.command_id, "stopping")
+        self.journal.transition(
+            self.command_id, "stopping", evidence=self._stop_evidence(),
+        )
         self.stop_monotonic_ns = now_monotonic_ns
         try:
             delivered = self.client.software_stop()
         except Exception:
             self.stop_delivery = "unknown"
-            self.journal.transition(self.command_id, "stop_unconfirmed", evidence="stop delivery unknown")
+            self.journal.transition(
+                self.command_id, "stop_unconfirmed",
+                evidence=self._stop_evidence("stop delivery unknown"),
+            )
             return self.stop_delivery
         self.stop_delivery = "sent" if delivered else "not_sent"
         if not delivered:
-            self.journal.transition(self.command_id, "stop_unconfirmed", evidence="vendor rejected stop")
+            self.journal.transition(
+                self.command_id, "stop_unconfirmed",
+                evidence=self._stop_evidence("vendor rejected stop"),
+            )
         return self.stop_delivery
 
     def request_authenticated_stop(
@@ -327,7 +403,10 @@ class LocalMotionTrial:
         if len(self._stop_requests) >= 1024:
             raise JournalError("stop idempotency ledger full")
         self._last_stop_request_ns = now_monotonic_ns
-        delivery = self.request_stop(now_monotonic_ns=now_monotonic_ns)
+        delivery = self.request_stop(
+            reason=f"authenticated software stop requested: {stop_command_id}",
+            now_monotonic_ns=now_monotonic_ns,
+        )
         bounded_delivery = delivery if delivery in ("sent", "not_sent", "unknown") else "unknown"
         self._stop_requests[stop_command_id] = bounded_delivery
         return SoftwareStopResult(
@@ -340,13 +419,19 @@ class LocalMotionTrial:
             raise JournalError("stop confirmation has no owned command")
         if (now_ns - self.stop_monotonic_ns) / 1_000_000 > self.timing.stop_confirmation_ms:
             if self.journal.record(self.command_id)["state"] == "stopping":
-                self.journal.transition(self.command_id, "stop_unconfirmed", evidence="stop confirmation deadline")
+                self.journal.transition(
+                    self.command_id, "stop_unconfirmed",
+                    evidence=self._stop_evidence("stop confirmation deadline"),
+                )
             return "stop_unconfirmed"
         if self.stop_delivery != "sent":
             return "stop_unconfirmed"
         if self.external_writer_detected:
             if self.journal.record(self.command_id)["state"] == "stopping":
-                self.journal.transition(self.command_id, "stop_unconfirmed", evidence="external waypoint ownership unknown")
+                self.journal.transition(
+                    self.command_id, "stop_unconfirmed",
+                    evidence=self._stop_evidence("external waypoint ownership unknown"),
+                )
             return "stop_unconfirmed"
         if (
             sample.moving is False
@@ -356,7 +441,10 @@ class LocalMotionTrial:
         else:
             self.stop_stable_count = 0
         if self.stop_stable_count >= 2:
-            self.journal.transition(self.command_id, "stopped", evidence="two fresh nonmoving READY samples")
+            self.journal.transition(
+                self.command_id, "stopped",
+                evidence=self._stop_evidence("two fresh nonmoving READY samples"),
+            )
             return "stopped"
         return "stopping"
 
@@ -372,15 +460,26 @@ class LocalMotionTrial:
             if self.stop_monotonic_ns is not None and (
                 now_monotonic_ns - self.stop_monotonic_ns
             ) / 1_000_000 > self.timing.stop_confirmation_ms and record["state"] == "stopping":
-                self.journal.transition(self.command_id, "stop_unconfirmed", evidence="no fresh stop confirmation")
+                self.journal.transition(
+                    self.command_id, "stop_unconfirmed",
+                    evidence=self._stop_evidence("no fresh stop confirmation"),
+                )
         elif (
             self.last_feedback_monotonic_ns is not None
             and (now_monotonic_ns - self.last_feedback_monotonic_ns) / 1_000_000 > self.approval.state_stale_ms
-        ) or (
+        ):
+            self.request_stop(
+                reason="feedback watchdog expired without a fresh sample",
+                now_monotonic_ns=now_monotonic_ns,
+            )
+        elif (
             self.sent_monotonic_ns is not None
             and (now_monotonic_ns - self.sent_monotonic_ns) / 1_000_000 > self.timing.motion_ms
         ):
-            self.request_stop(now_monotonic_ns=now_monotonic_ns)
+            self.request_stop(
+                reason="motion deadline expired without completion",
+                now_monotonic_ns=now_monotonic_ns,
+            )
         record = self.journal.record(self.command_id)
         return record["state"] if record else "unknown"
 

@@ -131,33 +131,76 @@ def _monitor_one_motion(
     from .commissioning_runtime import read_motion_feedback
 
     last_sequence = trial.last_sequence
+    reported_stop_reason: str | None = None
+    reported_feedback_debug: str | None = None
     while True:
         try:
             if not trial.lease_active and trial.stop_delivery is None:
-                delivered = trial.request_stop()
-                print(f"Local motion lease expired; stop delivery={delivered}")
+                delivered = trial.request_stop(reason="local motion lease expired")
+                print(
+                    f"Local motion lease expired; stop delivery={delivered}; "
+                    f"reason={trial.stop_reason}"
+                )
             record = sampler.snapshot()
             if record.sequence > last_sequence:
-                feedback = read_motion_feedback(config, client, sampler, session_id=session_id)
+                motion_feedback = read_motion_feedback(
+                    config, client, sampler, session_id=session_id,
+                )
+                feedback = motion_feedback.telemetry
                 last_sequence = feedback.sequence
-                outcome = trial.observe(feedback)
+                if motion_feedback.debug_text != reported_feedback_debug:
+                    reported_feedback_debug = motion_feedback.debug_text
+                    print(f"FEEDBACK SOURCES: {motion_feedback.debug_text}")
+                outcome = trial.observe(
+                    feedback, feedback_debug=motion_feedback.debug_text,
+                )
                 if outcome == "succeeded":
-                    print("MOTION SUCCEEDED: owned WayPoint ID, READY, InPos and stable actual pose")
+                    print("MOTION SUCCEEDED: READY, InPos and stable actual pose")
                     return 0
+                if outcome == "stopping" and trial.stop_reason != reported_stop_reason:
+                    reported_stop_reason = trial.stop_reason
+                    print(
+                        f"STOP REQUESTED: reason={trial.stop_reason}; "
+                        f"delivery={trial.stop_delivery}; "
+                        f"feedback={trial.last_feedback_debug}"
+                    )
                 if outcome in ("stopped", "stop_unconfirmed"):
-                    print(f"MOTION {outcome.upper()}: check robot physically before any new trial")
+                    print(
+                        f"MOTION {outcome.upper()}: reason={trial.stop_reason}; "
+                        f"feedback={trial.last_feedback_debug}; "
+                        "check robot physically before any new trial"
+                    )
                     return 2
             state = trial.watchdog()
+            if state == "stopping" and trial.stop_reason != reported_stop_reason:
+                reported_stop_reason = trial.stop_reason
+                print(
+                    f"STOP REQUESTED: reason={trial.stop_reason}; "
+                    f"delivery={trial.stop_delivery}; "
+                    f"feedback={trial.last_feedback_debug}"
+                )
             if state == "stop_unconfirmed":
-                print("STOP UNCONFIRMED: use the physical emergency-stop procedure if necessary")
+                print(
+                    f"STOP UNCONFIRMED: reason={trial.stop_reason}; "
+                    f"feedback={trial.last_feedback_debug}; "
+                    "use the physical emergency-stop procedure if necessary"
+                )
                 return 2
             time.sleep(0.01)
         except KeyboardInterrupt:
-            delivered = trial.request_stop()
-            print(f"Software stop delivery: {delivered}; waiting for actual stop feedback")
+            delivered = trial.request_stop(reason="operator interrupted commissioning")
+            print(
+                f"Software stop delivery: {delivered}; reason={trial.stop_reason}; "
+                "waiting for actual stop feedback"
+            )
         except Exception as exc:
-            delivered = trial.request_stop()
-            print(f"FEEDBACK FAULT: {type(exc).__name__}; stop delivery={delivered}")
+            delivered = trial.request_stop(
+                reason=f"feedback exception: {type(exc).__name__}: {exc}",
+            )
+            print(
+                f"FEEDBACK FAULT: {type(exc).__name__}: {exc}; "
+                f"stop delivery={delivered}; reason={trial.stop_reason}"
+            )
             print("Robot may keep moving, including after 10003 disconnect. Use physical emergency stop if needed.")
             return 2
 
@@ -170,13 +213,17 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
     test_id = validate_identifier(args.test_id)
     axis = _AXES[args.axis]
     caps = effective_first_motion_caps(config)
-    if caps["max_step_mm"] < 1.0 or caps["max_speed_mm_s"] < 2.0:
-        raise ValueError("configured cap cannot permit the fixed 1 mm / 2 mm/s trial")
+    command_speed = config.motion.speed_mm_s
+    if command_speed is None:
+        raise ValueError("motion.speed_mm_s is required")
+    if caps["max_step_mm"] < 1.0 or caps["max_speed_mm_s"] < command_speed:
+        raise ValueError("configured cap cannot permit the configured 1 mm trial")
     validate_probe_config(config)
     from .commissioning_runtime import (
         STATIONARY_OBSERVATION_S, LocalDataSheetSampler,
         make_approval, make_path_ik, observe_stationary,
-        read_local_observation, validate_final_observation,
+        read_local_observation, set_override_and_confirm,
+        validate_final_observation,
     )
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True,
@@ -184,14 +231,14 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
     print(json.dumps({
         "test_id": test_id, "commit": commit,
         "device_sn": config.controller.device_sn, "axis": args.axis,
-        "distance_mm": 1.0, "speed_mm_s": 2.0,
+        "distance_mm": 1.0, "speed_mm_s": command_speed,
         "acceleration_mm_s2": caps["max_acceleration_mm_s2"],
         "tcp": config.tool.tcp_name, "ucs": "Base", "rotation_deg": 0,
     }, ensure_ascii=False, indent=2))
     print("Gate D: bare flange, empty reachable area, no patient, physical E-stop tested today and reachable.")
     print("Confirm robot enabled/READY, known manual or Auto mode, no other page/pendant/script writer.")
     print("10003 disconnect DOES NOT stop the current WayPoint; GrpStop OK does not prove stopped.")
-    _require_phrase("Type GATE-D <test-id> to begin read-only observation: ", f"GATE-D {test_id}")
+    _require_phrase("Type gate-d: ", f"gate-d")
 
     # A persistent path ensures an unknown command blocks a later process.
     with CommandJournal(_journal_path()) as journal:
@@ -200,6 +247,11 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
         probe = probe_once(config, byte_order=args.byte_order, scope="private-read-only")
         record_path = _save_probe_result(probe)
         print(f"Fresh bare-flange read-only probe: {record_path}")
+        override = set_override_and_confirm(config, byte_order=args.byte_order)
+        effective_speed = command_speed * override.command_override
+        print(f"command_speed_mm_s={command_speed}")
+        print(f"controller_override={override.command_override}")
+        print(f"effective_speed_mm_s={effective_speed}")
         timeout_s = min(config.deadlines.response_ms, config.deadlines.stop_delivery_ms, 500) / 1000
         with LocalRealMotionClient(config, timeout_s=timeout_s) as client:
             session_id = secrets.token_hex(16)
@@ -221,7 +273,7 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
                     expected_tcp_name=config.tool.tcp_name, expected_ucs_name="Base",
                     payload=MoveRelativeRequest(
                         command_id=command_id, translation_mm=axis,
-                        frame=CoordinateFrame.ROBOT_BASE, speed_mm_s=2.0,
+                        frame=CoordinateFrame.ROBOT_BASE, speed_mm_s=command_speed,
                     ),
                     safety_limits=MotionSafetyLimits(
                         max_speed_mm_s=approval.max_speed_mm_s,
@@ -239,10 +291,12 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
                     "auto_mode": proposal.telemetry.auto_mode,
                     "reduced_mode": proposal.telemetry.reduced_mode,
                     "waypoint_before": proposal.readback.waypoint_id,
-                    "speed_mm_s": 2.0,
+                    "speed_mm_s": command_speed,
+                    "controller_override": override.command_override,
+                    "effective_speed_mm_s": effective_speed,
                     "acceleration_mm_s2": approval.max_acceleration_mm_s2,
                 }, ensure_ascii=False, indent=2))
-                _require_phrase("Type ARM <full proposal fingerprint>: ", f"ARM {digest}")
+                _require_phrase("Type arm: ", f"arm")
                 arm = LocalArm(
                     test_id=test_id, command_fingerprint=digest,
                     session_id=session_id, base_sequence=proposal.telemetry.sequence,
@@ -250,7 +304,7 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
                     expected_start=pose,
                     expires_monotonic_ns=time.monotonic_ns() + 30_000_000_000,
                 )
-                _require_phrase("Type SEND <full proposal fingerprint> within 30 s: ", f"SEND {digest}")
+                _require_phrase("Type send: ", f"send")
                 latest = read_local_observation(config, client, sampler, session_id=session_id)
                 lease = MotionLease("local", session_id, time.monotonic_ns() + 60_000_000_000)
                 timing = LocalMotionTiming(

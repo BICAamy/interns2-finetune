@@ -9,10 +9,12 @@ from __future__ import annotations
 import socket
 from threading import Lock
 
-from .adapter import read_waypoint_id
+from .adapter import read_override, read_waypoint_id
 from .command_codec import CommandFrameDecoder, decode_reply, encode_read
 from .models import ProtocolError, ReadCommand, ResponseUnknown
-from .motion_codec import LinearWaypoint, decode_write_reply, encode_software_stop
+from .motion_codec import (
+    LinearWaypoint, decode_write_reply, encode_software_stop, encode_speed_override,
+)
 
 
 class FakeMotionClient:
@@ -87,9 +89,18 @@ class FakeMotionClient:
     def software_stop(self) -> bool:
         return decode_write_reply(self._exchange(encode_software_stop()), command="GrpStop")
 
-    def current_waypoint_id(self) -> str:
+    def current_waypoint_id(self) -> str | None:
         frame = self._exchange(encode_read(ReadCommand.CURRENT_WAYPOINT_ID))
         return read_waypoint_id(decode_reply(frame, expected=ReadCommand.CURRENT_WAYPOINT_ID))
+
+    def current_override(self) -> float:
+        frame = self._exchange(encode_read(ReadCommand.OVERRIDE))
+        return read_override(decode_reply(frame, expected=ReadCommand.OVERRIDE))
+
+    def set_override(self, value: float) -> bool:
+        return decode_write_reply(
+            self._exchange(encode_speed_override(value)), command="SetOverride",
+        )
 
     def __enter__(self) -> "FakeMotionClient":
         self.connect()

@@ -54,7 +54,8 @@ DEFAULT_REPLIES: dict[ReadCommand, bytes] = {
         b"0,0,0,0,0,0,0,0,0,0,0,0,;"
     ),
     ReadCommand.EMERGENCY_INFO: b"ReadEmergencyInfo,OK,0,0,0,0,;",
-    ReadCommand.CURRENT_WAYPOINT_ID: b"ReadCurWayPointID,OK,FAKE_ONLY,;",
+    ReadCommand.CURRENT_WAYPOINT_ID: b"ReadCurWayPointID,OK,,;",
+    ReadCommand.OVERRIDE: b"ReadOverride,OK,1.0,;",
     ReadCommand.AXIS_ERROR_CODE: b"ReadAxisErrorCode,OK,0,0,0,0,0,0,0,;",
     ReadCommand.PAYLOAD: b"ReadPayload,OK,1.500000,12.000000,25.000000,39.000000,;",
     ReadCommand.JOINT_MAX_VELOCITY: b"ReadJointMaxVel,OK,150,150,160,170,180,180,;",
@@ -83,6 +84,7 @@ class FakeHuayanController:
         byte_order: str = "little",
         initial_enabled: bool = True,
         initial_moving: bool = False,
+        initial_override: float = 1.0,
         apply_group_state_changes: bool = True,
     ) -> None:
         if data_interval_s <= 0:
@@ -100,10 +102,11 @@ class FakeHuayanController:
         for command, actions in (motion_actions or {}).items():
             self._motion_actions[command].extend(actions)
         self.accept_fake_motion = accept_fake_motion
-        self._current_waypoint_id = "FAKE_ONLY"
+        self._current_waypoint_id = ""
         self._state_lock = threading.Lock()
         self._enabled = initial_enabled
         self._moving = initial_moving
+        self._override = initial_override
         self._apply_group_state_changes = apply_group_state_changes
         # Keep test diagnostics bounded during long-running gateway soak tests.
         self.received_commands: list[bytes] = []
@@ -238,7 +241,9 @@ class FakeHuayanController:
                 else:
                     connection.sendall(b"FakeOnlyIdentity,OK,INTERN-S2-FAKE-MOTION-V1,;")
                 continue
-            if name in ("WayPoint", "GrpStop", "GrpEnable", "GrpDisable") and self.accept_fake_motion and not fast:
+            if name in (
+                "WayPoint", "GrpStop", "GrpEnable", "GrpDisable", "SetOverride",
+            ) and self.accept_fake_motion and not fast:
                 if name == "WayPoint":
                     valid = (
                         len(fields) == 25 and fields[1] == b"0"
@@ -260,6 +265,16 @@ class FakeHuayanController:
                         self._current_waypoint_id = fields[24].decode("ascii", errors="replace")
                 elif name == "GrpStop":
                     valid = fields == [b"GrpStop", b"0"]
+                elif name == "SetOverride":
+                    try:
+                        requested_override = float(fields[2])
+                        valid = (
+                            len(fields) == 3 and fields[1] == b"0"
+                            and math.isfinite(requested_override)
+                            and 0.01 <= requested_override <= 1.0
+                        )
+                    except (IndexError, ValueError):
+                        valid = False
                 else:
                     valid = fields == [name.encode("ascii"), b"0"]
                 if not valid:
@@ -283,6 +298,8 @@ class FakeHuayanController:
                             self._enabled = True
                         elif name == "GrpDisable":
                             self._enabled = False
+                        elif name == "SetOverride":
+                            self._override = requested_override
                 if pipelined:
                     return
                 continue
@@ -322,6 +339,10 @@ class FakeHuayanController:
                         f"{int(moving)},{int(enabled)},0,0,0,{int(moving)},0,0,0,1,1,"
                         f"{int(not moving)},{int(not moving)},;"
                     ).encode("ascii")
+                elif command == ReadCommand.OVERRIDE and self.accept_fake_motion:
+                    with self._state_lock:
+                        override = self._override
+                    reply = f"ReadOverride,OK,{override},;".encode("ascii")
                 else:
                     reply = (
                         f"ReadFastCmdPort,OK,{self.fast_port},;".encode("ascii")
@@ -358,7 +379,8 @@ class FakeHuayanController:
             document = datasheet_document()
             if self.accept_fake_motion:
                 with self._state_lock:
-                    enabled, moving = self._enabled, self._moving
+                    enabled, moving, override = self._enabled, self._moving, self._override
+                document["PosAndVel"]["Actual_Override"] = str(override)
                 state = document["StateAndError"]
                 state["robotEnabled"] = int(enabled)
                 state["robotMoving"] = int(moving)

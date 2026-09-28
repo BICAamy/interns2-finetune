@@ -18,20 +18,21 @@ def test_gate_d_stationary_observation_defaults_to_five_seconds():
     assert inspect.signature(runtime.observe_stationary).parameters["duration_s"].default == 5.0
 
 
-def test_motion_feedback_combines_conservative_motion_state(monkeypatch):
+def test_motion_feedback_preserves_raw_sources_and_combines_conservatively(monkeypatch):
     state = SimpleNamespace(
         has_error=False, error_code=0, enabled=False,
         in_position=False, moving=True,
     )
     axes = SimpleNamespace(group_error_code=0, joint_error_codes=(0,) * 6)
     sample = SimpleNamespace(
-        enabled=True, in_position=True, moving=False,
+        enabled=True, in_position=True, moving=False, fsm_code=33, override=1.0,
     )
     sampler = SimpleNamespace(snapshot=lambda: SimpleNamespace(sample=sample), watchdog=object())
     client = SimpleNamespace(request=lambda *_a: None, package_version="test-version")
     config = SimpleNamespace(
         controller=SimpleNamespace(device_sn="test-sn", model="E05_Pro"),
         deadlines=SimpleNamespace(state_stale_ms=250),
+        motion=SimpleNamespace(controller_override=1.0),
     )
     base = RobotTelemetry.model_construct(state_age_ms=0, potentially_moving=False)
     monkeypatch.setattr(runtime, "read_robot_state", lambda _reply: state)
@@ -39,11 +40,15 @@ def test_motion_feedback_combines_conservative_motion_state(monkeypatch):
     monkeypatch.setattr(runtime, "read_axis_error_code", lambda _reply: axes)
     monkeypatch.setattr(runtime, "telemetry_from_sample", lambda *_a, **_kw: base)
 
-    feedback = runtime.read_motion_feedback(config, client, sampler, session_id="test-session")
-    assert feedback.enabled is False
-    assert feedback.in_position is False
-    assert feedback.moving is True
-    assert feedback.potentially_moving is True
+    result = runtime.read_motion_feedback(config, client, sampler, session_id="test-session")
+    assert result.moving_10003 is True
+    assert result.moving_10004 is False
+    assert result.fsm_10004 == 33
+    assert result.debug_text == "moving_10003=True, moving_10004=False, fsm_10004=33"
+    assert result.telemetry.enabled is False
+    assert result.telemetry.in_position is False
+    assert result.telemetry.moving is True
+    assert result.telemetry.potentially_moving is True
 
 
 def test_stationary_observation_rejects_joint_motion_even_with_fixed_tcp():
@@ -54,6 +59,7 @@ def test_stationary_observation_rejects_joint_motion_even_with_fixed_tcp():
             auto_mode=False, reduced_mode=False, moving=False, fsm_code=33,
             enabled=True, in_position=True,
             free_drive_mode=False, force_control_state=0, paused=False,
+            override=1.0,
         )
 
     samples = iter((sample(0.0), sample(0.2)))

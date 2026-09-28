@@ -6,7 +6,8 @@ import struct
 import pytest
 
 from edge_gateway.huayan.adapter import (
-    read_current_fsm, read_identity_text, read_robot_state, read_waypoint_id,
+    read_current_fsm, read_identity_text, read_override, read_robot_state,
+    read_waypoint_id,
 )
 from edge_gateway.huayan.command_client import CommandClient
 from edge_gateway.huayan.datasheet_client import DatasheetClient
@@ -26,12 +27,14 @@ def test_fake_supports_ordinary_and_discovered_fast_read_port() -> None:
             assert ordinary.discover_fast_port() == fake.fast_port
             assert read_identity_text(ordinary.request(ReadCommand.ROBOT_MODEL)) == "E05-Pro"
             assert read_robot_state(ordinary.request(ReadCommand.ROBOT_STATE)).in_position
+            assert read_override(ordinary.request(ReadCommand.OVERRIDE)) == 1.0
             with CommandClient("127.0.0.1", fake.fast_port, fast_port=True) as fast:
                 assert read_current_fsm(fast.request(ReadCommand.CURRENT_FSM)) == 33
                 with pytest.raises(ValueError, match="not documented"):
                     fast.request(ReadCommand.EMERGENCY_INFO)
         assert fake.received_commands == [
-            b"ReadFastCmdPort,;", b"ReadRobotModel,;", b"ReadRobotState,0,;", b"ReadCurFSM,0,;"
+            b"ReadFastCmdPort,;", b"ReadRobotModel,;", b"ReadRobotState,0,;",
+            b"ReadOverride,0,;", b"ReadCurFSM,0,;"
         ]
 
 
@@ -196,3 +199,10 @@ def test_fake_reports_external_waypoint_id_without_claiming_ownership() -> None:
         with CommandClient("127.0.0.1", fake.command_port) as client:
             reported = read_waypoint_id(client.request(ReadCommand.CURRENT_WAYPOINT_ID))
             assert reported == "EXTERNAL_WRITER"
+
+
+def test_fake_reports_no_current_waypoint_as_empty_id() -> None:
+    with FakeHuayanController() as fake:
+        with CommandClient("127.0.0.1", fake.command_port) as client:
+            reported = read_waypoint_id(client.request(ReadCommand.CURRENT_WAYPOINT_ID))
+            assert reported is None

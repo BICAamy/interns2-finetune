@@ -47,10 +47,14 @@ limits:
   max_rotation_deg: 720
   max_absolute_displacement_mm: 1000
 
+motion:
+  speed_mm_s: 2.0 # WayPoint直线运动速度
+  controller_override: 1.0 # 控制器速度倍率，1.0就是100%
+
 deadlines:
   state_stale_ms: 250 # 50 ms 一帧，连续约 5 帧未收到即标为过期；只读阶段暂用
   response_ms: 3000 # 发送 10003 请求后，控制器回复最多允许等 3000ms
-  startup_ms: 5000 # WayPoint 已接受，但 5000 ms内机械臂始终没有真正开始运动 → 异常 → 请求停止
+  startup_ms: 5000 # WayPoint 已接受后，最多用5000ms等待机械臂真正开始运动
   motion_ms: 120000 # 一次运动最多等 120000ms
   stop_delivery_ms: 500 # 发出 GrpStop 后，最多允许500ms确认这个 TCP 请求有没有成功送到/得到协议回复。
   stop_ack_ms: 3000 # 发出停止请求之后，最多等3000ms确认机器人实际上已经停住。

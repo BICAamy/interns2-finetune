@@ -35,6 +35,7 @@ def config(*, speed: float = 5.0, step: float = 1.0) -> RealRobotConfig:
             "max_step_mm": step, "max_rotation_deg": 1,
             "max_absolute_displacement_mm": 1,
         },
+        "motion": {"speed_mm_s": 2.0, "controller_override": 1.0},
         "deadlines": {
             "state_stale_ms": 250, "response_ms": 3000, "startup_ms": 5000,
             "motion_ms": 120000, "stop_delivery_ms": 500, "stop_ack_ms": 3000,
@@ -103,7 +104,6 @@ def test_preflight_refuses_without_local_control(monkeypatch):
     with pytest.raises(SystemExit):
         cli.main([
             "--config", "ignored.yaml", "--preflight-read-only", "--byte-order", "little",
-            "--vendor-compatibility-confirmed", "--operator-ready",
         ])
 
 
@@ -121,7 +121,7 @@ def test_preflight_denies_remote_terminal_before_network(monkeypatch):
         PermissionError("SSH is not local")))
     assert cli.main([
         "--config", "ignored.yaml", "--control", "local-only", "--preflight-read-only",
-        "--byte-order", "little", "--vendor-compatibility-confirmed", "--operator-ready",
+        "--byte-order", "little",
     ]) == 2
 
 
@@ -138,7 +138,7 @@ def test_preflight_uses_fixed_read_only_probe_and_never_arms(monkeypatch, capsys
     monkeypatch.setattr(cli, "_save_probe_result", lambda _result: Path("read-only-summary.json"))
     assert cli.main([
         "--config", "ignored.yaml", "--control", "local-only", "--preflight-read-only",
-        "--byte-order", "little", "--vendor-compatibility-confirmed", "--operator-ready",
+        "--byte-order", "little",
     ]) == 0
     report = json.loads(capsys.readouterr().out)
     assert called == [("little", "private-read-only")]
@@ -155,7 +155,7 @@ def test_execute_denies_remote_terminal_before_network(monkeypatch):
         PermissionError("SSH is not local")))
     assert cli.main([
         "--config", "ignored.yaml", "--control", "local-only", "--execute-relative",
-        "--byte-order", "little", "--vendor-compatibility-confirmed", "--operator-ready",
+        "--byte-order", "little",
         "--axis=+X", "--test-id", "trial-1",
     ]) == 2
 
@@ -172,7 +172,6 @@ def test_enable_disable_routes_only_through_explicit_local_cli_action(monkeypatc
     assert cli.main([
         "--config", "ignored.yaml", "--control", "local-only",
         "--set-enabled", "false", "--byte-order", "little",
-        "--vendor-compatibility-confirmed", "--operator-ready",
     ]) == 0
     assert calls == [(config(), "false", "local-only")]
 
@@ -185,7 +184,6 @@ def test_enable_disable_denies_remote_terminal_before_network(monkeypatch):
     assert cli.main([
         "--config", "ignored.yaml", "--control", "local-only",
         "--set-enabled", "true", "--byte-order", "little",
-        "--vendor-compatibility-confirmed", "--operator-ready",
     ]) == 2
 
 

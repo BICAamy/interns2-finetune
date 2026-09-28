@@ -16,14 +16,14 @@ from robot_runtime.real_config import RealRobotConfig
 
 from .adapter import (
     read_controller_started, read_identity_text, read_is_simulation,
-    read_waypoint_id,
+    read_override, read_waypoint_id,
 )
 from .command_client import _private_controller_host
 from .command_codec import CommandFrameDecoder, decode_reply, encode_read
 from .models import CommandReply, ProtocolError, ReadCommand, ResponseUnknown
 from .motion_codec import (
     LinearWaypoint, decode_write_reply, encode_group_enabled,
-    encode_software_stop,
+    encode_software_stop, encode_speed_override,
 )
 
 
@@ -144,8 +144,26 @@ class LocalRealMotionClient:
         except ResponseUnknown as exc:
             raise ResponseUnknown(f"{command.value} read failed: {exc}") from exc
 
-    def current_waypoint_id(self) -> str:
+    def current_waypoint_id(self) -> str | None:
         return read_waypoint_id(self.request(ReadCommand.CURRENT_WAYPOINT_ID))
+
+    def current_override(self) -> float:
+        return read_override(self.request(ReadCommand.OVERRIDE))
+
+    def set_override(
+        self, value: float, *, stationary_confirmed: bool = False,
+    ) -> bool:
+        """Set one controller-wide speed ratio after dual-channel stationary proof."""
+        if not self._identified or self._write_command is not None:
+            raise RuntimeError("SetOverride requires an identified, single-use local session")
+        if not stationary_confirmed:
+            raise PermissionError("SetOverride requires prior dual-channel stationary confirmation")
+        encoded = encode_speed_override(value)
+        self._write_command = "SetOverride"
+        try:
+            return decode_write_reply(self._exchange(encoded), command="SetOverride")
+        except ResponseUnknown as exc:
+            raise ResponseUnknown(f"SetOverride outcome unknown: {exc}") from exc
 
     def waypoint(self, waypoint: LinearWaypoint) -> bool:
         if not self._identified or self._write_command is not None:

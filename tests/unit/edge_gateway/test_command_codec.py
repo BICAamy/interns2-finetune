@@ -13,6 +13,7 @@ from edge_gateway.huayan.models import ProtocolError, ReadCommand
 
 def test_documented_read_commands_are_exact_and_allowlisted() -> None:
     assert encode_read(ReadCommand.ROBOT_STATE) == b"ReadRobotState,0,;"
+    assert encode_read(ReadCommand.OVERRIDE) == b"ReadOverride,0,;"
     assert encode_read(ReadCommand.PACKAGE_VERSION) == b"PackageVersion,;"
     assert encode_read(ReadCommand.ROBOT_STATE, robot_id=5) == b"ReadRobotState,5,;"
     with pytest.raises(TypeError):
@@ -70,6 +71,15 @@ def test_failure_preserves_vendor_code_and_comma_in_explanation() -> None:
         b"ReadCurFSM,Fail,20018,forbidden;", expected=ReadCommand.CURRENT_FSM
     )
     assert noncanonical.protocol_deviation
+
+
+def test_empty_current_waypoint_id_is_the_only_allowed_empty_success_value() -> None:
+    response = decode_reply(
+        b"ReadCurWayPointID,OK,,;", expected=ReadCommand.CURRENT_WAYPOINT_ID,
+    )
+    assert response.values == ("",)
+    with pytest.raises(ProtocolError, match="empty success field"):
+        decode_reply(b"ReadCurFSM,OK,,;", expected=ReadCommand.CURRENT_FSM)
 
 
 @pytest.mark.parametrize("frame", [

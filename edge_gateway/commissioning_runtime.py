@@ -22,7 +22,7 @@ from .cloud_transport import telemetry_from_sample
 from .huayan.adapter import (
     fixed_xyz_quaternion, read_actual_position, read_axis_error_code, read_base_installing_angle,
     read_coordinate_value, read_current_fsm, read_emergency_info,
-    read_payload, read_robot_state,
+    read_override, read_payload, read_robot_state,
 )
 from .huayan.datasheet_client import DatasheetClient
 from .huayan.models import DatasheetSample, ReadCommand
@@ -44,6 +44,24 @@ class LocalObservation:
 
 
 @dataclass(frozen=True)
+class MotionFeedback:
+    """Merged motion telemetry plus the raw channel values used to build it."""
+
+    telemetry: RobotTelemetry
+    moving_10003: bool
+    moving_10004: bool
+    fsm_10004: int
+
+    @property
+    def debug_text(self) -> str:
+        return (
+            f"moving_10003={self.moving_10003}, "
+            f"moving_10004={self.moving_10004}, "
+            f"fsm_10004={self.fsm_10004}"
+        )
+
+
+@dataclass(frozen=True)
 class EnablementConfirmation:
     """Post-write agreement from a fresh 10003 read and a newer 10004 frame."""
 
@@ -53,6 +71,22 @@ class EnablementConfirmation:
     command_moving: bool
     datasheet_moving: bool
     datasheet_sequence: int
+
+
+@dataclass(frozen=True)
+class OverrideConfirmation:
+    """Serial 10003 then 10004 proof of the configured controller ratio."""
+
+    requested_override: float
+    initial_command_override: float
+    command_override: float
+    datasheet_override: float
+    write_sent: bool
+    datasheet_sequence: int
+
+
+def _same_override(actual: float, expected: float) -> bool:
+    return math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-6)
 
 
 class LocalDataSheetSampler:
@@ -222,6 +256,83 @@ def set_enabled_and_confirm(
     )
 
 
+def set_override_and_confirm(
+    config: RealRobotConfig, *, byte_order: str,
+) -> OverrideConfirmation:
+    """Set the configured ratio only while stationary, then verify sequentially.
+
+    The 10004 pre-check is closed before 10003 is opened. After the optional
+    SetOverride and mandatory ReadOverride finish, 10003 is closed before a
+    new 10004 connection confirms a newer Actual_Override sample.
+    """
+    expected = config.motion.controller_override
+    if expected is None:
+        raise ValueError("motion.controller_override is required")
+    timeout_ms = config.deadlines.startup_ms
+    response_ms = config.deadlines.response_ms
+    if timeout_ms is None or response_ms is None:
+        raise ValueError("startup_ms and response_ms are required for override confirmation")
+
+    with LocalDataSheetSampler(config, byte_order=byte_order) as sampler:
+        before_record = sampler.snapshot()
+    before = before_record.sample
+    if (
+        before.moving or before.fsm_code != 33 or not before.enabled
+        or not before.in_position or before.paused
+        or before.free_drive_mode or before.force_control_state
+    ):
+        raise PermissionError("SetOverride requires stationary READY 10004 feedback")
+
+    with LocalRealMotionClient(config, timeout_s=response_ms / 1000) as client:
+        state = read_robot_state(client.request(ReadCommand.ROBOT_STATE))
+        fsm = read_current_fsm(client.request(ReadCommand.CURRENT_FSM))
+        if (
+            state.moving or not state.enabled or not state.in_position or state.paused
+            or state.has_error or state.error_code or fsm != 33
+        ):
+            raise PermissionError("SetOverride requires stationary READY 10003 feedback")
+        initial = client.current_override()
+        write_sent = not _same_override(initial, expected)
+        if write_sent and not client.set_override(expected, stationary_confirmed=True):
+            raise RuntimeError("controller rejected SetOverride")
+        command_override = client.current_override()
+        if not _same_override(command_override, expected):
+            raise RuntimeError(
+                "10003 ReadOverride disagrees after SetOverride: "
+                f"expected={expected}, actual={command_override}"
+            )
+
+    deadline_ns = time.monotonic_ns() + timeout_ms * 1_000_000
+    with LocalDataSheetSampler(config, byte_order=byte_order) as sampler:
+        last_record = sampler.snapshot()
+        while time.monotonic_ns() < deadline_ns:
+            last_record = sampler.snapshot()
+            sample = last_record.sample
+            if (
+                sample.moving or sample.fsm_code != 33 or not sample.enabled
+                or not sample.in_position or sample.paused
+                or sample.free_drive_mode or sample.force_control_state
+            ):
+                raise RuntimeError("robot changed state while confirming 10004 override")
+            if (
+                sample.received_monotonic_ns > before.received_monotonic_ns
+                and _same_override(sample.override, expected)
+            ):
+                return OverrideConfirmation(
+                    requested_override=expected,
+                    initial_command_override=initial,
+                    command_override=command_override,
+                    datasheet_override=sample.override,
+                    write_sent=write_sent,
+                    datasheet_sequence=last_record.sequence,
+                )
+            time.sleep(0.02)
+    raise TimeoutError(
+        "10004 Actual_Override confirmation timed out: "
+        f"expected={expected}, actual={last_record.sample.override}"
+    )
+
+
 def read_local_observation(
     config: RealRobotConfig, client: LocalRealMotionClient,
     sampler: LocalDataSheetSampler, *, session_id: str,
@@ -241,6 +352,7 @@ def read_local_observation(
     current_ucs = read_coordinate_value(client.request(ReadCommand.CURRENT_UCS))
     named_ucs = read_coordinate_value(client.request(ReadCommand.UCS_BY_NAME, name="Base"))
     waypoint_id = client.current_waypoint_id()
+    command_override = read_override(client.request(ReadCommand.OVERRIDE))
     record = sampler.snapshot()
     sample = record.sample
     if client.package_version is None:
@@ -249,6 +361,12 @@ def read_local_observation(
         raise ValueError("10003 and 10004 joints disagree")
     if fsm != sample.fsm_code or state.moving != sample.moving:
         raise ValueError("10003 and 10004 motion state disagree")
+    if (
+        config.motion.controller_override is None
+        or not _same_override(command_override, config.motion.controller_override)
+        or not _same_override(sample.override, config.motion.controller_override)
+    ):
+        raise ValueError("10003/10004 speed override disagrees with config")
     zero6 = (0.0,) * 6
     zero3 = (0.0,) * 3
     if (
@@ -280,6 +398,7 @@ def read_local_observation(
         axis_error_codes=axes.joint_error_codes,
         active_program=state.moving or fsm != 33,
         waypoint_id=waypoint_id,
+        controller_override=command_override,
     )
     return LocalObservation(telemetry, readback, sample)
 
@@ -287,7 +406,7 @@ def read_local_observation(
 def read_motion_feedback(
     config: RealRobotConfig, client: LocalRealMotionClient,
     sampler: LocalDataSheetSampler, *, session_id: str,
-) -> RobotTelemetry:
+) -> MotionFeedback:
     """Use actual 10004 motion flags, plus fresh 10003 safety-circuit reads."""
     state = read_robot_state(client.request(ReadCommand.ROBOT_STATE))
     emergency = read_emergency_info(client.request(ReadCommand.EMERGENCY_INFO))
@@ -296,6 +415,11 @@ def read_motion_feedback(
         raise ValueError("controller/axis error during local motion")
     record = sampler.snapshot()
     sample = record.sample
+    if (
+        config.motion.controller_override is None
+        or not _same_override(sample.override, config.motion.controller_override)
+    ):
+        raise ValueError("10004 speed override changed during local motion")
     if client.package_version is None:
         raise RuntimeError("commissioning command socket disconnected")
     base_telemetry = telemetry_from_sample(
@@ -314,7 +438,12 @@ def read_motion_feedback(
     })
     if telemetry.state_age_ms is None or telemetry.state_age_ms > config.deadlines.state_stale_ms:
         raise ValueError("DataSheet became stale during motion feedback")
-    return telemetry
+    return MotionFeedback(
+        telemetry=telemetry,
+        moving_10003=state.moving,
+        moving_10004=sample.moving,
+        fsm_10004=sample.fsm_code,
+    )
 
 
 def observe_stationary(
@@ -340,6 +469,7 @@ def observe_stationary(
             sample.moving or sample.fsm_code != 33 or not sample.enabled
             or not sample.in_position or sample.paused
             or sample.free_drive_mode or sample.force_control_state
+            or not _same_override(sample.override, initial.override)
             or (sample.auto_mode, sample.reduced_mode) != mode
             or math.dist(sample.base_pose[:3], start_pose) > 0.25
             or max(abs(a - b) for a, b in zip(sample.joint_positions_deg, start_joints)) > 0.1
@@ -375,6 +505,7 @@ def make_approval(config: RealRobotConfig, *, package_version: str) -> MotionApp
         max_start_drift_mm=0.25, max_start_rotation_deg=0.5,
         state_stale_ms=config.deadlines.state_stale_ms,
         ready_fsm_code=33,
+        controller_override=config.motion.controller_override,
     )
 
 

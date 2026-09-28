@@ -5,7 +5,8 @@ import sys
 import pytest
 
 from edge_gateway.huayan.identity_discovery import (
-    discover_datasheet_identity, discover_identity, inspect_datasheet_header, main,
+    DiscoveredIdentity, discover_datasheet_identity, discover_identity,
+    inspect_datasheet_header, main,
 )
 from tests.fakes.huayan_controller import FakeHuayanController
 
@@ -39,11 +40,11 @@ def test_datasheet_header_and_sn_can_be_read_without_prefilled_config() -> None:
         assert fake.received_commands == []
 
 
-def test_discovery_cli_dry_run_and_missing_operator_gate_open_no_socket(
+def test_discovery_cli_dry_run_and_live_action_need_no_dummy_confirmation_flag(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     def forbidden_socket(*_args, **_kwargs):
-        raise AssertionError("discovery must not connect without operator confirmation")
+        raise AssertionError("dry discovery must not connect")
 
     monkeypatch.setattr("socket.create_connection", forbidden_socket)
     monkeypatch.setattr(sys, "argv", [
@@ -54,10 +55,16 @@ def test_discovery_cli_dry_run_and_missing_operator_gate_open_no_socket(
         "PackageVersion,;", "ReadRobotModel,;", "IsSimulation,;",
         "ReadControllerState,;", "No network connection was opened",
     ]
+    monkeypatch.setattr(
+        "edge_gateway.huayan.identity_discovery.discover_identity",
+        lambda *_args, **_kwargs: DiscoveredIdentity(
+            "6.3.6.20240305", "E05-Pro", False, True,
+        ),
+    )
     monkeypatch.setattr(sys, "argv", [
         "discover", "--host", "192.168.0.10", "--discover-real-identity",
     ])
-    with pytest.raises(SystemExit, match="2"):
-        main()
+    assert main() == 0
+    assert '"robot_model": "E05-Pro"' in capsys.readouterr().out
     with pytest.raises(ValueError, match="10003"):
         discover_identity("192.168.0.10", 10004, scope="private-read-only")

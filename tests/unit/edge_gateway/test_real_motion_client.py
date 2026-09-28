@@ -74,6 +74,7 @@ def test_real_writer_is_single_use_and_stop_requires_owned_attempt(monkeypatch):
         with LocalRealMotionClient(real_shaped_config(), timeout_s=0.1) as client:
             with pytest.raises(PermissionError):
                 client.software_stop()
+            assert client.current_waypoint_id() is None
             assert client.waypoint(waypoint()) is True
             assert client.current_waypoint_id() == "LOCAL_1"
             assert client.software_stop() is True
@@ -150,6 +151,45 @@ def test_real_writer_never_retries_unknown_group_state_write(monkeypatch):
             with pytest.raises(RuntimeError, match="single-use"):
                 client.set_enabled(True)
         assert fake.received_commands.count(b"GrpEnable,0,;") == 1
+
+
+def test_real_writer_sets_one_exact_override_and_reads_it_back(monkeypatch):
+    with FakeHuayanController(
+        accept_fake_motion=True, initial_override=0.01,
+    ) as fake:
+        redirect_controller(monkeypatch, fake)
+        with LocalRealMotionClient(real_shaped_config(), timeout_s=0.1) as client:
+            assert client.current_override() == 0.01
+            assert client.set_override(1.0, stationary_confirmed=True) is True
+            assert client.current_override() == 1.0
+            with pytest.raises(RuntimeError, match="single-use"):
+                client.set_override(0.5, stationary_confirmed=True)
+            with pytest.raises(RuntimeError, match="single-use"):
+                client.waypoint(waypoint())
+        assert fake.received_commands.count(b"SetOverride,0,1,;") == 1
+
+
+def test_real_writer_refuses_override_without_stationary_confirmation(monkeypatch):
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        redirect_controller(monkeypatch, fake)
+        with LocalRealMotionClient(real_shaped_config(), timeout_s=0.1) as client:
+            with pytest.raises(PermissionError, match="stationary confirmation"):
+                client.set_override(1.0)
+        assert not any(frame.startswith(b"SetOverride,") for frame in fake.received_commands)
+
+
+def test_real_writer_never_retries_unknown_override_write(monkeypatch):
+    with FakeHuayanController(
+        accept_fake_motion=True,
+        motion_actions={"SetOverride": [CommandAction(None)]},
+    ) as fake:
+        redirect_controller(monkeypatch, fake)
+        with LocalRealMotionClient(real_shaped_config(), timeout_s=0.1) as client:
+            with pytest.raises(ResponseUnknown, match="SetOverride outcome unknown"):
+                client.set_override(1.0, stationary_confirmed=True)
+            with pytest.raises(RuntimeError, match="single-use"):
+                client.set_override(1.0, stationary_confirmed=True)
+        assert fake.received_commands.count(b"SetOverride,0,1,;") == 1
 
 
 def test_real_writer_refuses_disable_without_stationary_confirmation(monkeypatch):

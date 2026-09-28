@@ -171,15 +171,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report-every-s", type=float, default=10.0)
     parser.add_argument("--byte-order", choices=("little", "big"), required=True)
     parser.add_argument("--connect-real-read-only", action="store_true")
-    parser.add_argument("--vendor-compatibility-confirmed", action="store_true")
-    parser.add_argument("--operator-ready", action="store_true")
     args = parser.parse_args(argv)
-    if not (
-        args.connect_real_read_only
-        and args.vendor_compatibility_confirmed
-        and args.operator_ready
-    ):
-        parser.error("live monitoring requires read-only, vendor and operator confirmation")
+    if not args.connect_real_read_only:
+        parser.error("live monitoring requires --connect-real-read-only")
     config = load_real_config(args.real_config)
     validate_probe_config(config)
     try:

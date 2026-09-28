@@ -52,7 +52,7 @@ def test_repeated_source_stamp_is_reported_but_backwards_stamp_fails() -> None:
         stats.observe(1100, 1_150_000_000)
 
 
-def test_real_monitor_requires_port_10004_and_operator_flags_before_network(
+def test_real_monitor_requires_port_10004_and_explicit_read_only_flag_before_network(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def forbidden_socket(*_args, **_kwargs):

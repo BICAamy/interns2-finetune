@@ -227,12 +227,21 @@ def read_controller_started(reply: CommandReply) -> bool:
     return _flag(_values(reply, ReadCommand.CONTROLLER_STATE)[0], "controller started")
 
 
-def read_waypoint_id(reply: CommandReply) -> str:
+def read_waypoint_id(reply: CommandReply) -> str | None:
     value = _values(reply, ReadCommand.CURRENT_WAYPOINT_ID)[0]
+    if value == "":
+        return None
     try:
         return validate_identifier(value)
     except ValueError as exc:
         raise ProtocolError("invalid current WayPoint ID") from exc
+
+
+def read_override(reply: CommandReply) -> float:
+    value = _float(_values(reply, ReadCommand.OVERRIDE)[0], "speed override")
+    if not 0.01 <= value <= 1.0:
+        raise ProtocolError("speed override must be within 0.01..1")
+    return value
 
 
 def read_identity_text(reply: CommandReply) -> str:

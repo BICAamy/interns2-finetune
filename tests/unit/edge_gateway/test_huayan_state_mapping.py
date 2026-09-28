@@ -9,6 +9,7 @@ from edge_gateway.huayan.adapter import (
     read_fast_port,
     read_is_simulation,
     read_controller_started,
+    read_override,
     read_robot_state,
     read_waypoint_id,
 )
@@ -76,3 +77,13 @@ def test_fsm_and_fast_port_are_typed() -> None:
     assert read_waypoint_id(decode_reply(
         b"ReadCurWayPointID,OK,FAKE_ONLY,;", expected=ReadCommand.CURRENT_WAYPOINT_ID
     )) == "FAKE_ONLY"
+    assert read_waypoint_id(decode_reply(
+        b"ReadCurWayPointID,OK,,;", expected=ReadCommand.CURRENT_WAYPOINT_ID
+    )) is None
+    assert read_override(decode_reply(
+        b"ReadOverride,OK,0.6,;", expected=ReadCommand.OVERRIDE,
+    )) == 0.6
+    with pytest.raises(ProtocolError, match="0.01..1"):
+        read_override(decode_reply(
+            b"ReadOverride,OK,0.001,;", expected=ReadCommand.OVERRIDE,
+        ))

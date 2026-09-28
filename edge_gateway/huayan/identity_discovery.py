@@ -118,7 +118,6 @@ def main() -> int:
     action.add_argument("--discover-real-identity", action="store_true", help="connect and issue four read requests")
     action.add_argument("--inspect-datasheet-header", action="store_true", help="read only the first 12 header bytes")
     action.add_argument("--discover-datasheet-identity", action="store_true", help="read one DataSheet frame")
-    parser.add_argument("--operator-ready", action="store_true", help="robot stationary and local safety checks completed")
     parser.add_argument("--byte-order", choices=("little", "big"), help="required for one-frame DataSheet parsing")
     args = parser.parse_args()
     host = _private_controller_host(args.host)
@@ -127,8 +126,6 @@ def main() -> int:
             print(encode_read(command).decode("ascii"))
         print("No network connection was opened")
         return 0
-    if not args.operator_ready:
-        parser.error("live identity discovery requires --operator-ready")
     if args.discover_real_identity:
         identity = discover_identity(host, scope="private-read-only")
         print(json.dumps(asdict(identity), ensure_ascii=False, indent=2))

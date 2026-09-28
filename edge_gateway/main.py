@@ -269,8 +269,6 @@ def main() -> None:
     parser.add_argument("--real-config", type=Path)
     parser.add_argument("--probe-summary", type=Path)
     parser.add_argument("--connect-real-read-only", action="store_true")
-    parser.add_argument("--vendor-compatibility-confirmed", action="store_true")
-    parser.add_argument("--operator-ready", action="store_true")
     parser.add_argument("--server-url", required=True)
     parser.add_argument("--secret-file", type=Path, required=True)
     parser.add_argument("--gateway-id", required=True)
@@ -280,8 +278,8 @@ def main() -> None:
     if args.real_config is not None:
         if args.fake_command_port is not None or args.fake_datasheet_port is not None:
             parser.error("real mode cannot accept fake controller ports")
-        if not args.connect_real_read_only or not args.vendor_compatibility_confirmed or not args.operator_ready:
-            parser.error("real gateway requires explicit read-only, vendor and operator confirmation")
+        if not args.connect_real_read_only:
+            parser.error("real gateway requires --connect-real-read-only")
         from robot_runtime.real_config import load_real_config
 
         from .huayan.real_probe import validate_probe_config, validate_probe_summary
@@ -306,8 +304,8 @@ def main() -> None:
             stale_ms=real.deadlines.state_stale_ms,
         )
     else:
-        if args.connect_real_read_only or args.vendor_compatibility_confirmed or args.operator_ready or args.probe_summary:
-            parser.error("real confirmation flags require --real-config")
+        if args.connect_real_read_only or args.probe_summary:
+            parser.error("real-only options require --real-config")
         if args.fake_command_port is None or args.fake_datasheet_port is None:
             parser.error("fake mode requires both fake ports")
         config = EdgeConfig(

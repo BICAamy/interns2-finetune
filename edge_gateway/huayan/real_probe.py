@@ -1,7 +1,7 @@
 """One-shot, fail-closed read-only probe for Step 6 commissioning.
 
 Importing this module and ``--check-config`` never open a controller socket.
-The live CLI requires explicit operator and vendor-compatibility flags.
+The live CLI requires the explicit ``--connect-real-read-only`` action.
 """
 
 from __future__ import annotations

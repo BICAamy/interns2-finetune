@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import socket
 import threading
 import time
@@ -14,7 +15,9 @@ from edge_gateway.fake_motion import FakeMotionTiming, FakeMotionTrial
 from edge_gateway.huayan.fake_motion_client import FakeMotionClient
 from edge_gateway.huayan.real_motion_client import LocalRealMotionClient
 from edge_gateway.huayan.datasheet_client import DatasheetClient
-from edge_gateway.huayan.motion_codec import LinearWaypoint, encode_software_stop
+from edge_gateway.huayan.motion_codec import (
+    LinearWaypoint, encode_software_stop, encode_speed_override,
+)
 from edge_gateway.preflight import (
     FakeControllerReadback, FakeExternalWriterGuard, FakeMotionApproval, LocalArm, MotionLease,
     fingerprint, safety_state_hash,
@@ -78,7 +81,7 @@ def approval() -> FakeMotionApproval:
         workspace_low_mm=(0, 0, 0), workspace_high_mm=(500, 500, 500),
         max_speed_mm_s=5, max_acceleration_mm_s2=10, max_step_mm=2,
         max_start_drift_mm=0.25, max_start_rotation_deg=0.5,
-        state_stale_ms=250, ready_fsm_code=33,
+        state_stale_ms=250, ready_fsm_code=33, controller_override=1.0,
     )
 
 
@@ -89,7 +92,7 @@ def readback() -> FakeControllerReadback:
         payload_kg=0, center_of_gravity_mm=(0, 0, 0),
         base_installing_angle_deg=(0, 0), group_error_code=0,
         axis_error_codes=(0, 0, 0, 0, 0, 0), active_program=False,
-        waypoint_id="FAKE_ONLY",
+        waypoint_id="FAKE_ONLY", controller_override=1.0,
     )
 
 
@@ -227,6 +230,9 @@ def test_waypoint_frame_is_move_l_without_blend_seek_or_joint_target() -> None:
     assert fields[18:24] == ["0", "1", "0", "0", "0", "0"]
     assert fields[24] == "F123"
     assert encode_software_stop() == b"GrpStop,0,;"
+    assert encode_speed_override(0.5) == b"SetOverride,0,0.5,;"
+    with pytest.raises(ValueError, match="0.01..1"):
+        encode_speed_override(0.001)
 
 
 def test_ok_is_only_accepted_then_feedback_confirms_success(tmp_path) -> None:
@@ -251,6 +257,157 @@ def test_ok_is_only_accepted_then_feedback_confirms_success(tmp_path) -> None:
                 assert recovered.unresolved() == ()
         finally:
             client.close()
+
+
+def test_empty_waypoint_id_is_tolerated_before_motion_until_own_id_appears(tmp_path) -> None:
+    with FakeHuayanController(
+        accept_fake_motion=True,
+        command_actions={ReadCommand.CURRENT_WAYPOINT_ID: [
+            CommandAction((b"ReadCurWayPointID,OK,,;",)),
+        ]},
+    ) as fake:
+        client, journal, trial = make_trial(fake, tmp_path)
+        try:
+            command = envelope()
+            assert trial.submit(command, telemetry(), readback(), arm(command), lease(),
+                                now_ms=BASE_MS, now_monotonic_ns=BASE_NS) == "accepted"
+            assert trial.observe(
+                telemetry(sequence=11), now_monotonic_ns=BASE_NS + 10_000_000,
+            ) == "accepted"
+            assert not trial.ownership_confirmed
+            assert trial.stop_reason is None
+            assert fake.received_commands.count(b"GrpStop,0,;") == 0
+
+            assert trial.observe(
+                telemetry(sequence=12, moving=True, fsm=25, in_position=False),
+                now_monotonic_ns=BASE_NS + 20_000_000,
+            ) == "executing"
+            assert trial.ownership_confirmed
+            assert fake.received_commands.count(b"GrpStop,0,;") == 0
+        finally:
+            client.close()
+            journal.close()
+
+
+def test_moving_with_empty_waypoint_id_does_not_block_execution(tmp_path) -> None:
+    with FakeHuayanController(
+        accept_fake_motion=True,
+        command_actions={ReadCommand.CURRENT_WAYPOINT_ID: [
+            CommandAction((b"ReadCurWayPointID,OK,,;",)),
+            CommandAction((b"ReadCurWayPointID,OK,,;",)),
+        ]},
+    ) as fake:
+        client, journal, trial = make_trial(fake, tmp_path)
+        try:
+            command = envelope()
+            trial.submit(command, telemetry(), readback(), arm(command), lease(),
+                         now_ms=BASE_MS, now_monotonic_ns=BASE_NS)
+            assert trial.observe(
+                telemetry(sequence=11, moving=True, fsm=25, in_position=False),
+                now_monotonic_ns=BASE_NS + 10_000_000,
+            ) == "executing"
+            assert trial.moving_seen
+            assert not trial.ownership_confirmed
+            assert trial.stop_reason is None
+            assert fake.received_commands.count(b"GrpStop,0,;") == 0
+            assert trial.observe(
+                telemetry(sequence=12, moving=True, fsm=25, in_position=False),
+                now_monotonic_ns=BASE_NS + 20_000_000,
+            ) == "executing"
+            assert not trial.ownership_confirmed
+            assert fake.received_commands.count(b"GrpStop,0,;") == 0
+        finally:
+            client.close()
+            journal.close()
+
+
+def test_moving_with_empty_id_does_not_stop_after_startup_deadline(tmp_path) -> None:
+    with FakeHuayanController(
+        accept_fake_motion=True,
+        command_actions={ReadCommand.CURRENT_WAYPOINT_ID: [
+            CommandAction((b"ReadCurWayPointID,OK,,;",)),
+            CommandAction((b"ReadCurWayPointID,OK,,;",)),
+        ]},
+    ) as fake:
+        client, journal, trial = make_trial(fake, tmp_path)
+        try:
+            command = envelope()
+            trial.submit(command, telemetry(), readback(), arm(command), lease(),
+                         now_ms=BASE_MS, now_monotonic_ns=BASE_NS)
+            moving = telemetry(sequence=11, moving=True, fsm=25, in_position=False)
+            assert trial.observe(
+                moving, now_monotonic_ns=BASE_NS + 10_000_000,
+            ) == "executing"
+            assert trial.observe(
+                moving.model_copy(update={"sequence": 12}),
+                feedback_debug="moving_10003=True, moving_10004=True, fsm_10004=25",
+                now_monotonic_ns=BASE_NS + 160_000_000,
+            ) == "executing"
+            assert trial.stop_reason is None
+            assert fake.received_commands.count(b"GrpStop,0,;") == 0
+        finally:
+            client.close()
+            journal.close()
+
+
+def test_waypoint_id_may_disappear_after_confirmation(tmp_path) -> None:
+    owned_id = "F" + hashlib.sha256(b"move-1").hexdigest()[:16]
+    with FakeHuayanController(
+        accept_fake_motion=True,
+        command_actions={ReadCommand.CURRENT_WAYPOINT_ID: [
+            CommandAction((f"ReadCurWayPointID,OK,{owned_id},;".encode(),)),
+            CommandAction((b"ReadCurWayPointID,OK,,;",)),
+        ]},
+    ) as fake:
+        client, journal, trial = make_trial(fake, tmp_path)
+        try:
+            command = envelope()
+            trial.submit(command, telemetry(), readback(), arm(command), lease(),
+                         now_ms=BASE_MS, now_monotonic_ns=BASE_NS)
+            assert trial.observe(
+                telemetry(sequence=11), now_monotonic_ns=BASE_NS + 10_000_000,
+            ) == "accepted"
+            assert trial.ownership_confirmed
+            assert trial.observe(
+                telemetry(sequence=12, moving=True, fsm=25, in_position=False),
+                now_monotonic_ns=BASE_NS + 20_000_000,
+            ) == "executing"
+            assert trial.stop_reason is None
+            assert fake.received_commands.count(b"GrpStop,0,;") == 0
+        finally:
+            client.close()
+            journal.close()
+
+
+def test_motion_completes_when_controller_never_reports_waypoint_id(tmp_path) -> None:
+    empty = CommandAction((b"ReadCurWayPointID,OK,,;",))
+    with FakeHuayanController(
+        accept_fake_motion=True,
+        command_actions={ReadCommand.CURRENT_WAYPOINT_ID: [empty, empty, empty]},
+    ) as fake:
+        client, journal, trial = make_trial(fake, tmp_path)
+        try:
+            command = envelope()
+            trial.submit(command, telemetry(), readback(), arm(command), lease(),
+                         now_ms=BASE_MS, now_monotonic_ns=BASE_NS)
+            assert trial.observe(
+                telemetry(sequence=11, moving=True, fsm=25, in_position=False),
+                now_monotonic_ns=BASE_NS + 10_000_000,
+            ) == "executing"
+            assert trial.observe(
+                telemetry(sequence=12, x=101),
+                now_monotonic_ns=BASE_NS + 20_000_000,
+            ) == "executing"
+            assert trial.observe(
+                telemetry(sequence=13, x=101),
+                now_monotonic_ns=BASE_NS + 45_000_000,
+            ) == "succeeded"
+            assert not trial.ownership_confirmed
+            assert journal.record("move-1")["evidence"] == "READY, InPos, stable pose"
+            assert fake.received_commands.count(b"GrpStop,0,;") == 0
+        finally:
+            client.close()
+            journal.close()
 
 
 def test_waypoint_fail_is_not_proof_of_no_motion_and_requests_stop(tmp_path) -> None:
@@ -350,6 +507,8 @@ def test_start_timeout_requests_only_ordinary_stop_and_waits_for_feedback(tmp_pa
             assert trial.observe(telemetry(sequence=11),
                                  now_monotonic_ns=BASE_NS + 160_000_000) == "stopping"
             assert journal.record("move-1")["state"] == "stopping"
+            assert trial.stop_reason == "startup deadline expired without motion start"
+            assert journal.record("move-1")["evidence"] == trial.stop_reason
             assert trial.observe(telemetry(sequence=12),
                                  now_monotonic_ns=BASE_NS + 170_000_000) == "stopping"
             assert trial.observe(telemetry(sequence=13),
@@ -373,6 +532,8 @@ def test_external_waypoint_revokes_motion_and_stop_is_not_estop(tmp_path) -> Non
                          now_ms=BASE_MS, now_monotonic_ns=BASE_NS)
             assert trial.observe(telemetry(sequence=11, moving=True, fsm=25, in_position=False),
                                  now_monotonic_ns=BASE_NS + 10_000_000) == "stopping"
+            assert trial.stop_reason == "unexpected WayPoint ID: EXTERNAL_WRITER"
+            assert journal.record("move-1")["evidence"] == trial.stop_reason
             assert fake.received_commands[-1] == b"GrpStop,0,;"
             assert journal.unresolved() == ("move-1",)
             assert trial.observe(telemetry(sequence=12),
@@ -397,6 +558,21 @@ def test_unowned_changes_revoke_local_arm(snapshot, waypoint, expected) -> None:
         noise_threshold_mm=0.1,
     )
     assert guard.observe(snapshot, waypoint_id=waypoint) == expected
+    assert local_arm.used
+
+
+def test_empty_waypoint_baseline_is_valid_and_detects_new_external_id() -> None:
+    command = envelope()
+    local_arm = arm(command)
+    guard = FakeExternalWriterGuard(
+        arm=local_arm, baseline=telemetry(), baseline_waypoint_id=None,
+        noise_threshold_mm=0.1,
+    )
+    assert guard.observe(telemetry(sequence=11), waypoint_id=None) is None
+    assert not local_arm.used
+    assert guard.observe(
+        telemetry(sequence=12), waypoint_id="EXTERNAL_WRITER",
+    ) == "external_waypoint"
     assert local_arm.used
 
 
@@ -755,7 +931,7 @@ def test_watchdog_without_feedback_requests_stop_and_latches_unconfirmed(tmp_pat
             client.close()
 
 
-def test_contradictory_moving_and_ready_feedback_requests_stop(tmp_path) -> None:
+def test_moving_true_with_ready_fsm_stays_potentially_moving_until_strict_arrival(tmp_path) -> None:
     with FakeHuayanController(accept_fake_motion=True) as fake:
         client, journal, trial = make_trial(fake, tmp_path)
         try:
@@ -764,8 +940,17 @@ def test_contradictory_moving_and_ready_feedback_requests_stop(tmp_path) -> None
                          now_ms=BASE_MS, now_monotonic_ns=BASE_NS)
             contradictory = telemetry(sequence=11, moving=True, fsm=33)
             assert trial.observe(contradictory,
-                                 now_monotonic_ns=BASE_NS + 10_000_000) == "stopping"
-            assert fake.received_commands.count(b"GrpStop,0,;") == 1
-            assert journal.unresolved() == ("move-1",)
+                                 now_monotonic_ns=BASE_NS + 10_000_000) == "executing"
+            assert trial.potentially_moving
+            assert fake.received_commands.count(b"GrpStop,0,;") == 0
+            arrived = telemetry(sequence=12, x=101, moving=False, fsm=33, in_position=True)
+            assert trial.observe(
+                arrived, now_monotonic_ns=BASE_NS + 20_000_000,
+            ) == "executing"
+            assert trial.observe(
+                arrived.model_copy(update={"sequence": 13}),
+                now_monotonic_ns=BASE_NS + 45_000_000,
+            ) == "succeeded"
+            assert journal.unresolved() == ()
         finally:
             client.close()

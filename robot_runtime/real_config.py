@@ -114,6 +114,13 @@ class MotionLimits(_StrictModel):
         return value
 
 
+class MotionCommandConfig(_StrictModel):
+    """Values deliberately sent by the Mac-local motion command."""
+
+    speed_mm_s: float | None = Field(default=None, gt=0)
+    controller_override: float | None = Field(default=None, ge=0.01, le=1.0)
+
+
 class Deadlines(_StrictModel):
     state_stale_ms: int | None = Field(default=None, gt=0)
     response_ms: int | None = Field(default=None, gt=0)
@@ -140,6 +147,7 @@ class RealRobotConfig(_StrictModel):
     base_to_sofa: RigidTransform = Field(default_factory=RigidTransform)
     tool: ToolConfig = Field(default_factory=ToolConfig)
     limits: MotionLimits = Field(default_factory=MotionLimits)
+    motion: MotionCommandConfig = Field(default_factory=MotionCommandConfig)
     deadlines: Deadlines = Field(default_factory=Deadlines)
     arrival: ArrivalCriteria = Field(default_factory=ArrivalCriteria)
 
@@ -157,7 +165,8 @@ class RealRobotConfig(_StrictModel):
             "limits.workspace_low_mm", "limits.workspace_high_mm",
             "limits.max_speed_mm_s", "limits.max_acceleration_mm_s2",
             "limits.max_step_mm", "limits.max_rotation_deg",
-            "limits.max_absolute_displacement_mm", "deadlines.state_stale_ms",
+            "limits.max_absolute_displacement_mm", "motion.speed_mm_s",
+            "motion.controller_override", "deadlines.state_stale_ms",
             "deadlines.response_ms", "deadlines.startup_ms",
             "deadlines.motion_ms", "deadlines.stop_delivery_ms",
             "deadlines.stop_ack_ms", "arrival.position_tolerance_mm",

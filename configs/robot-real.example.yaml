@@ -40,6 +40,10 @@ limits:
   max_rotation_deg: null # 一次最多转多少deg
   max_absolute_displacement_mm: null # 离参考位置最多多远，单位：mm
 
+motion:
+  speed_mm_s: null # WayPoint直线运动速度，单位：mm/秒
+  controller_override: null # 控制器速度倍率，范围0.01到1.0
+
 deadlines: # 各环节最多等多久；超时不算成功
   state_stale_ms: null # 状态数据多久没更新就算过期，单位：ms
   response_ms: null # 等控制器回复的最长时间，单位：ms
