@@ -164,13 +164,12 @@ def telemetry_from_sample(
 
 
 class CloudTransport:
-    def __init__(self, url: str, *, secret: bytes, gateway_id: str, config_sha256: str) -> None:
+    def __init__(self, url: str, *, secret: bytes, gateway_id: str) -> None:
         self.url = validate_cloud_url(url)
         if len(secret) < 32:
             raise ValueError("gateway secret is too short")
         self.secret = secret
         self.gateway_id = gateway_id
-        self.config_sha256 = config_sha256
         self.session_id: str | None = None
         self._connection = None
         self._message_sequence = 0
@@ -195,7 +194,6 @@ class CloudTransport:
                 device_sn=device_sn,
                 robot_model=robot_model,
                 package_version=package_version,
-                safety_config_sha256=self.config_sha256,
                 control_mode=GatewayControlMode.OBSERVE_ONLY,
             )
             hello = GatewayHello(

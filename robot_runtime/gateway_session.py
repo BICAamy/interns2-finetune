@@ -37,7 +37,6 @@ class GatewaySessionManager:
         device_sn: str,
         robot_model: str,
         package_versions: tuple[str, ...],
-        config_sha256: str,
         stale_ms: int = 250,
         gateway_timeout_ms: int = 1500,
         transit_budget_ms: int = 100,
@@ -47,8 +46,6 @@ class GatewaySessionManager:
             raise ValueError("gateway secret must be at least 32 bytes")
         if not gateway_id or not device_sn or not robot_model or not package_versions:
             raise ValueError("gateway identity must be complete")
-        if len(config_sha256) != 64 or any(char not in "0123456789abcdef" for char in config_sha256):
-            raise ValueError("invalid real config digest")
         if stale_ms <= 0 or gateway_timeout_ms <= stale_ms or transit_budget_ms < 0:
             raise ValueError("invalid gateway deadlines")
         self._secret = secret
@@ -56,7 +53,6 @@ class GatewaySessionManager:
         self.device_sn = device_sn
         self.robot_model = robot_model
         self.package_versions = frozenset(package_versions)
-        self.config_sha256 = config_sha256
         self.stale_ms = stale_ms
         self.gateway_timeout_ms = gateway_timeout_ms
         self.transit_budget_ms = transit_budget_ms
@@ -107,7 +103,6 @@ class GatewaySessionManager:
             or identity.device_sn != self.device_sn
             or identity.robot_model != self.robot_model
             or identity.package_version not in self.package_versions
-            or identity.safety_config_sha256 != self.config_sha256
         ):
             raise GatewaySessionError("gateway identity does not match real config")
         session_id = identity.gateway_session_id

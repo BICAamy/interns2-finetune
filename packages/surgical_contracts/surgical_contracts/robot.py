@@ -47,7 +47,7 @@ class LinkState(str, Enum):
 class SourceFreshness(str, Enum):
     UNKNOWN = "unknown"
     FRESH = "fresh"
-    STALE = "stale"
+    STALE = "stale" # 数据过期/sequence 倒退/telemetry 数据不完整
     DISCONNECTED = "disconnected"
 
 

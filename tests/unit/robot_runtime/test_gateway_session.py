@@ -16,7 +16,6 @@ from surgical_contracts import (
 from tests.fakes.huayan_controller import datasheet_document, datasheet_frame
 
 SECRET = b"step5-test-only-shared-secret-32-bytes!!"
-DIGEST = "a" * 64
 DEVICE_SN = "FAKE-E05-001"
 MODEL = "E05-Pro"
 VERSION = "6.3.6.20240305"
@@ -29,7 +28,6 @@ def manager(clock: list[int]) -> GatewaySessionManager:
         device_sn=DEVICE_SN,
         robot_model=MODEL,
         package_versions=(VERSION,),
-        config_sha256=DIGEST,
         stale_ms=250,
         gateway_timeout_ms=1000,
         transit_budget_ms=10,
@@ -39,14 +37,12 @@ def manager(clock: list[int]) -> GatewaySessionManager:
 
 def hello(
     challenge: str, *, session_id: str | None = None, secret: bytes = SECRET,
-    config_sha256: str = DIGEST,
 ) -> GatewayHello:
     handshake = GatewayHandshake(
         gateway_session_id=session_id or secrets.token_hex(16),
         device_sn=DEVICE_SN,
         robot_model=MODEL,
         package_version=VERSION,
-        safety_config_sha256=config_sha256,
     )
     return GatewayHello(
         gateway_id="mac-edge-test",

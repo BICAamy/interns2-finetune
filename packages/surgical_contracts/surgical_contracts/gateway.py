@@ -33,7 +33,6 @@ class GatewayHandshake(ContractModel):
     device_sn: str = Field(min_length=1, max_length=128)
     robot_model: str = Field(min_length=1, max_length=128)
     package_version: str = Field(min_length=1, max_length=128)
-    safety_config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     control_mode: GatewayControlMode = GatewayControlMode.OBSERVE_ONLY
 
 

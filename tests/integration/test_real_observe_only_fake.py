@@ -43,7 +43,6 @@ def test_fake_controller_to_mac_gateway_to_runtime_is_read_only(tmp_path: Path) 
         device_sn="FAKE-E05-001",
         robot_model="E05-Pro",
         package_versions=("6.3.6.20240305",),
-        config_sha256="a" * 64,
         stale_ms=350,
         transit_budget_ms=20,
     )
@@ -74,7 +73,6 @@ def test_fake_controller_to_mac_gateway_to_runtime_is_read_only(tmp_path: Path) 
                 server_url=f"ws://127.0.0.1:{server_port}/v1/gateway/connect",
                 secret_file=secret_file,
                 gateway_id="mac-edge-test",
-                config_sha256="a" * 64,
                 datasheet_byte_order="little",
                 audit_path=tmp_path / "edge-audit.log",
                 stale_ms=350,
@@ -145,7 +143,6 @@ def test_fake_controller_to_mac_gateway_to_runtime_is_read_only(tmp_path: Path) 
                 server_url=config.server_url,
                 secret_file=secret_file,
                 gateway_id=config.gateway_id,
-                config_sha256=config.config_sha256,
                 datasheet_byte_order="little",
                 audit_path=tmp_path / "real-mode-fake-audit.log",
                 stale_ms=350,

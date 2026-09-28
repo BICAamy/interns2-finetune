@@ -64,19 +64,14 @@ def movement(**changes: object) -> RobotCommandEnvelope:
 
 
 class GatewayContractTests(unittest.TestCase):
-    def test_handshake_defaults_to_observe_only_and_hash_is_strict(self) -> None:
+    def test_handshake_defaults_to_observe_only_and_schema_is_strict(self) -> None:
         handshake = GatewayHandshake(
             gateway_session_id="session-1",
             device_sn="robot-1",
             robot_model="E05-Pro",
             package_version="6.5",
-            safety_config_sha256="a" * 64,
         )
         self.assertEqual(handshake.control_mode.value, "observe-only")
-        with self.assertRaises(ValidationError):
-            GatewayHandshake.model_validate(
-                {**handshake.model_dump(), "safety_config_sha256": "bad"}
-            )
         with self.assertRaises(ValidationError):
             GatewayHandshake.model_validate(
                 {**handshake.model_dump(), "schema_version": "2.0"}

@@ -11,7 +11,6 @@ from starlette.websockets import WebSocketDisconnect
 from robot_runtime.api import create_app
 from robot_runtime.main import app_from_environment
 from robot_runtime.providers.huayan_real import HuayanRealStubProvider
-from robot_runtime.real_config import load_real_config
 from tests.unit.robot_runtime.test_gateway_session import SECRET, hello, manager, state_frame
 
 
@@ -77,14 +76,12 @@ def test_real_process_environment_loads_authenticated_observe_only_session(
     config_data["deadlines"]["state_stale_ms"] = 350
     config_path = tmp_path / "robot-real-fake.yaml"
     config_path.write_text(yaml.safe_dump(config_data), encoding="utf-8")
-    digest = load_real_config(config_path).digest()
     secret_path = tmp_path / "gateway-auth.local"
     secret_path.write_bytes(SECRET)
     os.chmod(secret_path, 0o600)
     monkeypatch.setenv("ROBOT_MODE", "real")
     monkeypatch.setenv("RUNTIME_MODE", "real")
     monkeypatch.setenv("REAL_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("REAL_CONFIG_SHA256", digest)
     monkeypatch.setenv("ROBOT_CONTROL_MODE", "observe-only")
     monkeypatch.setenv("GATEWAY_AUTH_SECRET_FILE", str(secret_path))
     monkeypatch.setenv("GATEWAY_EXPECTED_ID", "mac-edge-test")
@@ -95,7 +92,7 @@ def test_real_process_environment_loads_authenticated_observe_only_session(
         assert health["ready_for_motion"] is False
         with client.websocket_connect("/v1/gateway/connect") as ws:
             challenge = ws.receive_json()["challenge"]
-            greeting = hello(challenge, config_sha256=digest)
+            greeting = hello(challenge)
             ws.send_json(greeting.model_dump(mode="json"))
             assert ws.receive_json()["gateway_session_id"] == greeting.handshake.gateway_session_id
             assert client.get("/health").json()["control_mode"] == "observe-only"

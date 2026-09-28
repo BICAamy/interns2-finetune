@@ -295,8 +295,8 @@ def read_local_observation(
             "READY preflight requires all brakes held and matching 10003/10004 feedback"
         )
     readback = ControllerReadback(
-        config_sha256=config.digest(), tcp_name=config.tool.tcp_name,
-        ucs_name="Base", tcp_xyzrpy=named_tcp, ucs_xyzrpy=named_ucs,
+        tcp_name=config.tool.tcp_name, ucs_name="Base",
+        tcp_xyzrpy=named_tcp, ucs_xyzrpy=named_ucs,
         payload_kg=payload.mass_kg,
         center_of_gravity_mm=payload.center_of_gravity_mm,
         base_installing_angle_deg=mounting,
@@ -389,8 +389,7 @@ def make_approval(config: RealRobotConfig, *, package_version: str) -> MotionApp
         device_sn=config.controller.device_sn,
         robot_model=config.controller.model,
         package_version=package_version,
-        config_sha256=config.digest(), tcp_name=config.tool.tcp_name,
-        ucs_name="Base", tcp_xyzrpy=(0.0,) * 6,
+        tcp_name=config.tool.tcp_name, ucs_name="Base", tcp_xyzrpy=(0.0,) * 6,
         ucs_xyzrpy=(0.0,) * 6, payload_kg=0.0,
         center_of_gravity_mm=(0.0,) * 3,
         base_installing_angle_deg=config.tool.mount_angle_deg,

@@ -29,7 +29,6 @@ class MotionApproval:
     device_sn: str
     robot_model: str
     package_version: str
-    config_sha256: str
     tcp_name: str
     ucs_name: Literal["Base"]
     tcp_xyzrpy: tuple[float, float, float, float, float, float]
@@ -50,8 +49,6 @@ class MotionApproval:
     ready_fsm_code: int
 
     def __post_init__(self) -> None:
-        if len(self.config_sha256) != 64 or any(c not in "0123456789abcdef" for c in self.config_sha256):
-            raise ValueError("invalid motion config digest")
         if not self.device_sn or not self.robot_model or not self.package_version or not self.tcp_name:
             raise ValueError("incomplete local motion identity")
         if len(self.joint_soft_limits_deg) != 6:
@@ -80,7 +77,6 @@ class MotionApproval:
 
 @dataclass(frozen=True)
 class ControllerReadback:
-    config_sha256: str
     tcp_name: str
     ucs_name: str
     tcp_xyzrpy: tuple[float, float, float, float, float, float]
@@ -245,8 +241,6 @@ def preflight_relative(
         raise ValueError("another command is already active")
     if readback.tcp_name != approval.tcp_name or readback.ucs_name != approval.ucs_name:
         raise ValueError("TCP/UCS name changed")
-    if readback.config_sha256 != approval.config_sha256:
-        raise ValueError("loaded safety configuration changed")
     if any(_distance(a, b) > 1e-6 for a, b in (
         (readback.tcp_xyzrpy, approval.tcp_xyzrpy),
         (readback.ucs_xyzrpy, approval.ucs_xyzrpy),

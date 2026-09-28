@@ -21,9 +21,10 @@ attachment invalidates this profile and requires a new calibration.
 ## Step 3 real-mode configuration
 
 `robot-real.example.yaml` is a deliberately incomplete, observe-only template.
-Copy it to `configs/robot-real.local.yaml` on the deployment host, then fill in
-only values that have actually been checked on site. The local file is ignored
-by Git. Do not put passwords, private keys or gateway tokens in YAML.
+`robot-real.local.yaml` is the checked-in configuration for the project's only
+real robot. Update it only with values checked on site and commit the change so
+the Mac and server can use the same Git revision. Do not put passwords, private
+keys or gateway tokens in YAML; `configs/gateway-auth.local` remains ignored.
 
 From the new server's `app/` directory, validate without starting any service:
 
@@ -32,11 +33,12 @@ From the new server's `app/` directory, validate without starting any service:
   --real-config configs/robot-real.local.yaml --check-config
 ```
 
-The output reports a canonical SHA-256 and the number of missing motion-gating
+The output reports the selected control mode and number of missing motion-gating
 fields. In Step 3, **even a complete configuration or `--real-control enabled`
 cannot enable motion**: the provider is disconnected and observe-only. The
-server and Mac will compare the canonical configuration digest during the later
-gateway handshake; this command does not contact either device.
+server and Mac obtain this configuration through Git; runtime commands no longer
+accept or compare a separately copied checksum. This command does
+not contact either device.
 
 The no-tool profile validates zero flange-to-TCP translation/rotation, zero
 payload/center of gravity, a confirmed TCP name, and the two measured base

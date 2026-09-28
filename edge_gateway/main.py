@@ -44,7 +44,6 @@ class EdgeGateway:
             config.server_url,
             secret=self.secret,
             gateway_id=config.gateway_id,
-            config_sha256=config.config_sha256,
         )
         self.robot_model: str | None = None
         self.package_version: str | None = None
@@ -275,7 +274,6 @@ def main() -> None:
     parser.add_argument("--server-url", required=True)
     parser.add_argument("--secret-file", type=Path, required=True)
     parser.add_argument("--gateway-id", required=True)
-    parser.add_argument("--config-sha256")
     parser.add_argument("--datasheet-byte-order", choices=("little", "big"), required=True)
     parser.add_argument("--audit-path", type=Path, default=Path("logs/edge_gateway.log"))
     args = parser.parse_args()
@@ -293,9 +291,6 @@ def main() -> None:
         if args.probe_summary is None:
             parser.error("real gateway requires a recent successful --probe-summary")
         validate_probe_summary(args.probe_summary, real, byte_order=args.datasheet_byte_order)
-        digest = real.digest()
-        if args.config_sha256 is not None and args.config_sha256 != digest:
-            parser.error("supplied config digest does not match the real config")
         config = RealEdgeConfig(
             controller_host=real.controller.host,
             command_port=real.controller.command_port,
@@ -306,7 +301,6 @@ def main() -> None:
             server_url=args.server_url,
             secret_file=args.secret_file,
             gateway_id=args.gateway_id,
-            config_sha256=digest,
             datasheet_byte_order=args.datasheet_byte_order,
             audit_path=args.audit_path,
             stale_ms=real.deadlines.state_stale_ms,
@@ -314,15 +308,14 @@ def main() -> None:
     else:
         if args.connect_real_read_only or args.vendor_compatibility_confirmed or args.operator_ready or args.probe_summary:
             parser.error("real confirmation flags require --real-config")
-        if args.fake_command_port is None or args.fake_datasheet_port is None or args.config_sha256 is None:
-            parser.error("fake mode requires both fake ports and --config-sha256")
+        if args.fake_command_port is None or args.fake_datasheet_port is None:
+            parser.error("fake mode requires both fake ports")
         config = EdgeConfig(
             fake_command_port=args.fake_command_port,
             fake_datasheet_port=args.fake_datasheet_port,
             server_url=args.server_url,
             secret_file=args.secret_file,
             gateway_id=args.gateway_id,
-            config_sha256=args.config_sha256,
             datasheet_byte_order=args.datasheet_byte_order,
             audit_path=args.audit_path,
         )

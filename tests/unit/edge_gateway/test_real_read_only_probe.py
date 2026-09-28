@@ -102,7 +102,7 @@ def test_real_gateway_requires_private_host_and_confirmed_identity(tmp_path) -> 
         approved_package_versions=("6.3.6.20240305",),
         server_url="ws://127.0.0.1:18001/v1/gateway/connect",
         secret_file=tmp_path / "secret", gateway_id="mac-edge",
-        config_sha256="a" * 64, datasheet_byte_order="little",
+        datasheet_byte_order="little",
         audit_path=tmp_path / "audit.log", stale_ms=250,
     )
     assert RealEdgeConfig(controller_host="192.168.0.10", **common).controller_host == "192.168.0.10"
@@ -122,7 +122,7 @@ def test_real_gateway_checks_approved_version_before_other_queries(tmp_path) -> 
             datasheet_port=10004, expected_device_sn="FAKE-E05-001",
             expected_robot_model="E05-Pro", approved_package_versions=("not-the-fake-version",),
             server_url="ws://127.0.0.1:18001/v1/gateway/connect",
-            secret_file=secret, gateway_id="mac-edge", config_sha256="a" * 64,
+            secret_file=secret, gateway_id="mac-edge",
             datasheet_byte_order="little", audit_path=tmp_path / "audit.log", stale_ms=250,
         )
         gateway = EdgeGateway(config)
@@ -150,7 +150,7 @@ def test_real_gateway_accepts_repeated_stamps_but_faults_on_source_stall(
             datasheet_port=10004, expected_device_sn="FAKE-E05-001",
             expected_robot_model="E05-Pro", approved_package_versions=("6.3.6.20240305",),
             server_url="ws://127.0.0.1:18001/v1/gateway/connect",
-            secret_file=secret, gateway_id="mac-edge", config_sha256="a" * 64,
+            secret_file=secret, gateway_id="mac-edge",
             datasheet_byte_order="little", audit_path=tmp_path / "audit.log", stale_ms=250,
         )
         gateway = EdgeGateway(config)

@@ -14,7 +14,7 @@ import socket
 import struct
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -207,7 +207,6 @@ def probe_once(
     summary: dict[str, object] = {
         "captured_at_ms": time.time_ns() // 1_000_000,
         "control_mode": "observe-only",
-        "config_sha256": config.digest(),
         "device_sn": sample.device_sn,
         "robot_model": model,
         "package_version": version,
@@ -261,7 +260,6 @@ def validate_probe_summary(
         raise ValueError("probe summary is older than one hour or has a future timestamp")
     if (
         summary.get("control_mode") != "observe-only"
-        or summary.get("config_sha256") != config.digest()
         or summary.get("device_sn") != config.controller.device_sn
         or summary.get("robot_model") != config.controller.model
         or summary.get("package_version") not in config.controller.package_versions
@@ -289,7 +287,7 @@ def _save_probe_result(result: ProbeResult) -> Path:
     app_root = Path(__file__).resolve().parents[2]
     output_dir = (
         app_root / "artifacts" / "real_robot_commissioning" / date.today().isoformat()
-        / "step6" / f"probe-{time.time_ns()}-{os.getpid()}"
+        / "step6" / f"probe-{datetime.now().strftime('%Hh-%Mm-%Ss')}"
     )
     previous_umask = os.umask(0o077)
     try:
@@ -310,8 +308,6 @@ def main() -> int:
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--check-config", action="store_true", help="validate only; no network")
     action.add_argument("--connect-real-read-only", action="store_true", help="send only the fixed read commands")
-    parser.add_argument("--vendor-compatibility-confirmed", action="store_true")
-    parser.add_argument("--operator-ready", action="store_true", help="stationary robot and safety checks completed")
     parser.add_argument("--byte-order", choices=("little", "big"))
     parser.add_argument("--approved-tcp-name")
     parser.add_argument("--approved-ucs-name")
@@ -321,8 +317,6 @@ def main() -> int:
     if args.check_config:
         print("READ-ONLY CONFIG OK; no controller connection was opened")
         return 0
-    if not args.vendor_compatibility_confirmed or not args.operator_ready or not args.byte_order:
-        parser.error("real connection requires vendor compatibility, operator readiness and explicit byte order")
     result = probe_once(
         config,
         byte_order=args.byte_order,

@@ -1,14 +1,8 @@
-"""Validate an operator-owned real-robot configuration without opening a socket.
-
-Step 3 only permits an observe-only, disconnected provider. The canonical
-digest is reserved for the later server/Mac gateway handshake.
-"""
+"""Validate the repository-owned real-robot configuration without opening a socket."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import math
 import re
 from pathlib import Path
@@ -181,18 +175,6 @@ class RealRobotConfig(_StrictModel):
             missing.append("controller.package_versions")
         return tuple(missing)
 
-    def digest(self) -> str:
-        data = self.model_dump(mode="json")
-        # Preserve existing observe-only session hashes until a setup is
-        # explicitly selected; selecting one intentionally changes the hash.
-        if data["tool"]["setup"] is None:
-            del data["tool"]["setup"]
-        canonical = json.dumps(
-            data, sort_keys=True, separators=(",", ":"),
-            ensure_ascii=False, allow_nan=False,
-        ).encode("utf-8")
-        return hashlib.sha256(canonical).hexdigest()
-
 
 def load_real_config(path: str | Path) -> RealRobotConfig:
     import yaml
@@ -224,8 +206,7 @@ def load_real_config(path: str | Path) -> RealRobotConfig:
     if not isinstance(data, dict):
         raise ValueError("real config must be a YAML mapping")
     result = RealRobotConfig.model_validate(data)
-    # Pydantic accepts non-finite floats in unconstrained tuples; reject them
-    # before canonicalization so the same config has one safe digest everywhere.
+    # Pydantic accepts non-finite floats in unconstrained tuples; reject them.
     def check_finite(value: Any) -> None:
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError("real config contains a non-finite number")
@@ -245,7 +226,7 @@ def main() -> int:
     parser.add_argument("path")
     args = parser.parse_args()
     config = load_real_config(args.path)
-    print(f"{config.digest()} {config.allowed_control} {len(config.blocking_fields())}")
+    print(f"{config.allowed_control} {len(config.blocking_fields())}")
     return 0
 
 

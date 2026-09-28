@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from copy import deepcopy
 
 import pytest
 from pydantic import ValidationError
 
-from robot_runtime.real_config import RealRobotConfig, load_real_config
+from robot_runtime.real_config import RealRobotConfig
 
 
 def no_tool_data() -> dict:
@@ -79,22 +78,9 @@ def test_unknown_setup_and_enabled_control_remain_rejected() -> None:
         RealRobotConfig.model_validate(data)
 
 
-def test_legacy_observe_only_digest_is_unchanged_and_profile_changes_it() -> None:
-    from pathlib import Path
-    from hashlib import sha256
-
-    example = Path(__file__).resolve().parents[3] / "configs" / "robot-real.example.yaml"
-    legacy = load_real_config(example)
-    old_shape = legacy.model_dump(mode="json")
-    del old_shape["tool"]["setup"]
-    old_digest = sha256(json.dumps(
-        old_shape, sort_keys=True, separators=(",", ":"),
-        ensure_ascii=False, allow_nan=False,
-    ).encode("utf-8")).hexdigest()
-    assert legacy.digest() == old_digest
-
+def test_selected_no_tool_profile_is_distinct_from_an_unmarked_profile() -> None:
     data = no_tool_data()
     selected = RealRobotConfig.model_validate(data)
     other = deepcopy(data)
     del other["tool"]["setup"]
-    assert selected.digest() != RealRobotConfig.model_validate(other).digest()
+    assert selected != RealRobotConfig.model_validate(other)

@@ -123,18 +123,17 @@ ROBOT_REAL_MIRROR="${ROBOT_REAL_MIRROR:-0}"
     || fail "ROBOT_REAL_MIRROR is only valid in real mode."
 export ROBOT_REAL_MIRROR
 
-CONFIG_SHA=""
 CONFIG_MISSING=0
 CONFIG_COORDINATE_CALIBRATED=false
 if [[ "$ROBOT_MODE" == simulation ]]; then
-    [[ -z "$REAL_CONFIG_INPUT" && -z "${REAL_CONFIG_PATH:-}" && -z "${REAL_CONFIG_SHA256:-}" ]] \
+    [[ -z "$REAL_CONFIG_INPUT" && -z "${REAL_CONFIG_PATH:-}" ]] \
         || fail "--real-config is not allowed in simulation mode."
     [[ -z "${GATEWAY_AUTH_SECRET_FILE:-}" && -z "${GATEWAY_EXPECTED_ID:-}" ]] \
         || fail "gateway authentication is only valid in real mode."
     $CONTROL_GIVEN && fail "--real-control is only valid in real mode."
     [[ -z "${ROBOT_CONTROL_MODE:-}" ]] \
         || fail "ROBOT_CONTROL_MODE is not allowed in simulation mode."
-    unset REAL_CONFIG_PATH REAL_CONFIG_SHA256 ROBOT_CONTROL_MODE
+    unset REAL_CONFIG_PATH ROBOT_CONTROL_MODE
 else
     [[ -n "$REAL_CONFIG_INPUT" ]] || fail "real mode requires --real-config."
     [[ -z "${REAL_CONFIG_PATH:-}" ]] \
@@ -156,8 +155,7 @@ else
     CONFIG_REPORT="$(PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
         "$CONFIG_PYTHON" -m robot_runtime.real_config "$REAL_CONFIG_PATH")" \
         || fail "real config validation failed."
-    read -r CONFIG_SHA CONFIG_ALLOWED CONFIG_MISSING <<<"$CONFIG_REPORT"
-    [[ "$CONFIG_SHA" =~ ^[0-9a-f]{64}$ ]] || fail "real config digest is invalid."
+    read -r CONFIG_ALLOWED CONFIG_MISSING <<<"$CONFIG_REPORT"
     CONFIG_COORDINATE_CALIBRATED="$(PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
         "$CONFIG_PYTHON" -c '
 from robot_runtime.real_config import load_real_config
@@ -165,12 +163,9 @@ import sys
 c = load_real_config(sys.argv[1])
 print(str(c.joint_mapping.sign is not None and c.base_to_sofa.translation_mm is not None).lower())
 ' "$REAL_CONFIG_PATH")" || fail "could not inspect Step 8 calibration fields."
-    [[ -z "${REAL_CONFIG_SHA256:-}" || "$REAL_CONFIG_SHA256" == "$CONFIG_SHA" ]] \
-        || fail "REAL_CONFIG_SHA256 conflicts with --real-config."
     # Step 5 may authenticate a read-only gateway, but cannot ARM or move.
     ROBOT_CONTROL_MODE=observe-only
-    REAL_CONFIG_SHA256="$CONFIG_SHA"
-    export ROBOT_CONTROL_MODE REAL_CONFIG_PATH REAL_CONFIG_SHA256
+    export ROBOT_CONTROL_MODE REAL_CONFIG_PATH
     if [[ -n "${GATEWAY_AUTH_SECRET_FILE:-}" || -n "${GATEWAY_EXPECTED_ID:-}" ]]; then
         [[ -n "${GATEWAY_AUTH_SECRET_FILE:-}" && -n "${GATEWAY_EXPECTED_ID:-}" ]] \
             || fail "gateway authentication requires both GATEWAY_AUTH_SECRET_FILE and GATEWAY_EXPECTED_ID."
@@ -187,7 +182,6 @@ GatewaySessionManager(
     device_sn=config.controller.device_sn,
     robot_model=config.controller.model,
     package_versions=tuple(config.controller.package_versions),
-    config_sha256=config.digest(),
     stale_ms=config.deadlines.state_stale_ms,
 )
 ' \
@@ -205,7 +199,6 @@ if $CHECK_CONFIG; then
     if [[ "$ROBOT_MODE" == real ]]; then
         echo "REAL / OBSERVE ONLY (requested=$REQUESTED_CONTROL, config_cap=$CONFIG_ALLOWED, blocking_fields=$CONFIG_MISSING)"
         echo "REAL_CONFIG_PATH=$REAL_CONFIG_PATH"
-        echo "REAL_CONFIG_SHA256=$CONFIG_SHA"
     else
         echo "SIMULATION"
     fi

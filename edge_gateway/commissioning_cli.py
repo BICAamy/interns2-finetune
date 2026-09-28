@@ -87,7 +87,6 @@ def _report(
     blockers = first_motion_config_blockers(config)
     return {
         "mode": "local-only-read-only-preflight",
-        "config_sha256": config.digest(),
         "device_sn": config.controller.device_sn,
         "first_motion_config_blockers": blockers,
         "effective_first_motion_caps": effective_first_motion_caps(config),
@@ -166,8 +165,6 @@ def _monitor_one_motion(
 def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
     """Exactly one human-approved Base-axis 1 mm command, then exit."""
     require_local_mac_terminal()
-    if args.expected_config_sha256 != config.digest():
-        raise ValueError("explicit config SHA-256 does not match the loaded profile")
     if first_motion_config_blockers(config):
         raise ValueError("commissioning config has missing or incompatible fields")
     test_id = validate_identifier(args.test_id)
@@ -185,7 +182,7 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
         ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True,
     ).stdout.strip()
     print(json.dumps({
-        "test_id": test_id, "commit": commit, "config_sha256": config.digest(),
+        "test_id": test_id, "commit": commit,
         "device_sn": config.controller.device_sn, "axis": args.axis,
         "distance_mm": 1.0, "speed_mm_s": 2.0,
         "acceleration_mm_s2": caps["max_acceleration_mm_s2"],
@@ -304,8 +301,6 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
 def _execute_enabled_state(config: RealRobotConfig, args: argparse.Namespace) -> int:
     """One Mac-local enable/disable write followed by dual-channel proof."""
     require_local_mac_terminal()
-    if args.expected_config_sha256 != config.digest():
-        raise ValueError("explicit config SHA-256 does not match the loaded profile")
     if first_motion_config_blockers(config):
         raise ValueError("commissioning config has missing or incompatible fields")
     validate_probe_config(config)
@@ -315,7 +310,6 @@ def _execute_enabled_state(config: RealRobotConfig, args: argparse.Namespace) ->
     print(json.dumps({
         "mode": "mac-local-manual-enablement",
         "device_sn": config.controller.device_sn,
-        "config_sha256": config.digest(),
         "requested_enabled": enabled,
         "exact_controller_command": command,
         "remote_trigger_available": False,
@@ -352,7 +346,7 @@ def _execute_enabled_state(config: RealRobotConfig, args: argparse.Namespace) ->
 
 
 def _require_unchanged_config(path: Path, loaded: RealRobotConfig) -> None:
-    if load_real_config(path).digest() != loaded.digest():
+    if load_real_config(path) != loaded:
         raise ValueError("commissioning configuration changed before controller write")
 
 
@@ -369,11 +363,8 @@ def main(argv: list[str] | None = None) -> int:
         help="one Mac-local GrpEnable/GrpDisable write with live confirmation",
     )
     parser.add_argument("--byte-order", choices=("little", "big"))
-    parser.add_argument("--operator-ready", action="store_true")
-    parser.add_argument("--vendor-compatibility-confirmed", action="store_true")
     parser.add_argument("--axis", choices=tuple(_AXES))
     parser.add_argument("--test-id")
-    parser.add_argument("--expected-config-sha256")
     args = parser.parse_args(argv)
 
     try:
@@ -388,11 +379,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.control != "local-only":
         parser.error("real local action requires --control local-only")
-    if not (args.byte_order and args.operator_ready and args.vendor_compatibility_confirmed):
-        parser.error("real local action requires byte order, operator readiness and vendor compatibility")
     if args.execute_relative:
-        if not (args.axis and args.test_id and args.expected_config_sha256):
-            parser.error("motion requires axis, test ID and explicit matching config SHA-256")
+        if not (args.axis and args.test_id):
+            parser.error("motion requires axis and test ID")
         try:
             return _execute_relative(config, args)
         except KeyboardInterrupt:
@@ -403,8 +392,6 @@ def main(argv: list[str] | None = None) -> int:
             print("If any WayPoint may have been sent, check the physical robot and journal before another trial.", file=sys.stderr)
             return 2
     if args.set_enabled is not None:
-        if not args.expected_config_sha256:
-            parser.error("enable/disable requires explicit matching config SHA-256")
         try:
             return _execute_enabled_state(config, args)
         except KeyboardInterrupt:

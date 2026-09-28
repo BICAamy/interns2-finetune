@@ -17,7 +17,6 @@ class EdgeConfig:
     server_url: str
     secret_file: Path
     gateway_id: str
-    config_sha256: str
     datasheet_byte_order: str
     audit_path: Path
     stale_ms: int = 250
@@ -30,8 +29,6 @@ class EdgeConfig:
         validate_cloud_url(self.server_url)
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", self.gateway_id):
             raise ValueError("invalid gateway_id")
-        if not re.fullmatch(r"[0-9a-f]{64}", self.config_sha256):
-            raise ValueError("invalid config_sha256")
         if self.datasheet_byte_order not in ("little", "big"):
             raise ValueError("DataSheet byte order must be explicit")
         if not 50 <= self.stale_ms <= 5000:
@@ -49,7 +46,6 @@ class RealEdgeConfig:
     server_url: str
     secret_file: Path
     gateway_id: str
-    config_sha256: str
     datasheet_byte_order: str
     audit_path: Path
     stale_ms: int
@@ -63,8 +59,6 @@ class RealEdgeConfig:
         validate_cloud_url(self.server_url)
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", self.gateway_id):
             raise ValueError("invalid gateway_id")
-        if not re.fullmatch(r"[0-9a-f]{64}", self.config_sha256):
-            raise ValueError("invalid config_sha256")
         if self.datasheet_byte_order not in ("little", "big"):
             raise ValueError("DataSheet byte order must be explicit")
         if not 50 <= self.stale_ms < 1500:

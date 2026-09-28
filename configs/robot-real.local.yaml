@@ -1,0 +1,62 @@
+# 项目唯一真机的 Git 跟踪配置；Mac 和服务器使用同一提交。当前仅允许读取状态，禁止运动控制。
+schema_version: "1.0"
+allowed_control: observe-only
+
+controller:
+  host: 192.168.0.10
+  command_port: 10003
+  datasheet_port: 10004
+  device_sn: "PH590320009"
+  asset_id: "huayan-bigcat001" # 项目内部编号，按实测序列号生成；可改为你的编号
+  model: "E05_Pro"
+  package_versions:
+    - "HR6.5.20d.beta.T631.20260206" # 现场实测；完整探针前仍需厂家确认协议兼容
+
+joint_mapping:
+  sign: [1, 1, 1, 1, 1, 1]
+  zero_offset_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+base_to_sofa:
+  translation_mm: [0.021855847, 0.067008944, 0.007442737]
+  quaternion_xyzw: [2.7217386e-05, 3.4943254e-05, -4.9568102e-05, 0.999999997791]
+
+tool:
+  setup: flange_only_no_tool
+  tcp_name: "TCP"
+  flange_to_tcp:
+    translation_mm: [0.0, 0.0, 0.0]
+    quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
+  payload_kg: 0.0
+  center_of_gravity_mm: [0.0, 0.0, 0.0]
+  mount_angle_deg: [0.0, 0.0]
+
+limits:
+  joint_soft_limits_deg:
+    - [-360.0, 360.0]
+    - [-135.0, 135.0]
+    - [-153.0, 153.0]
+    - [-360.0, 360.0]
+    - [-180.0, 180.0]
+    - [-360.0, 360.0]
+  joint_margin_deg: 5.0
+  workspace_low_mm: [200.0, -1000.0, 100.0]
+  workspace_high_mm: [1000.0, 1000.0, 800.0]
+  max_speed_mm_s: 2000.0
+  max_acceleration_mm_s2: 2500.0
+  max_step_mm: 1000
+  max_rotation_deg: 720
+  max_absolute_displacement_mm: 1000
+
+deadlines:
+  state_stale_ms: 250 # 50 ms 一帧，连续约 5 帧未收到即标为过期；只读阶段暂用
+  response_ms: 3000 # 发送 10003 请求后，控制器回复最多允许等 3000ms
+  startup_ms: 5000 # WayPoint 已接受，但 5000 ms内机械臂始终没有真正开始运动 → 异常 → 请求停止
+  motion_ms: 120000 # 一次运动最多等 120000ms
+  stop_delivery_ms: 500 # 发出 GrpStop 后，最多允许500ms确认这个 TCP 请求有没有成功送到/得到协议回复。
+  stop_ack_ms: 3000 # 发出停止请求之后，最多等3000ms确认机器人实际上已经停住。
+
+arrival:
+  position_tolerance_mm: 0.5
+  orientation_tolerance_deg: 2.0
+  stable_samples: 5
+  dwell_ms: 500

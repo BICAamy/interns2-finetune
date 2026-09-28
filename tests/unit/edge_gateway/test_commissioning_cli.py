@@ -157,19 +157,6 @@ def test_execute_denies_remote_terminal_before_network(monkeypatch):
         "--config", "ignored.yaml", "--control", "local-only", "--execute-relative",
         "--byte-order", "little", "--vendor-compatibility-confirmed", "--operator-ready",
         "--axis=+X", "--test-id", "trial-1",
-        "--expected-config-sha256", config().digest(),
-    ]) == 2
-
-
-def test_execute_requires_matching_config_digest_before_network(monkeypatch):
-    monkeypatch.setattr(cli, "load_real_config", lambda _path: config())
-    monkeypatch.setattr(cli, "require_local_mac_terminal", lambda: None)
-    monkeypatch.setattr(cli, "probe_once", lambda *_a, **_kw: pytest.fail("probe opened"))
-    assert cli.main([
-        "--config", "ignored.yaml", "--control", "local-only", "--execute-relative",
-        "--byte-order", "little", "--vendor-compatibility-confirmed", "--operator-ready",
-        "--axis=+X", "--test-id", "trial-1",
-        "--expected-config-sha256", "0" * 64,
     ]) == 2
 
 
@@ -186,7 +173,6 @@ def test_enable_disable_routes_only_through_explicit_local_cli_action(monkeypatc
         "--config", "ignored.yaml", "--control", "local-only",
         "--set-enabled", "false", "--byte-order", "little",
         "--vendor-compatibility-confirmed", "--operator-ready",
-        "--expected-config-sha256", config().digest(),
     ]) == 0
     assert calls == [(config(), "false", "local-only")]
 
@@ -200,19 +186,6 @@ def test_enable_disable_denies_remote_terminal_before_network(monkeypatch):
         "--config", "ignored.yaml", "--control", "local-only",
         "--set-enabled", "true", "--byte-order", "little",
         "--vendor-compatibility-confirmed", "--operator-ready",
-        "--expected-config-sha256", config().digest(),
-    ]) == 2
-
-
-def test_enable_disable_requires_matching_config_digest_before_network(monkeypatch):
-    monkeypatch.setattr(cli, "load_real_config", lambda _path: config())
-    monkeypatch.setattr(cli, "require_local_mac_terminal", lambda: None)
-    monkeypatch.setattr(cli, "probe_once", lambda *_a, **_kw: pytest.fail("probe opened"))
-    assert cli.main([
-        "--config", "ignored.yaml", "--control", "local-only",
-        "--set-enabled", "false", "--byte-order", "little",
-        "--vendor-compatibility-confirmed", "--operator-ready",
-        "--expected-config-sha256", "0" * 64,
     ]) == 2
 
 

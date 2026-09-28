@@ -36,9 +36,6 @@ def app_from_environment():
         if not config_path:
             raise ValueError("real mode requires REAL_CONFIG_PATH")
         config = load_real_config(config_path)
-        expected_digest = os.environ.get("REAL_CONFIG_SHA256")
-        if not expected_digest or expected_digest != config.digest():
-            raise ValueError("real config digest does not match startup preflight")
         if os.environ.get("ROBOT_CONTROL_MODE") != "observe-only":
             raise ValueError("real runtime must remain observe-only")
         if secret_path:
@@ -57,7 +54,6 @@ def app_from_environment():
                 device_sn=config.controller.device_sn,
                 robot_model=config.controller.model,
                 package_versions=tuple(config.controller.package_versions),
-                config_sha256=config.digest(),
                 stale_ms=config.deadlines.state_stale_ms,
             )
             mirror = None

@@ -64,7 +64,6 @@ def read_motion_limits(
     return {
         "control_mode": "observe-only",
         "captured_at_ms": initial.summary["captured_at_ms"],
-        "config_sha256": initial.summary["config_sha256"],
         "device_sn": initial.summary["device_sn"],
         "robot_model": model,
         "package_version": version,

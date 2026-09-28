@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import re
 import subprocess
 
 import pytest
@@ -30,7 +29,7 @@ def check(
     env = os.environ.copy()
     for name in (
         "RUNTIME_MODE", "ROBOT_MODE", "ROBOT_CONTROL_MODE", "REAL_CONFIG_PATH",
-        "REAL_CONFIG_SHA256", "GATEWAY_AUTH_SECRET_FILE", "GATEWAY_EXPECTED_ID",
+        "GATEWAY_AUTH_SECRET_FILE", "GATEWAY_EXPECTED_ID",
         "ROBOT_REAL_MIRROR",
     ):
         env.pop(name, None)
@@ -76,7 +75,6 @@ def test_real_config_is_observe_only_even_when_enabled_requested() -> None:
         assert result.returncode == 0, result.stderr
         assert "REAL / OBSERVE ONLY" in result.stdout
         assert "blocking_fields=" in result.stdout
-        assert re.search(r"REAL_CONFIG_SHA256=[0-9a-f]{64}", result.stdout)
         assert "[1/4] Starting" not in result.stdout
 
 
@@ -163,7 +161,6 @@ def test_relative_config_is_resolved_from_app_not_caller_cwd(tmp_path: Path) -> 
         {"ROBOT_MODE": "simulation"},
         {"ROBOT_CONTROL_MODE": "enabled"},
         {"REAL_CONFIG_PATH": "/tmp/unsolicited.yaml"},
-        {"REAL_CONFIG_SHA256": "0" * 64},
     ],
 )
 def test_cli_environment_conflicts_fail(extra_env: dict[str, str]) -> None:
@@ -172,7 +169,7 @@ def test_cli_environment_conflicts_fail(extra_env: dict[str, str]) -> None:
     assert "conflicts" in result.stderr or "must not override" in result.stderr
 
 
-def test_config_hash_is_stable_and_unknown_fields_are_rejected(tmp_path: Path) -> None:
+def test_config_report_is_stable_and_unknown_fields_are_rejected(tmp_path: Path) -> None:
     first = check("--robot-mode", "real", "--real-config", str(EXAMPLE))
     second = check("--robot-mode", "real", "--real-config", str(EXAMPLE))
     assert first.returncode == second.returncode == 0
@@ -228,7 +225,6 @@ def test_real_web_is_explicitly_observe_only_with_no_simulated_pose_or_video() -
         runtime_mode=RuntimeMode.REAL,
         robot_control_mode="observe-only",
         real_config_path=str(EXAMPLE),
-        real_config_sha256="0" * 64,
     )
     runtime = WebRuntime(settings)
     try:

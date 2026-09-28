@@ -26,7 +26,7 @@ export REAL_CONFIG_PATH GATEWAY_AUTH_SECRET_FILE GATEWAY_EXPECTED_ID
 test -x "$SIM_ENV/bin/python"
 test -f "$REAL_CONFIG_PATH"
 test -f "$GATEWAY_AUTH_SECRET_FILE"
-REAL_CONFIG_SHA256="$(PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
+PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
     "$SIM_ENV/bin/python" -c '
 from robot_runtime.real_config import load_real_config
 from surgical_contracts import load_gateway_secret
@@ -35,12 +35,10 @@ config = load_real_config(os.environ["REAL_CONFIG_PATH"])
 if config.allowed_control != "observe-only":
     raise ValueError("pilot must remain observe-only")
 load_gateway_secret(os.environ["GATEWAY_AUTH_SECRET_FILE"])
-print(config.digest())
-')"
-export REAL_CONFIG_SHA256
+'
 
 if [[ "${1:-}" == --check-config ]]; then
-    echo "REAL MIRROR PILOT CONFIG OK; REAL_CONFIG_SHA256=$REAL_CONFIG_SHA256"
+    echo "REAL MIRROR PILOT CONFIG OK"
     exit 0
 fi
 

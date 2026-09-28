@@ -73,7 +73,7 @@ def telemetry(*, sequence: int = 10, x: float = 100.0,
 def approval() -> FakeMotionApproval:
     return FakeMotionApproval(
         device_sn="FAKE-SN", robot_model="FAKE-E05", package_version="fake-v1",
-        config_sha256="f" * 64, tcp_name="FAKE_FLANGE", ucs_name="Base",
+        tcp_name="FAKE_FLANGE", ucs_name="Base",
         tcp_xyzrpy=(0, 0, 0, 0, 0, 0), ucs_xyzrpy=(0, 0, 0, 0, 0, 0),
         payload_kg=0, center_of_gravity_mm=(0, 0, 0),
         base_installing_angle_deg=(0, 0),
@@ -87,7 +87,6 @@ def approval() -> FakeMotionApproval:
 
 def readback() -> FakeControllerReadback:
     return FakeControllerReadback(
-        config_sha256="f" * 64,
         tcp_name="FAKE_FLANGE", ucs_name="Base",
         tcp_xyzrpy=(0, 0, 0, 0, 0, 0), ucs_xyzrpy=(0, 0, 0, 0, 0, 0),
         payload_kg=0, center_of_gravity_mm=(0, 0, 0),
@@ -620,7 +619,6 @@ def test_journal_refuses_second_owner_and_corrupt_recovery(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("field,value", [
-    ("config_sha256", "0" * 64),
     ("tcp_name", "CHANGED"),
     ("ucs_name", "OTHER"),
     ("payload_kg", 0.1),

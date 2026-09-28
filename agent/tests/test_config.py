@@ -29,7 +29,6 @@ class AgentSettingsTests(unittest.TestCase):
             "ROBOT_MODE": "real",
             "ROBOT_CONTROL_MODE": "observe-only",
             "REAL_CONFIG_PATH": "/tmp/robot-real.local.yaml",
-            "REAL_CONFIG_SHA256": "a" * 64,
         }
         with patch.dict("os.environ", base, clear=True):
             self.assertEqual(AgentSettings.from_env().runtime_mode.value, "real")
@@ -39,10 +38,6 @@ class AgentSettingsTests(unittest.TestCase):
         with patch.dict("os.environ", {**base, "REAL_CONFIG_PATH": ""}, clear=True):
             with self.assertRaisesRegex(ValueError, "config path"):
                 AgentSettings.from_env()
-        with patch.dict("os.environ", {**base, "REAL_CONFIG_SHA256": "invalid"}, clear=True):
-            with self.assertRaisesRegex(ValueError, "SHA-256"):
-                AgentSettings.from_env()
-
     def test_environment_mode_conflict_is_rejected(self):
         with patch.dict(
             "os.environ",

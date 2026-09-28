@@ -118,7 +118,6 @@ def _client():
         runtime_mode=RuntimeMode.REAL,
         robot_control_mode="observe-only",
         real_config_path="configs/robot-real.local.yaml",
-        real_config_sha256="a" * 64,
     )
     observer = RealObserver()
     robot = FakeRobotController()

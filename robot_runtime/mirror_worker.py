@@ -18,17 +18,19 @@ from surgical_contracts import (
 
 
 def _default_camera_state() -> SimulationCameraState:
+    # 定义一个默认 SOFA 相机位置。
     return SimulationCameraState(
         preset="front",
-        yaw_deg=0.0,
-        pitch_deg=0.0,
-        distance_m=1.65,
-        target_m=(0.35, 0.0, 0.42),
-        position_m=(0.35, -1.65, 0.42),
-        updated_at_ms=time.time_ns() // 1_000_000,
+        yaw_deg=0.0, # 相机相对于底座坐标系的yaw角偏移值
+        pitch_deg=0.0, # 相机相对于底座坐标系的pitch角偏移值
+        distance_m=1.65, 
+        target_m=(0.35, 0.0, 0.42), # 相机看这里
+        position_m=(0.35, -1.65, 0.42), # 相机初始位置
+        updated_at_ms=time.time_ns() // 1_000_000, # 摄像机状态最后一次被修改时的 Unix 时间戳，ms
     )
 
-
+# 这里用了Protocol结构化继承
+# 而 类PassiveRealMirrorEnv 长得像 MirrorEnvironment，所以我们认为 类PassiveRealMirrorEnv 继承了 MirrorEnvironment
 class MirrorEnvironment(Protocol):
     controller: Any
 
@@ -42,16 +44,16 @@ class MirrorEnvironment(Protocol):
 
 @dataclass(frozen=True)
 class MirrorStatus:
-    enabled: bool
-    worker_alive: bool
-    source_sequence: int | None
-    gateway_session_id: str | None
-    frame_sequence: int
-    freshness: SourceFreshness
-    calibrated: bool
-    warning: str
-    reason: str
-    error: str | None
+    enabled: bool # mirror 功能是否启用
+    worker_alive: bool # 后台仿真线程还活着吗
+    source_sequence: int | None # 当前 SOFA frame 对应的是哪一帧真实 RobotTelemetry
+    gateway_session_id: str | None # 当前这个真实状态属于哪个 Mac gateway session，每一次mac连接服务器都会产生新的会话id，直到断开连接
+    frame_sequence: int # RealMirrorWorker 自己生成了第几张画面。
+    freshness: SourceFreshness # 当前真机状态：
+    calibrated: bool # 标定参数是否已提供
+    warning: str # 这只是提示语句：这个 SOFA mirror 只是显示，不允许拿这个仿真画面反过来控制机器人
+    reason: str # 
+    error: str | None # RealMirrorWorker 自己有没有发生异常
 
 
 def create_sofa_mirror_environment(
@@ -62,7 +64,7 @@ def create_sofa_mirror_environment(
     base_to_sofa_translation_mm: tuple[float, ...] | None,
     base_to_sofa_quaternion_xyzw: tuple[float, ...] | None,
 ) -> MirrorEnvironment:
-    """Import SOFA only on the one thread that will own its scene and OpenGL."""
+    """SOFA 场景和 OpenGL 是由专门的 mirror thread 创建和操作"""
     from simulation.entry_point_env.passive_mirror_env import PassiveRealMirrorEnv
 
     return PassiveRealMirrorEnv(
@@ -79,13 +81,13 @@ class RealMirrorWorker:
         self,
         telemetry_source: Callable[[], RobotTelemetry],
         *,
-        stale_ms: int,
-        sign: tuple[int, ...] | None = None,
-        zero_offset_deg: tuple[float, ...] | None = None,
-        base_to_sofa_translation_mm: tuple[float, ...] | None = None,
-        base_to_sofa_quaternion_xyzw: tuple[float, ...] | None = None,
-        environment_factory: Callable[[], MirrorEnvironment] | None = None,
-        tick_interval_s: float = 0.05,
+        stale_ms: int, # 用于判断当前真实状态（这里定义的那个freshness）是不是已经 stale。
+        sign: tuple[int, ...] | None = None, # 标定参数
+        zero_offset_deg: tuple[float, ...] | None = None, # 标定参数
+        base_to_sofa_translation_mm: tuple[float, ...] | None = None, # 标定参数
+        base_to_sofa_quaternion_xyzw: tuple[float, ...] | None = None, # 标定参数
+        environment_factory: Callable[[], MirrorEnvironment] | None = None, # 环境对象
+        tick_interval_s: float = 0.05, # mirror 自己多久循环一次，这里硬编码为0.05s -> 20Hz
     ) -> None:
         if tick_interval_s <= 0 or stale_ms <= 0:
             raise ValueError("mirror tick and stale deadline must be positive")
@@ -125,23 +127,23 @@ class RealMirrorWorker:
         ] = deque()
 
     def start(self, *, timeout_s: float = 60.0) -> None:
-        with self._lock:
+        with self._lock: # 线程锁：保护共享变量
             if self._thread is not None and self._thread.is_alive():
                 return
-            self._stop.clear()
-            self._ready.clear()
+            self._stop.clear() # 停止线程
+            self._ready.clear() # 告诉线程 SOFA 初始化完毕了
             self._error = None
-            self._frame = None
-            self._frame_sequence = 0
-            self._source_sequence = None
-            self._session_id = None
+            self._frame = None # 当前最新渲染出的图像
+            self._frame_sequence = 0 # RealMirrorWorker 自己生成了第几张画面。
+            self._source_sequence = None # 当前 SOFA frame 对应的是哪一帧真实 RobotTelemetry
+            self._session_id = None # 这张 SOFA 画面对应哪个 gateway session
             self._freshness = SourceFreshness.DISCONNECTED
-            self._reason = "no_actual_joint_sample"
+            self._reason = "no_actual_joint_sample" # 信息：为什么现在不能正常更新。
             self._camera_state = _default_camera_state()
             self._camera_requests.clear()
-            self._thread = Thread(target=self._run, name="real-sofa-mirror", daemon=True)
-            self._thread.start()
-        if not self._ready.wait(timeout_s):
+            self._thread = Thread(target=self._run, name="real-sofa-mirror", daemon=True) # 创建运行 SOFA 的后台线程
+            self._thread.start() # 启动线程
+        if not self._ready.wait(timeout_s): # 主线程进行等待
             raise RuntimeError("real SOFA mirror did not initialize")
         if self._error is not None:
             raise RuntimeError(self._error)
