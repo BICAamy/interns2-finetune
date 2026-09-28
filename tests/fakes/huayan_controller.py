@@ -47,7 +47,6 @@ DEFAULT_REPLIES: dict[ReadCommand, bytes] = {
     ReadCommand.CONTROLLER_STATE: b"ReadControllerState,OK,1,;",
     ReadCommand.ROBOT_MODEL: b"ReadRobotModel,OK,E05-Pro,;",
     ReadCommand.PACKAGE_VERSION: b"PackageVersion,OK,6.3.6.20240305,;",
-    # nBreaking: 0 = brakes held, 1 = brakes released. READY/idle holds them.
     ReadCommand.ROBOT_STATE: b"ReadRobotState,OK,0,1,0,0,0,0,0,0,0,1,1,1,1,;",
     ReadCommand.CURRENT_FSM: b"ReadCurFSM,OK,33,;",
     ReadCommand.ACTUAL_POSITION: (
@@ -138,7 +137,6 @@ class FakeHuayanController:
             state["robotMoving"] = moving
             state["InPos"] = in_position
             state["robotBlendingDone"] = int(not moving)
-            state["BrakeState"] = [moving] * 6
             return datasheet_frame(document)
 
         idle = state_frame(33, 0, 1)
@@ -367,7 +365,6 @@ class FakeHuayanController:
                 state["robotState"] = 25 if moving else 33
                 state["robotBlendingDone"] = int(not moving)
                 state["InPos"] = int(not moving)
-                state["BrakeState"] = [int(moving)] * 6
             if frame_index % self._stamp_every_n_frames == 0:
                 source_stamp_ms = time.time_ns() // 1_000_000
             document["MsgTitle"]["Stamp"] = str(source_stamp_ms)

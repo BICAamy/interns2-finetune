@@ -107,13 +107,9 @@ def parse_datasheet(
     accelerations = _vector(
         pos.get("Actual_Joint_Acceleration"), "Actual_Joint_Acceleration", 6
     )
-    brakes = state.get("BrakeState")
     axis_errors = state.get("nAxisErrorCode")
-    if not isinstance(brakes, list) or len(brakes) != 6:
-        raise ProtocolError("BrakeState must contain six values")
     if not isinstance(axis_errors, list) or len(axis_errors) != 6:
         raise ProtocolError("nAxisErrorCode must contain six values")
-    brake_states = tuple(int(_flag(value, "BrakeState")) for value in brakes)
     axis_error_codes = tuple(_integer(value, "nAxisErrorCode") for value in axis_errors)
     error_axis = _integer(state.get("Error_AxisID"), "Error_AxisID")
     if error_axis > 6:
@@ -148,7 +144,6 @@ def parse_datasheet(
         auto_mode=_flag(state.get("AutoMode"), "AutoMode"),
         reduced_mode=_flag(state.get("IsReduceMode"), "IsReduceMode"),
         free_drive_mode=_flag(state.get("IsFreeDriveMode"), "IsFreeDriveMode"),
-        brake_states=brake_states,
         axis_error_codes=axis_error_codes,
         force_control_state=_integer(force.get("FTControlState"), "FTControlState"),
         device_sn=device_sn or None,

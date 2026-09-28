@@ -25,7 +25,6 @@ class RobotStateRead:
     has_error: bool
     error_code: int
     error_axis: int
-    brakes_released: bool
     paused: bool
     emergency_stop: bool
     safeguard: bool
@@ -118,13 +117,15 @@ def read_robot_state(reply: CommandReply) -> RobotStateRead:
     axis = _integer(v[4], "error axis")
     if axis > 6:
         raise ProtocolError("error axis must be 0..6")
+    # Value 5 is the controller's brake feedback slot.  The vendor confirmed
+    # that normal enable/disable does not refresh it, so it is deliberately
+    # ignored and never exposed as project state.
     return RobotStateRead(
         moving=_flag(v[0], "moving"),
         enabled=_flag(v[1], "enabled"),
         has_error=_flag(v[2], "error"),
         error_code=_integer(v[3], "error code"),
         error_axis=axis,
-        brakes_released=_flag(v[5], "brakes"),
         paused=_flag(v[6], "paused"),
         emergency_stop=_flag(v[7], "emergency stop"),
         safeguard=_flag(v[8], "safeguard"),

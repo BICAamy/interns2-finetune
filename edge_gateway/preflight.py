@@ -167,7 +167,7 @@ def safety_state_hash(snapshot: RobotTelemetry, readback: ControllerReadback) ->
         "device_sn": snapshot.device_sn, "robot_model": snapshot.robot_model,
         "package_version": snapshot.package_version,
         "enabled": snapshot.enabled, "electrified": snapshot.electrified,
-        "brakes_released": snapshot.brakes_released, "fsm_code": snapshot.fsm_code,
+        "fsm_code": snapshot.fsm_code,
         "auto_mode": snapshot.auto_mode, "reduced_mode": snapshot.reduced_mode,
         "physical_estop_active": snapshot.physical_estop_active,
         "emergency_stop_circuit_fault": snapshot.emergency_stop_circuit_fault,
@@ -222,9 +222,6 @@ def preflight_relative(
     # valid; reduced mode defaults off and 3PE is currently inactive.
     safety_flags = (
         snapshot.enabled is True, snapshot.electrified is True,
-        # E05-Pro holds all axis brakes while enabled, READY and stationary;
-        # WayPoint releases them automatically after the command is accepted.
-        snapshot.brakes_released is False,
         type(snapshot.auto_mode) is bool, type(snapshot.reduced_mode) is bool,
         snapshot.physical_estop_active is False,
         snapshot.emergency_stop_circuit_fault is False,

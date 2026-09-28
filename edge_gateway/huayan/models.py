@@ -143,7 +143,6 @@ class DatasheetSample:
     auto_mode: bool
     reduced_mode: bool
     free_drive_mode: bool
-    brake_states: tuple[int, ...]
     axis_error_codes: tuple[int, ...]
     force_control_state: int
     device_sn: str | None

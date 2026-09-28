@@ -18,30 +18,14 @@ def test_gate_d_stationary_observation_defaults_to_five_seconds():
     assert inspect.signature(runtime.observe_stationary).parameters["duration_s"].default == 5.0
 
 
-@pytest.mark.parametrize("axis_states,command_state,expected", [
-    ((0,) * 6, False, False),
-    ((1,) * 6, True, True),
-    ((0,) * 6, True, None),
-    ((1,) * 6, False, None),
-    ((1, 1, 1, 0, 1, 1), True, None),
-])
-def test_brake_feedback_requires_all_axes_and_both_channels_to_agree(
-    axis_states, command_state, expected,
-):
-    sample = SimpleNamespace(brake_states=axis_states)
-    assert runtime._brake_release_consensus(
-        sample, command_released=command_state,
-    ) is expected
-
-
-def test_motion_feedback_marks_brake_channel_disagreement_unknown(monkeypatch):
+def test_motion_feedback_combines_conservative_motion_state(monkeypatch):
     state = SimpleNamespace(
-        has_error=False, error_code=0, enabled=False, brakes_released=False,
+        has_error=False, error_code=0, enabled=False,
         in_position=False, moving=True,
     )
     axes = SimpleNamespace(group_error_code=0, joint_error_codes=(0,) * 6)
     sample = SimpleNamespace(
-        enabled=True, brake_states=(1,) * 6, in_position=True, moving=False,
+        enabled=True, in_position=True, moving=False,
     )
     sampler = SimpleNamespace(snapshot=lambda: SimpleNamespace(sample=sample), watchdog=object())
     client = SimpleNamespace(request=lambda *_a: None, package_version="test-version")
@@ -57,7 +41,6 @@ def test_motion_feedback_marks_brake_channel_disagreement_unknown(monkeypatch):
 
     feedback = runtime.read_motion_feedback(config, client, sampler, session_id="test-session")
     assert feedback.enabled is False
-    assert feedback.brakes_released is None
     assert feedback.in_position is False
     assert feedback.moving is True
     assert feedback.potentially_moving is True
@@ -69,7 +52,7 @@ def test_stationary_observation_rejects_joint_motion_even_with_fixed_tcp():
             base_pose=(500.0, 20.0, 240.0, 0.0, 0.0, 0.0),
             joint_positions_deg=(j1, 0.0, 90.0, 0.0, 90.0, 0.0),
             auto_mode=False, reduced_mode=False, moving=False, fsm_code=33,
-            enabled=True, in_position=True, brake_states=(0,) * 6,
+            enabled=True, in_position=True,
             free_drive_mode=False, force_control_state=0, paused=False,
         )
 

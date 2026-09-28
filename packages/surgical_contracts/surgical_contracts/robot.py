@@ -135,7 +135,6 @@ class RobotTelemetry(ContractModel):
     fsm_code: int | None = None
     enabled: bool | None = None
     electrified: bool | None = None
-    brakes_released: bool | None = None
     paused: bool | None = None
     moving: bool | None = None
     in_position: bool | None = None

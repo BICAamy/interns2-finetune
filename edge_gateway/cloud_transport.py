@@ -115,11 +115,6 @@ def telemetry_from_sample(
         fsm_code=sample.fsm_code,
         enabled=(robot_status.enabled if robot_status is not None else sample.enabled),
         electrified=(robot_status.electrified if robot_status is not None else None),
-        brakes_released=(
-            robot_status.brakes_released
-            if robot_status is not None
-            else all(sample.brake_states)
-        ),
         paused=(robot_status.paused if robot_status is not None else sample.paused),
         moving=sample.moving,
         in_position=(robot_status.in_position if robot_status is not None else sample.in_position),

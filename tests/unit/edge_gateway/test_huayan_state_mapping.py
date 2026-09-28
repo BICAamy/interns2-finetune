@@ -23,7 +23,7 @@ def test_documented_robot_state_and_emergency_fields_are_mapped() -> None:
     ))
     assert not state.moving
     assert state.enabled
-    assert state.brakes_released is False
+    assert not hasattr(state, "brakes_released")
     assert state.electrified
     assert state.controller_box_connected
     assert state.in_position
@@ -32,6 +32,16 @@ def test_documented_robot_state_and_emergency_fields_are_mapped() -> None:
     ))
     assert not emergency.emergency_stop
     assert not emergency.emergency_circuit_fault
+
+
+def test_robot_state_ignores_unreliable_brake_slot() -> None:
+    fields = DEFAULT_REPLIES[ReadCommand.ROBOT_STATE].split(b",")
+    fields[7] = b"stale"
+    state = read_robot_state(decode_reply(
+        b",".join(fields), expected=ReadCommand.ROBOT_STATE,
+    ))
+    assert state.enabled
+    assert not hasattr(state, "brakes_released")
 
 
 def test_actual_position_requires_24_finite_values() -> None:

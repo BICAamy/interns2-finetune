@@ -23,7 +23,6 @@ def test_documented_datasheet_sample_parses_only_with_explicit_byte_order(byte_o
     assert sample.base_pose[0] == 367.945
     assert sample.device_sn == "FAKE-E05-001"
     assert sample.fsm_code == 33
-    assert sample.brake_states == (0, 0, 0, 0, 0, 0)
     assert sample.received_wall_ms > 0
     assert sample.received_monotonic_ns > 0
 
@@ -59,7 +58,6 @@ def test_bad_lengths_endianness_and_max_size_fail_closed() -> None:
     lambda d: d["PosAndVel"].update(Actual_PCS_Base=["0"] * 5),
     lambda d: d["PosAndVel"].update(Actual_Override="NaN"),
     lambda d: d["StateAndError"].update(robotMoving=2),
-    lambda d: d["StateAndError"].update(BrakeState=[0] * 5),
     lambda d: d["StateAndError"].update(Error_AxisID=7),
     lambda d: d["MsgTitle"].update(Stamp="not-a-time"),
 ])
@@ -68,6 +66,18 @@ def test_bad_schema_and_nonfinite_numbers_fail_closed(change) -> None:
     change(document)
     with pytest.raises(ProtocolError):
         DatasheetFrameDecoder(byte_order="little").feed(datasheet_frame(document))
+
+
+@pytest.mark.parametrize("brake_state", [None, [0] * 5, "stale", {"ignored": True}])
+def test_datasheet_ignores_unreliable_brake_state(brake_state) -> None:
+    document = datasheet_document()
+    if brake_state is None:
+        document["StateAndError"].pop("BrakeState", None)
+    else:
+        document["StateAndError"]["BrakeState"] = brake_state
+    (sample,) = DatasheetFrameDecoder(byte_order="little").feed(datasheet_frame(document))
+    assert sample.enabled is True
+    assert not hasattr(sample, "brake_states")
 
 
 def test_bad_json_duplicate_keys_and_invalid_utf8_fail_closed() -> None:
