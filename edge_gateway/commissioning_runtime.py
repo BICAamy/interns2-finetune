@@ -11,12 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-import numpy as np
-from scipy.spatial.transform import Rotation
-
 from robot_runtime.real_config import RealRobotConfig
-from simulation.entry_point_env.config import DEFAULT_CONFIG_PATH, EntryPointEnvConfig
-from simulation.entry_point_env.kinematics import E05ProKinematics
 
 from .cloud_transport import telemetry_from_sample
 from .huayan.adapter import (
@@ -451,6 +446,8 @@ def observe_stationary(
     poll_s: float = 0.05,
 ) -> None:
     """Short pre-motion stationary observation; any unexpected motion aborts."""
+    from scipy.spatial.transform import Rotation
+
     initial = sampler.snapshot().sample
     start_pose = initial.base_pose[:3]
     start_joints = initial.joint_positions_deg
@@ -511,6 +508,12 @@ def make_approval(config: RealRobotConfig, *, package_version: str) -> MotionApp
 
 def make_path_ik(config: RealRobotConfig, start: RobotTelemetry):
     """Use the Step 8 calibrated E05-Pro model for every 0.1 mm path sample."""
+    import numpy as np
+    from scipy.spatial.transform import Rotation
+
+    from simulation.entry_point_env.config import DEFAULT_CONFIG_PATH, EntryPointEnvConfig
+    from simulation.entry_point_env.kinematics import E05ProKinematics
+
     if start.joint_positions_deg is None or start.actual_pose_robot_base is None:
         raise ValueError("actual start pose and joints are required for IK")
     sim = EntryPointEnvConfig.from_yaml(DEFAULT_CONFIG_PATH)
@@ -557,6 +560,8 @@ def validate_final_observation(
     before: LocalObservation, after: LocalObservation, config: RealRobotConfig,
 ) -> None:
     """Last cross-check after IK and human confirmation, before journal/write."""
+    from scipy.spatial.transform import Rotation
+
     a, b = before.telemetry, after.telemetry
     if b.sequence <= a.sequence or b.state_age_ms is None or b.state_age_ms > config.deadlines.state_stale_ms:
         raise ValueError("final DataSheet freshness check failed")
