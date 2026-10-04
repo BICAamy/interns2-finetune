@@ -307,7 +307,6 @@ echo "APP_ROOT    = $APP_ROOT"
 echo "MODEL_DIR   = $MODEL_DIR"
 if [[ "$ROBOT_MODE" == real ]]; then
     echo "ROBOT MODE  = REAL / OBSERVE ONLY"
-    echo "CONFIG SHA  = $CONFIG_SHA"
     echo "BLOCKERS    = $CONFIG_MISSING"
 else
     echo "ROBOT MODE  = SIMULATION"

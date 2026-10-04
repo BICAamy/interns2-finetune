@@ -23,6 +23,11 @@ class ServiceScriptsTest(unittest.TestCase):
                 self.assertIn(expected, content)
                 self.assertNotIn('LOG_DIR="$BUNDLE_ROOT/logs/services"', content)
 
+    def test_real_startup_has_no_removed_config_sha_reference(self) -> None:
+        content = (SERVICE_SCRIPTS / "start_all.sh").read_text(encoding="utf-8")
+        self.assertNotIn("CONFIG_SHA", content)
+        self.assertNotIn("REAL_CONFIG_SHA256", content)
+
     def test_bash_syntax(self) -> None:
         scripts = (
             "start_all.sh",
