@@ -31,6 +31,9 @@ export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
 export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
 export NCCL_CUMEM_HOST_ENABLE="${NCCL_CUMEM_HOST_ENABLE:-0}"
 export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-0}"
+export GATEWAY_AUTH_SECRET_FILE="$PWD/configs/gateway-auth.local"
+export GATEWAY_EXPECTED_ID=mac-huayan-ph590320009
+export ROBOT_REAL_MIRROR=1
 
 cd "$APP_ROOT"
 
@@ -67,8 +70,9 @@ fail() {
 }
 
 ENV_ROBOT_MODE="${ROBOT_MODE:-}"
-ROBOT_MODE=simulation
-REAL_CONFIG_INPUT=""
+ROBOT_MODE="real"
+REAL_CONFIG_INPUT="configs/robot-real.local.yaml"
+REAL_CONFIG_GIVEN=false
 MODE_GIVEN=false
 CHECK_CONFIG=false
 
@@ -85,6 +89,7 @@ while (( $# > 0 )); do
             (( $# >= 2 )) || fail "--real-config requires a file path."
             [[ -z "$REAL_CONFIG_INPUT" ]] || fail "--real-config was supplied more than once."
             REAL_CONFIG_INPUT="$2"
+            REAL_CONFIG_GIVEN=true
             shift 2
             ;;
         --check-config)
