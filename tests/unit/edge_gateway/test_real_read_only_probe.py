@@ -26,7 +26,6 @@ from tests.fakes.huayan_controller import CommandAction, FakeHuayanController
 
 def fake_config(fake: FakeHuayanController, *, version: str = "6.3.6.20240305") -> RealRobotConfig:
     return RealRobotConfig.model_validate({
-        "allowed_control": "observe-only",
         "controller": {
             "host": "127.0.0.1",
             "command_port": fake.command_port,
@@ -179,7 +178,6 @@ def test_fake_probe_reads_only_allowlisted_commands_and_captures_one_frame(tmp_p
             config, byte_order="little",
             approved_tcp_name="TCP_1", approved_ucs_name="Point_1",
         )
-        assert result.summary["control_mode"] == "observe-only"
         assert result.summary["device_sn"] == "FAKE-E05-001"
         assert result.summary["joint_positions_deg"][2] == 81.099
         assert result.raw_datasheet_frame.startswith(b"LTBR")
@@ -212,7 +210,6 @@ def test_real_probe_check_config_never_connects_and_gateway_requires_read_only_f
     config_path = tmp_path / "robot-real.local.yaml"
     config_path.write_text("""\
 schema_version: '1.0'
-allowed_control: observe-only
 controller:
   host: 192.168.0.10
   command_port: 10003

@@ -58,7 +58,7 @@ def test_simulation_defaults_and_explicit_mode(arguments: tuple[str, ...]) -> No
         (("--robot-mode", "invalid"), "--robot-mode must be"),
         (("--robot-mode", "simulation", "--real-config", str(EXAMPLE)), "not allowed"),
         (("--robot-mode", "real"), "requires --real-config"),
-        (("--real-control", "enabled"), "only valid in real mode"),
+        (("--real-control", "enabled"), "Unknown argument"),
         (("--robot-mode", "real", "--real-config", "missing.yaml"), "does not exist"),
     ],
 )
@@ -69,13 +69,12 @@ def test_invalid_combinations_fail_before_start(arguments: tuple[str, ...], mess
     assert "[1/4] Starting" not in result.stdout
 
 
-def test_real_config_is_observe_only_even_when_enabled_requested() -> None:
-    for suffix in ((), ("--real-control", "enabled")):
-        result = check("--robot-mode", "real", "--real-config", str(EXAMPLE), *suffix)
-        assert result.returncode == 0, result.stderr
-        assert "REAL / OBSERVE ONLY" in result.stdout
-        assert "blocking_fields=" in result.stdout
-        assert "[1/4] Starting" not in result.stdout
+def test_real_config_has_no_startup_control_mode() -> None:
+    result = check("--robot-mode", "real", "--real-config", str(EXAMPLE))
+    assert result.returncode == 0, result.stderr
+    assert "REAL (blocking_fields=" in result.stdout
+    assert "observe-only" not in result.stdout
+    assert "[1/4] Starting" not in result.stdout
 
 
 def test_gateway_authentication_fails_preflight_without_both_inputs_or_confirmed_identity(
@@ -117,7 +116,7 @@ def test_gateway_authentication_preflight_accepts_complete_fake_identity(tmp_pat
         },
     )
     assert result.returncode == 0, result.stderr
-    assert "REAL / OBSERVE ONLY" in result.stdout
+    assert "REAL (blocking_fields=" in result.stdout
     assert "[1/4] Starting" not in result.stdout
     mirror = check(
         "--robot-mode", "real", "--real-config", str(config_path),
@@ -159,7 +158,6 @@ def test_relative_config_is_resolved_from_app_not_caller_cwd(tmp_path: Path) -> 
     [
         {"RUNTIME_MODE": "simulation"},
         {"ROBOT_MODE": "simulation"},
-        {"ROBOT_CONTROL_MODE": "enabled"},
         {"REAL_CONFIG_PATH": "/tmp/unsolicited.yaml"},
     ],
 )
@@ -175,13 +173,13 @@ def test_config_report_is_stable_and_unknown_fields_are_rejected(tmp_path: Path)
     assert first.returncode == second.returncode == 0
     assert first.stdout == second.stdout
     bad = tmp_path / "bad.yaml"
-    bad.write_text("schema_version: '1.0'\nallowed_control: observe-only\ntoken: secret\n")
+    bad.write_text("schema_version: '1.0'\ntoken: secret\n")
     result = check("--robot-mode", "real", "--real-config", str(bad))
     assert result.returncode != 0
     assert "real config validation failed" in result.stderr
 
     duplicate = tmp_path / "duplicate.yaml"
-    duplicate.write_text("schema_version: '1.0'\nallowed_control: observe-only\nallowed_control: enabled\n")
+    duplicate.write_text("schema_version: '1.0'\nschema_version: '1.0'\n")
     assert check("--robot-mode", "real", "--real-config", str(duplicate)).returncode != 0
 
     nonfinite = tmp_path / "nonfinite.yaml"
@@ -189,10 +187,10 @@ def test_config_report_is_stable_and_unknown_fields_are_rejected(tmp_path: Path)
     assert check("--robot-mode", "real", "--real-config", str(nonfinite)).returncode != 0
 
 
-def test_enabled_config_is_rejected_before_step11(tmp_path: Path) -> None:
-    selected = tmp_path / "enabled.yaml"
-    selected.write_text(EXAMPLE.read_text().replace("allowed_control: observe-only", "allowed_control: enabled"))
-    result = check("--robot-mode", "real", "--real-config", str(selected), "--real-control", "enabled")
+def test_removed_control_mode_field_is_rejected(tmp_path: Path) -> None:
+    selected = tmp_path / "old-control-mode.yaml"
+    selected.write_text(EXAMPLE.read_text() + "\nallowed_control: observe-only\n")
+    result = check("--robot-mode", "real", "--real-config", str(selected))
     assert result.returncode != 0
     assert "real config validation failed" in result.stderr
 
@@ -211,7 +209,7 @@ def test_syntax_of_all_service_scripts() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_real_web_is_explicitly_observe_only_with_no_simulated_pose_or_video() -> None:
+def test_real_web_has_no_simulated_pose_or_video_when_runtime_is_disconnected() -> None:
     settings = AgentSettings(
         base_url="http://127.0.0.1:23333/v1",
         api_key="EMPTY",
@@ -223,7 +221,6 @@ def test_real_web_is_explicitly_observe_only_with_no_simulated_pose_or_video() -
         top_p=0.95,
         max_tool_rounds=1,
         runtime_mode=RuntimeMode.REAL,
-        robot_control_mode="observe-only",
         real_config_path=str(EXAMPLE),
     )
     runtime = WebRuntime(settings)
@@ -231,7 +228,7 @@ def test_real_web_is_explicitly_observe_only_with_no_simulated_pose_or_video() -
         with TestClient(create_app(runtime)) as client:
             health = client.get("/health").json()
             assert health["runtime_mode"] == "real"
-            assert health["control_mode"] == "observe-only"
+            assert "control_mode" not in health
             session = client.post("/api/sessions").json()
             assert session["current_tcp"] is None
             base = f"/api/sessions/{session['session_id']}"

@@ -110,7 +110,6 @@ class RobotTelemetry(ContractModel):
     schema_version: SchemaVersion = SCHEMA_VERSION
     runtime_mode: RuntimeMode
     provider: RobotProvider
-    control_mode: Literal["observe-only", "enabled"] | None = None
     sequence: int = Field(ge=0)
     freshness: SourceFreshness = SourceFreshness.UNKNOWN
     connections: RobotConnectionState = Field(default_factory=RobotConnectionState)
@@ -179,7 +178,6 @@ class RobotHealth(ContractModel):
     schema_version: SchemaVersion = SCHEMA_VERSION
     runtime_mode: RuntimeMode
     provider: RobotProvider
-    control_mode: Literal["observe-only", "enabled"] | None = None
     status: Literal["healthy", "degraded", "disconnected"]
     freshness: SourceFreshness = SourceFreshness.UNKNOWN
     connections: RobotConnectionState = Field(default_factory=RobotConnectionState)
@@ -193,9 +191,6 @@ class RobotHealth(ContractModel):
         ):
             raise ValueError("runtime_mode and provider disagree")
         if self.ready_for_motion:
-            if self.runtime_mode == RuntimeMode.REAL:
-                if self.control_mode != "enabled":
-                    raise ValueError("real motion readiness requires enabled control mode")
             if self.status != "healthy" or self.freshness != SourceFreshness.FRESH:
                 raise ValueError("ready_for_motion requires fresh healthy state")
         return self
@@ -266,6 +261,33 @@ class MoveRelativeRequest(ContractModel):
     def validate_translation(self) -> "MoveRelativeRequest":
         if all(float(value) == 0.0 for value in self.translation_mm):
             raise ValueError("translation_mm cannot be the zero vector")
+        return self
+
+
+class SetEnabledRequest(ContractModel):
+    schema_version: SchemaVersion = SCHEMA_VERSION
+    command_id: str = Field(min_length=1, max_length=128)
+    enabled: bool
+
+
+class SetEnabledResult(ContractModel):
+    schema_version: SchemaVersion = SCHEMA_VERSION
+    command_id: str = Field(min_length=1, max_length=128)
+    status: ToolStatus
+    requested_enabled: bool
+    confirmed_enabled: bool | None = None
+    message: str = Field(min_length=1)
+    error_code: ErrorCode | None = None
+
+    @model_validator(mode="after")
+    def validate_status(self) -> "SetEnabledResult":
+        if self.status == ToolStatus.SUCCESS:
+            if self.confirmed_enabled is not self.requested_enabled:
+                raise ValueError("successful enable result must confirm the requested state")
+            if self.error_code is not None:
+                raise ValueError("successful enable result cannot contain error_code")
+        elif self.error_code is None:
+            raise ValueError("failed enable result requires error_code")
         return self
 
 

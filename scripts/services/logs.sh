@@ -14,7 +14,7 @@ import urllib.request
 with urllib.request.urlopen("http://127.0.0.1:8001/health", timeout=2) as response:
     health = json.load(response)
 if health.get("runtime_mode") == "real":
-    print("REAL / OBSERVE ONLY" if health.get("control_mode") == "observe-only" else "REAL / MODE MISMATCH")
+    print("REAL")
 elif health.get("service") == "robot-simulation":
     print("SIMULATION")
 else:

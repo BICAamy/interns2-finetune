@@ -12,7 +12,6 @@ from robot_runtime.real_config import RealRobotConfig
 
 def no_tool_data() -> dict:
     return {
-        "allowed_control": "observe-only",
         "tool": {
             "setup": "flange_only_no_tool",
             "tcp_name": "Flange_0",
@@ -33,7 +32,6 @@ def test_no_tool_profile_accepts_zero_setup_but_never_enables_control() -> None:
     assert config.tool.flange_to_tcp.translation_mm == (0, 0, 0)
     assert config.tool.mount_angle_deg == (0, 0)
     assert not any(name.startswith("tool.") for name in config.blocking_fields())
-    assert config.allowed_control == "observe-only"
     assert "limits.joint_soft_limits_deg" in config.blocking_fields()
 
 
@@ -67,13 +65,13 @@ def test_unmarked_zero_setup_does_not_complete_motion_fields() -> None:
     assert "tool.setup" in config.blocking_fields()
 
 
-def test_unknown_setup_and_enabled_control_remain_rejected() -> None:
+def test_unknown_setup_and_removed_control_mode_remain_rejected() -> None:
     data = no_tool_data()
     data["tool"]["setup"] = "needle_tip"
     with pytest.raises(ValidationError):
         RealRobotConfig.model_validate(data)
     data = no_tool_data()
-    data["allowed_control"] = "enabled"
+    data["allowed_control"] = "observe-only"
     with pytest.raises(ValidationError):
         RealRobotConfig.model_validate(data)
 

@@ -157,7 +157,7 @@ function TrajectoryPlot({ telemetry }: { telemetry: SimulationTelemetry | null }
 export default function App() {
   const [session, setSession] = useState<SessionSnapshot | null>(null);
   const [runtimeMode, setRuntimeMode] = useState<"simulation" | "real" | null>(null);
-  const [controlMode, setControlMode] = useState<string | null>(null);
+  const [enableBusy, setEnableBusy] = useState(false);
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [image, setImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -196,7 +196,6 @@ export default function App() {
       .then((health) => {
         if (!cancelled) {
           setRuntimeMode(health.runtime_mode);
-          setControlMode(health.control_mode);
         }
       })
       .catch((error) => {
@@ -354,6 +353,19 @@ export default function App() {
       setSession(await action());
     } catch (error) {
       setRequestError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function setRobotEnabled(enabled: boolean) {
+    if (!session || runtimeMode !== "real" || enableBusy) return;
+    setEnableBusy(true);
+    setRequestError(null);
+    try {
+      await api.setRobotEnabled(session.session_id, enabled);
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setEnableBusy(false);
     }
   }
 
@@ -592,7 +604,7 @@ export default function App() {
           <div className="brand-mark">IS</div>
           <div>
             <h1>InternS2 手术导航控制台</h1>
-            <p>{runtimeMode === "real" ? `真实机械臂 · ${controlMode === "enabled" ? "网页确认控制" : "仅观察"} · 实际反馈数字孪生` : runtimeMode === "simulation" ? "E05-Pro 仿真定位 · 人工确认模式" : "正在确认机器人运行模式"}</p>
+            <p>{runtimeMode === "real" ? "真实机械臂 · 网页确认控制 · 实际反馈数字孪生" : runtimeMode === "simulation" ? "E05-Pro 仿真定位 · 人工确认模式" : "正在确认机器人运行模式"}</p>
           </div>
         </div>
         <div className="topbar-actions">
@@ -602,6 +614,24 @@ export default function App() {
           <span className={`connection ${videoConnected ? "online" : "offline"}`}>
             {videoConnected ? "数字孪生画面已连接" : "视频连接中"}
           </span>
+          {runtimeMode === "real" && (
+            <>
+              <button
+                className="button primary"
+                disabled={!session || enableBusy || telemetry?.enabled === true || realStale}
+                onClick={() => void setRobotEnabled(true)}
+              >
+                {enableBusy ? "处理中…" : "使能"}
+              </button>
+              <button
+                className="button secondary"
+                disabled={!session || enableBusy || telemetry?.enabled !== true || telemetry?.moving === true || realStale}
+                onClick={() => void setRobotEnabled(false)}
+              >
+                {enableBusy ? "处理中…" : "去使能"}
+              </button>
+            </>
+          )}
           <button
             className="button stop"
             disabled={!session || runtimeMode !== "simulation"}
@@ -628,7 +658,7 @@ export default function App() {
             {session?.message && <p className="operation-message">{session.message}</p>}
           </div>
           <div className="session-meta">
-            <span>{runtimeMode === "real" ? `真实 / ${controlMode === "enabled" ? "已启用提案" : "仅观察"}` : runtimeMode === "simulation" ? "仿真模式" : "模式未确认"}</span>
+            <span>{runtimeMode === "real" ? `真实 / ${telemetry?.enabled ? "已使能" : "未使能"}` : runtimeMode === "simulation" ? "仿真模式" : "模式未确认"}</span>
             <code>{session?.session_id.slice(-10) ?? "—"}</code>
           </div>
         </section>
@@ -737,10 +767,10 @@ export default function App() {
               </button>
               <button
                 className="button confirm"
-                disabled={!session?.pending_confirmation || (runtimeMode === "real" && (controlMode !== "enabled" || realStale))}
+                disabled={!session?.pending_confirmation || (runtimeMode === "real" && (telemetry?.enabled !== true || realStale))}
                 onClick={() => session && run(() => api.confirm(session.session_id, proposal?.fingerprint))}
               >
-                {runtimeMode === "real" ? (controlMode === "enabled" ? "确认此 fingerprint 并执行" : "真实模式仅观察") : "确认并执行"}
+                {runtimeMode === "real" ? (telemetry?.enabled ? "确认此 fingerprint 并执行" : "请先使能机械臂") : "确认并执行"}
               </button>
               <button
                 className="button secondary"
@@ -759,7 +789,7 @@ export default function App() {
             </div>
             <div className="safety-note">
               <strong>执行边界</strong>
-              <span>{runtimeMode === "real" ? (controlMode === "enabled" ? "只允许已生成 proposal 的单轴 move_relative；本次网页确认同时触发 Mac 本地 single-use ARM，不执行穿刺。" : "真实模式当前仅供观察；网页不能执行、停止、急停或复位。现场安全仍以物理急停和厂家页面为准。") : "确认只会移动机械臂并请求不可执行的路径预览，当前版本不会执行穿刺。"}</span>
+              <span>{runtimeMode === "real" ? "只允许已生成 proposal 的单轴 move_relative；网页只确认一次 fingerprint，Mac 自动创建 single-use ARM。" : "确认只会移动机械臂并请求不可执行的路径预览，当前版本不会执行穿刺。"}</span>
               {runtimeMode === "real" && proposal?.fingerprint && (
                 <code>fingerprint {proposal.fingerprint}</code>
               )}
@@ -828,7 +858,7 @@ export default function App() {
                 )}
                 {runtimeMode !== null && <div className="video-overlay top-left">
                   <span className={videoConnected ? "record-dot live" : "record-dot"} />
-                  {videoConnected ? (runtimeMode === "real" ? (controlMode === "enabled" ? "REAL / WEB CONFIRM" : "REAL / OBSERVE ONLY") : "REMOTE SIMULATION") : "RECONNECTING"}
+                  {videoConnected ? (runtimeMode === "real" ? "REAL / WEB CONTROL" : "REMOTE SIMULATION") : "RECONNECTING"}
                 </div>}
                 {runtimeMode !== null && <div className="video-overlay bottom-right">
                   frame {telemetry?.frame_sequence ?? 0}
@@ -955,8 +985,8 @@ export default function App() {
       </main>
 
       <footer>
-        <span>InternS2 Surgical Navigation · {runtimeMode === "real" ? (controlMode === "enabled" ? "REAL / WEB CONFIRM" : "REAL / OBSERVE ONLY") : "SIMULATION"}</span>
-        <strong>{runtimeMode === "real" ? (controlMode === "enabled" ? "单次网页确认 · Mac 本地一次性授权" : "真机命令发送已禁用") : "当前版本未执行穿刺"}</strong>
+        <span>InternS2 Surgical Navigation · {runtimeMode === "real" ? "REAL / WEB CONTROL" : "SIMULATION"}</span>
+        <strong>{runtimeMode === "real" ? "使能状态来自真实反馈 · 运动需单次 fingerprint 确认" : "当前版本未执行穿刺"}</strong>
       </footer>
     </div>
   );

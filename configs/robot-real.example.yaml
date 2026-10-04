@@ -1,6 +1,5 @@
 # 这是示例配置。复制后填写现场确认过的数据；null 表示还没确认。
 schema_version: "1.0" # 配置格式版本
-allowed_control: observe-only # 目前禁止控制真机运动
 
 controller:
   host: null # 控制器的 TCP 地址，不一定是网页地址

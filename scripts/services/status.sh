@@ -40,19 +40,17 @@ try:
         robot = json.load(response)
     if robot.get("runtime_mode") == "real":
         real_ok = (
-            robot.get("control_mode") == "observe-only"
-            and robot.get("provider") == "huayan_edge_gateway"
+            robot.get("provider") == "huayan_edge_gateway"
             and robot.get("status") in {"healthy", "degraded"}
-            and robot.get("ready_for_motion") is False
             and robot.get("error") in {
                 None, "gateway_disconnected", "datasheet_disconnected",
                 "datasheet_stale", "command_socket_disconnected",
             }
         )
-        mode = "REAL / OBSERVE ONLY" if real_ok else "REAL / MODE MISMATCH"
+        mode = "REAL" if real_ok else "REAL / MODE MISMATCH"
         detail = (
             "MODE MISMATCH" if not real_ok else
-            "HEALTHY (state fresh, observe-only)" if robot.get("status") == "healthy"
+            "HEALTHY (state fresh)" if robot.get("status") == "healthy"
             else f"DEGRADED ({robot.get('error')})"
         )
     else:
@@ -76,8 +74,6 @@ try:
         web = json.load(response)
     expected = "real" if mode.startswith("REAL") else "simulation"
     healthy = mode != "UNKNOWN" and web.get("runtime_mode") == expected
-    if mode.startswith("REAL"):
-        healthy = healthy and web.get("control_mode") == "observe-only"
 except Exception:
     healthy = False
 print(f"{'agent-web':22} {'RUNNING' if healthy else 'DOWN':9} :{8000:<5}  {'HEALTHY' if healthy else 'MODE MISMATCH / UNAVAILABLE'}")

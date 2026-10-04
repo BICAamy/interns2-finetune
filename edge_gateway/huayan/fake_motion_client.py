@@ -13,7 +13,8 @@ from .adapter import read_override, read_waypoint_id
 from .command_codec import CommandFrameDecoder, decode_reply, encode_read
 from .models import ProtocolError, ReadCommand, ResponseUnknown
 from .motion_codec import (
-    LinearWaypoint, decode_write_reply, encode_software_stop, encode_speed_override,
+    LinearWaypoint, decode_write_reply, encode_group_enabled,
+    encode_software_stop, encode_speed_override,
 )
 
 
@@ -100,6 +101,12 @@ class FakeMotionClient:
     def set_override(self, value: float) -> bool:
         return decode_write_reply(
             self._exchange(encode_speed_override(value)), command="SetOverride",
+        )
+
+    def set_enabled(self, enabled: bool) -> bool:
+        command = "GrpEnable" if enabled else "GrpDisable"
+        return decode_write_reply(
+            self._exchange(encode_group_enabled(enabled)), command=command,
         )
 
     def __enter__(self) -> "FakeMotionClient":

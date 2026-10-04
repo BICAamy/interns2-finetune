@@ -1,4 +1,4 @@
-"""Mac observe-only edge process; never contains a motion command path."""
+"""Mac edge gateway for authenticated feedback and explicitly confirmed commands."""
 
 from __future__ import annotations
 
@@ -9,8 +9,9 @@ import time
 from typing import Callable
 
 from surgical_contracts import (
-    GatewayControlMode, LinkState, RobotCommandEnvelope, RobotCommandResult,
-    RobotTelemetry,
+    ErrorCode, GatewayCommandKind, LinkState, RobotCommandEnvelope,
+    RobotCommandResult, RobotTelemetry, SetEnabledRequest, ToolStatus,
+    command_fingerprint,
     load_gateway_secret,
 )
 
@@ -50,19 +51,17 @@ class EdgeGateway:
         self._command = CommandClient( #一问一答，10003
             self._controller_host, self._command_port, timeout_s=0.5, scope=self._scope,
         )
-        cloud_control = (
-            GatewayControlMode(config.cloud_control)
-            if isinstance(config, EdgeConfig)
-            else GatewayControlMode.OBSERVE_ONLY
-        )
+        self._controller_operation = threading.Lock()
+        self._controller_operation_active = threading.Event()
+        installed_handler = command_handler
+        if self._real and installed_handler is None:
+            installed_handler = self._execute_real_command
         self._cloud = CloudTransport( # mac与服务器连接（通过websocket）
             config.server_url,
             secret=self.secret,
             gateway_id=config.gateway_id,
-            control_mode=cloud_control,
-            command_handler=command_handler,
+            command_handler=installed_handler,
         )
-        self._cloud_control = cloud_control
         self.robot_model: str | None = None
         self.package_version: str | None = None
         self.device_sn: str | None = None
@@ -86,7 +85,7 @@ class EdgeGateway:
             if simulation or not started:
                 self.state.fault = True
                 raise ValueError("controller did not report a started hardware state")
-            if self._real or self._cloud_control == GatewayControlMode.ENABLED:
+            if self._real:
                 status = read_robot_state(self._command.request(ReadCommand.ROBOT_STATE))
                 emergency = read_emergency_info(self._command.request(ReadCommand.EMERGENCY_INFO))
                 self.robot_status = status
@@ -130,7 +129,6 @@ class EdgeGateway:
             watchdog=self.watchdog,
             robot_status=self.robot_status,
             emergency_status=self.emergency_status,
-            control_mode=self._cloud_control,
         )
     # 10004连接处
     def _poll_datasheet(self) -> None:
@@ -190,6 +188,8 @@ class EdgeGateway:
         self._producer.start()
 
     def _check_command_socket(self) -> None:
+        if self._controller_operation_active.is_set():
+            return
         try:
             if not self.state.command_connected:
                 self._query_identity()
@@ -205,6 +205,253 @@ class EdgeGateway:
             self._command.close()
             self.state.command_connected = False
             self.audit.record("command_socket_lost", reason=type(exc).__name__)
+
+    def _execute_real_command(
+        self, envelope: RobotCommandEnvelope, fingerprint: str,
+    ) -> RobotCommandResult:
+        """Run one server-dispatched command through the Step 11 local client."""
+        if not self._real or not isinstance(self.config, RealEdgeConfig):
+            return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+        if command_fingerprint(envelope) != fingerprint:
+            return self._failed_result(envelope, ErrorCode.COMMAND_CONFLICT)
+        if not self._controller_operation.acquire(blocking=False):
+            return self._failed_result(envelope, ErrorCode.COMMAND_CONFLICT)
+        self._controller_operation_active.set()
+        self._command.close()
+        try:
+            if envelope.command_kind == GatewayCommandKind.SET_ENABLED:
+                return self._execute_set_enabled(envelope)
+            if envelope.command_kind == GatewayCommandKind.MOVE_RELATIVE:
+                return self._execute_remote_motion(envelope, fingerprint)
+            return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+        except Exception as exc:
+            self.audit.record(
+                "remote_command_failed",
+                command_id=envelope.command_id,
+                reason=f"{type(exc).__name__}: {exc}"[:256],
+            )
+            return self._failed_result(envelope, ErrorCode.INTERNAL_ERROR)
+        finally:
+            self.state.command_connected = False
+            try:
+                self._query_identity()
+            except Exception as exc:
+                self.audit.record("command_socket_reconnect_failed", reason=type(exc).__name__)
+            # Keep the health-check path excluded until the command owner has
+            # either restored its 10003 session or recorded that reconnect
+            # failed.  Clearing this flag earlier lets two threads share and
+            # corrupt the same request/reply stream.
+            self._controller_operation_active.clear()
+            self._controller_operation.release()
+
+    @staticmethod
+    def _failed_result(
+        envelope: RobotCommandEnvelope, error_code: ErrorCode,
+    ) -> RobotCommandResult:
+        return RobotCommandResult(
+            gateway_session_id=envelope.gateway_session_id,
+            command_id=envelope.command_id,
+            command_kind=envelope.command_kind,
+            status=ToolStatus.FAILED,
+            error_code=error_code,
+        )
+
+    def _sampler(self):
+        gateway = self
+
+        class GatewaySampler:
+            watchdog = gateway.watchdog
+
+            @staticmethod
+            def snapshot():
+                record, _events = gateway.state.snapshot()
+                if record is None or not gateway.watchdog.is_fresh(record.sample):
+                    raise RuntimeError("gateway DataSheet sample is missing or stale")
+                return record
+
+        return GatewaySampler()
+
+    def _execute_set_enabled(
+        self, envelope: RobotCommandEnvelope,
+    ) -> RobotCommandResult:
+        from .huayan.adapter import read_robot_state
+        from .huayan.models import ReadCommand
+        from .huayan.real_motion_client import LocalRealMotionClient
+
+        payload = envelope.payload
+        if not isinstance(payload, SetEnabledRequest):
+            return self._failed_result(envelope, ErrorCode.INVALID_COMMAND_SCHEMA)
+        config = self.config.robot_config
+        if config is None:
+            return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+        sampler = self._sampler()
+        before = sampler.snapshot()
+        if not payload.enabled and (before.sample.moving or not before.sample.in_position):
+            return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+        timeout_s = config.deadlines.response_ms / 1000
+        deadline = time.monotonic() + config.deadlines.startup_ms / 1000
+        with LocalRealMotionClient(
+            config, timeout_s=timeout_s, require_local_terminal=False,
+        ) as client:
+            state = read_robot_state(client.request(ReadCommand.ROBOT_STATE))
+            if not payload.enabled and state.moving:
+                return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+            if state.enabled is not payload.enabled and not client.set_enabled(
+                payload.enabled,
+                disable_stationary_confirmed=(not state.moving and not before.sample.moving),
+            ):
+                return self._failed_result(envelope, ErrorCode.INTERNAL_ERROR)
+            while time.monotonic() < deadline:
+                state = read_robot_state(client.request(ReadCommand.ROBOT_STATE))
+                self.robot_status = state
+                if state.moving:
+                    return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+                if state.enabled is payload.enabled:
+                    break
+                time.sleep(0.02)
+            else:
+                return self._failed_result(envelope, ErrorCode.ROBOT_TIMEOUT)
+        while time.monotonic() < deadline:
+            current = sampler.snapshot()
+            if current.sample.moving:
+                return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+            if (
+                current.sequence > before.sequence
+                and current.sample.enabled is payload.enabled
+            ):
+                return RobotCommandResult(
+                    gateway_session_id=envelope.gateway_session_id,
+                    command_id=envelope.command_id,
+                    command_kind=envelope.command_kind,
+                    status=ToolStatus.SUCCESS,
+                    confirmed_enabled=payload.enabled,
+                )
+            time.sleep(0.02)
+        return self._failed_result(envelope, ErrorCode.ROBOT_TIMEOUT)
+
+    def _execute_remote_motion(
+        self, envelope: RobotCommandEnvelope, fingerprint: str,
+    ) -> RobotCommandResult:
+        from .command_journal import CommandJournal
+        from .commissioning_runtime import (
+            make_approval, make_path_ik, observe_stationary,
+            read_local_observation, read_motion_feedback,
+        )
+        from .fake_motion import LocalMotionTiming, LocalMotionTrial
+        from .huayan.adapter import read_current_fsm, read_robot_state
+        from .huayan.models import ReadCommand
+        from .huayan.real_motion_client import LocalRealMotionClient
+        from .remote_motion import RemoteMotionExecutor
+
+        config = self.config.robot_config
+        if config is None:
+            return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+        sampler = self._sampler()
+        timeout_s = config.deadlines.response_ms / 1000
+        expected_override = config.motion.controller_override
+        before = sampler.snapshot()
+        if (
+            before.sample.moving or before.sample.fsm_code != 33
+            or not before.sample.enabled or not before.sample.in_position
+        ):
+            return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+
+        # SetOverride and its two-channel confirmation are completed before a
+        # fresh single-use 10003 connection is opened for WayPoint.
+        with LocalRealMotionClient(
+            config, timeout_s=timeout_s, require_local_terminal=False,
+        ) as override_client:
+            state = read_robot_state(override_client.request(ReadCommand.ROBOT_STATE))
+            fsm = read_current_fsm(override_client.request(ReadCommand.CURRENT_FSM))
+            if state.moving or not state.enabled or not state.in_position or fsm != 33:
+                return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+            current_override = override_client.current_override()
+            if abs(current_override - expected_override) > 1e-6:
+                if not override_client.set_override(
+                    expected_override, stationary_confirmed=True,
+                ):
+                    return self._failed_result(envelope, ErrorCode.INTERNAL_ERROR)
+            if abs(override_client.current_override() - expected_override) > 1e-6:
+                return self._failed_result(envelope, ErrorCode.INTERNAL_ERROR)
+        override_deadline = time.monotonic() + config.deadlines.startup_ms / 1000
+        while time.monotonic() < override_deadline:
+            confirmed = sampler.snapshot()
+            if confirmed.sample.moving:
+                return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+            if (
+                confirmed.sequence > before.sequence
+                and abs(confirmed.sample.override - expected_override) <= 1e-6
+            ):
+                break
+            time.sleep(0.02)
+        else:
+            return self._failed_result(envelope, ErrorCode.ROBOT_TIMEOUT)
+
+        with LocalRealMotionClient(
+            config, timeout_s=timeout_s, require_local_terminal=False,
+        ) as motion_client:
+            observation_holder = {}
+
+            def snapshot():
+                observation = read_local_observation(
+                    config, motion_client, sampler,
+                    session_id=envelope.gateway_session_id,
+                )
+                observation_holder["value"] = observation
+                self.robot_status = read_robot_state(
+                    motion_client.request(ReadCommand.ROBOT_STATE)
+                )
+                return observation.telemetry
+
+            def readback():
+                observation = observation_holder.get("value")
+                if observation is None:
+                    snapshot()
+                    observation = observation_holder["value"]
+                return observation.readback
+
+            initial = snapshot()
+            approval = make_approval(config, package_version=motion_client.package_version)
+            path_ik = make_path_ik(config, initial)
+            observe_stationary(sampler)
+            timing = LocalMotionTiming(
+                response_ms=config.deadlines.response_ms,
+                start_ms=config.deadlines.startup_ms,
+                motion_ms=config.deadlines.motion_ms,
+                stop_confirmation_ms=config.deadlines.stop_ack_ms,
+                stable_samples=config.arrival.stable_samples,
+                dwell_ms=config.arrival.dwell_ms,
+                position_tolerance_mm=config.arrival.position_tolerance_mm,
+                orientation_tolerance_deg=config.arrival.orientation_tolerance_deg,
+            )
+            def feedback():
+                result = read_motion_feedback(
+                    config, motion_client, sampler,
+                    session_id=envelope.gateway_session_id,
+                )
+                return result.telemetry, (
+                    f"moving_10003={result.moving_10003}, "
+                    f"moving_10004={result.moving_10004}, "
+                    f"fsm_10004={result.fsm_10004}"
+                )
+
+            with CommandJournal(
+                self.config.audit_path.parent / "commands.journal"
+            ) as journal:
+                executor = RemoteMotionExecutor(
+                    trial_factory=lambda: LocalMotionTrial(
+                        client=motion_client,
+                        journal=journal,
+                        timing=timing,
+                        approval=approval,
+                        path_ik=path_ik,
+                    ),
+                    snapshot=snapshot,
+                    readback=readback,
+                    feedback=feedback,
+                    poll_interval_s=0.02,
+                )
+                return executor.execute(envelope, fingerprint)
 
     def _wait_for_identity(self) -> None:
         deadline = time.monotonic() + 3
@@ -269,7 +516,6 @@ class EdgeGateway:
                                 watchdog=self.watchdog,
                                 robot_status=self.robot_status,
                                 emergency_status=self.emergency_status,
-                                control_mode=self._cloud_control,
                             )
                             self._cloud.send_state(telemetry)
                             self.state.acknowledged_through(record.sequence)
@@ -302,12 +548,12 @@ class EdgeGateway:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Observe-only Mac edge gateway")
+    parser = argparse.ArgumentParser(description="Authenticated Mac robot gateway")
     parser.add_argument("--fake-command-port", type=int)
     parser.add_argument("--fake-datasheet-port", type=int)
     parser.add_argument("--real-config", type=Path)
     parser.add_argument("--probe-summary", type=Path)
-    parser.add_argument("--connect-real-read-only", action="store_true")
+    parser.add_argument("--connect-real", action="store_true")
     parser.add_argument("--server-url", required=True)
     parser.add_argument("--secret-file", type=Path, required=True)
     parser.add_argument("--gateway-id", required=True)
@@ -317,8 +563,8 @@ def main() -> None:
     if args.real_config is not None:
         if args.fake_command_port is not None or args.fake_datasheet_port is not None:
             parser.error("real mode cannot accept fake controller ports")
-        if not args.connect_real_read_only:
-            parser.error("real gateway requires --connect-real-read-only")
+        if not args.connect_real:
+            parser.error("real gateway requires --connect-real")
         from robot_runtime.real_config import load_real_config
 
         from .huayan.real_probe import validate_probe_config, validate_probe_summary
@@ -329,6 +575,7 @@ def main() -> None:
             parser.error("real gateway requires a recent successful --probe-summary")
         validate_probe_summary(args.probe_summary, real, byte_order=args.datasheet_byte_order)
         config = RealEdgeConfig(
+            robot_config=real,
             controller_host=real.controller.host,
             command_port=real.controller.command_port,
             datasheet_port=real.controller.datasheet_port,
@@ -343,7 +590,7 @@ def main() -> None:
             stale_ms=real.deadlines.state_stale_ms,
         )
     else:
-        if args.connect_real_read_only or args.probe_summary:
+        if args.connect_real or args.probe_summary:
             parser.error("real-only options require --real-config")
         if args.fake_command_port is None or args.fake_datasheet_port is None:
             parser.error("fake mode requires both fake ports")

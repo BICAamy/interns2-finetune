@@ -26,6 +26,8 @@ from surgical_contracts import (
     RobotHealth,
     RobotState,
     RobotTelemetry,
+    SetEnabledRequest,
+    SetEnabledResult,
     Point3D,
     CoordinateSource,
     SimulationHealth,
@@ -187,6 +189,23 @@ class RobotRuntimeHTTPController:
         )
         self._validate_record(record, command_id, RobotCommandKind.MOVE_RELATIVE)
         return record
+
+    def set_enabled(
+        self, enabled: bool, command_id: str | None = None,
+    ) -> SetEnabledResult:
+        request = SetEnabledRequest(
+            command_id=command_id or self._command_id_factory(),
+            enabled=enabled,
+        )
+        record = self._submit_and_wait(
+            "/v1/commands/set-enabled",
+            RobotCommandKind.SET_ENABLED,
+            request,
+        )
+        if record.status != CommandExecutionStatus.SUCCEEDED:
+            error_code, message, _status = self._record_failure(record)
+            raise RobotSimulationClientError(error_code, message)
+        return self._result_model(record, SetEnabledResult)
 
     def move_to_entry(self, request: MoveToEntryRequest) -> MoveToEntryResult:
         record = self._submit_and_wait(

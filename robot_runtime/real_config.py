@@ -139,9 +139,6 @@ class ArrivalCriteria(_StrictModel):
 
 class RealRobotConfig(_StrictModel):
     schema_version: Literal["1.0"] = "1.0"
-    # Keep the Step 0-10 hard stop in the schema itself. Later motion steps
-    # must explicitly revise and re-test this cap before accepting enabled.
-    allowed_control: Literal["observe-only"] = "observe-only"
     controller: ControllerConfig = Field(default_factory=ControllerConfig)
     joint_mapping: JointMapping = Field(default_factory=JointMapping)
     base_to_sofa: RigidTransform = Field(default_factory=RigidTransform)
@@ -235,7 +232,7 @@ def main() -> int:
     parser.add_argument("path")
     args = parser.parse_args()
     config = load_real_config(args.path)
-    print(f"{config.allowed_control} {len(config.blocking_fields())}")
+    print(f"REAL {len(config.blocking_fields())}")
     return 0
 
 

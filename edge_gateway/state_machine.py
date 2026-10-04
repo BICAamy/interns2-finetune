@@ -1,4 +1,4 @@
-"""Observe-only Mac state and bounded rejection/idempotency memory."""
+"""Mac gateway state and bounded rejection/idempotency memory."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from .huayan.models import DatasheetSample
 
 class EdgeMode(str, Enum):
     DISCONNECTED = "disconnected" # Mac 还没连上服务器
-    OBSERVE_ONLY = "observe-only"
+    CONNECTED = "connected"
     DEGRADED = "degraded" # 有1条连接出现问题
     FAULT = "fault" # 发现安全/协议异常
 
@@ -60,12 +60,18 @@ class EdgeState:
                 return EdgeMode.DISCONNECTED
             if not self.command_connected or not self.datasheet_connected:
                 return EdgeMode.DEGRADED
-            return EdgeMode.OBSERVE_ONLY
+            return EdgeMode.CONNECTED
 
     @property
     def motion_enabled(self) -> bool:
-        # 这里现在硬编码了不允许移动
-        return False
+        with self._lock:
+            return bool(
+                self._latest is not None
+                and self._latest.sample.enabled
+                and not self._latest.sample.moving
+                and self._latest.sample.in_position
+                and not self.fault
+            )
 
     def start_cloud_session(self, session_id: str) -> None:
         # Mac 成功连上 server 以后更新状态。
@@ -115,7 +121,7 @@ class EdgeState:
 
 
 class RejectOnlyLedger:
-    """No command can be accepted in Step 5; duplicate IDs remain deterministic."""
+    """Reject commands when no typed executor is installed."""
 
     def __init__(self, *, max_records: int = 1024) -> None:
         if max_records < 1:

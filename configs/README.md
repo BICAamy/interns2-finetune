@@ -18,9 +18,9 @@ installing angles agree with the recorded values. The flange center is then
 the temporary calculation point, not a physical needle tip. Installing any
 attachment invalidates this profile and requires a new calibration.
 
-## Step 3 real-mode configuration
+## Real-mode configuration
 
-`robot-real.example.yaml` is a deliberately incomplete, observe-only template.
+`robot-real.example.yaml` is a deliberately incomplete template.
 `robot-real.local.yaml` is the checked-in configuration for the project's only
 real robot. Update it only with values checked on site and commit the change so
 the Mac and server can use the same Git revision. Do not put passwords, private
@@ -33,16 +33,25 @@ From the new server's `app/` directory, validate without starting any service:
   --real-config configs/robot-real.local.yaml --check-config
 ```
 
-The output reports the selected control mode and number of missing motion-gating
-fields. In Step 3, **even a complete configuration or `--real-control enabled`
-cannot enable motion**: the provider is disconnected and observe-only. The
-server and Mac obtain this configuration through Git; runtime commands no longer
-accept or compare a separately copied checksum. This command does
-not contact either device.
+The output reports the number of missing motion-gating fields. There is no
+startup control mode: the real runtime always waits for the authenticated Mac
+gateway, and the physical enabled state comes only from controller feedback.
+The server and Mac obtain this configuration through Git; runtime commands no
+longer accept or compare a separately copied checksum. This command does not
+contact either device.
+
+For a normal real-mode launch, `start_all.sh` also reads
+`motion.speed_mm_s` and `limits.max_speed_mm_s` from this YAML and exports them
+to agent-web. Therefore the speed shown in the web proposal, included in its
+fingerprint, checked by robot-runtime, and finally encoded by the Mac all comes
+from the same checked-in configuration. Real mode does not use the simulation
+defaults from `.env` for these two values.
 
 The no-tool profile validates zero flange-to-TCP translation/rotation, zero
 payload/center of gravity, a confirmed TCP name, and the two measured base
 installing angles. `--check-config` only validates data: it cannot prove the
-flange is physically bare or that Gate C has passed. With this profile, the
-read-only probe compares controller readbacks before a real gateway can start.
-It does not enable a motion command path; Step 11 commissioning remains separate.
+flange is physically bare or that Gate C has passed. The probe compares
+controller readbacks before a real gateway can start. Enable/disable and the
+approved single-axis relative motion are dispatched only through the
+authenticated gateway; motion additionally requires one matching web
+fingerprint confirmation.

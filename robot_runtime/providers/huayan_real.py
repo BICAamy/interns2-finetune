@@ -1,4 +1,4 @@
-"""Observe-only real provider; never sends a vendor command."""
+"""Authenticated Huayan real provider backed by the Mac gateway."""
 
 from __future__ import annotations
 
@@ -28,8 +28,8 @@ from ..provider import ProviderCapabilities, RobotRuntimeServiceError
 from ..remote_motion import RemoteMotionPolicy, RemoteMotionStore
 
 
-class HuayanRealStubProvider:
-    """Disconnected by default; optionally receives authenticated Mac state."""
+class HuayanRealProvider:
+    """Production real-robot provider backed by one authenticated Mac gateway."""
 
     mode = RuntimeMode.REAL
     capabilities = ProviderCapabilities()
@@ -45,12 +45,6 @@ class HuayanRealStubProvider:
         self.mirror_worker = mirror_worker
         if remote_motion_policy is not None and gateway_sessions is None:
             raise ValueError("remote motion requires authenticated gateway sessions")
-        if (
-            remote_motion_policy is not None
-            and gateway_sessions is not None
-            and gateway_sessions.control_mode.value != "enabled"
-        ):
-            raise ValueError("remote motion requires an enabled gateway session")
         self.remote_motion = (
             RemoteMotionStore(remote_motion_policy, telemetry=gateway_sessions.telemetry)
             if remote_motion_policy is not None and gateway_sessions is not None
@@ -91,7 +85,6 @@ class HuayanRealStubProvider:
         return RobotHealth(
             runtime_mode=RuntimeMode.REAL,
             provider=RobotProviderKind.HUAYAN_EDGE_GATEWAY,
-            control_mode="observe-only",
             status="degraded",
             freshness=SourceFreshness.DISCONNECTED,
             connections=self._connections(),
@@ -105,7 +98,6 @@ class HuayanRealStubProvider:
         return RobotTelemetry(
             runtime_mode=RuntimeMode.REAL,
             provider=RobotProviderKind.HUAYAN_EDGE_GATEWAY,
-            control_mode="observe-only",
             sequence=0,
             freshness=SourceFreshness.DISCONNECTED,
             connections=self._connections(),
@@ -115,7 +107,7 @@ class HuayanRealStubProvider:
     def _unavailable() -> RobotRuntimeServiceError:
         return RobotRuntimeServiceError(
             ErrorCode.OPERATION_NOT_ENABLED,
-            "Real robot motion and camera are unavailable in observe-only mode",
+            "Real robot operation is unavailable without an authenticated gateway",
         )
 
     def get_camera_state(self) -> SimulationCameraState:
@@ -138,8 +130,13 @@ class HuayanRealStubProvider:
             and kind == RobotCommandKind.MOVE_RELATIVE
         ):
             return self.remote_motion.propose(request)
+        if (
+            self.remote_motion is not None
+            and kind == RobotCommandKind.SET_ENABLED
+        ):
+            return self.remote_motion.set_enabled(request)
         record, _created = self._commands.reject(
-            kind, request, message="Real robot control is not enabled in Step 5"
+            kind, request, message="Requested real robot operation is not supported"
         )
         raise RobotRuntimeServiceError(
             ErrorCode.OPERATION_NOT_ENABLED,
@@ -195,3 +192,8 @@ class HuayanRealStubProvider:
         if self.mirror_worker is None:
             raise self._unavailable()
         return self.mirror_worker.wait_for_frame(after_sequence, timeout_s=timeout_s)
+
+
+# Kept temporarily for source compatibility with tests and older integrations.
+# Production startup uses HuayanRealProvider.
+HuayanRealStubProvider = HuayanRealProvider

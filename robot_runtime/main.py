@@ -7,8 +7,9 @@ import os
 from .api import create_app
 from .gateway_session import GatewaySessionManager
 from .mirror_worker import RealMirrorWorker
-from .providers.huayan_real import HuayanRealStubProvider
+from .providers.huayan_real import HuayanRealProvider
 from .real_config import load_real_config
+from .remote_motion import RemoteMotionPolicy
 from surgical_contracts import load_gateway_secret
 
 
@@ -36,51 +37,54 @@ def app_from_environment():
         if not config_path:
             raise ValueError("real mode requires REAL_CONFIG_PATH")
         config = load_real_config(config_path)
-        if os.environ.get("ROBOT_CONTROL_MODE") != "observe-only":
-            raise ValueError("real runtime must remain observe-only")
-        if secret_path:
-            expected_gateway_id = os.environ.get("GATEWAY_EXPECTED_ID")
-            if (
-                not expected_gateway_id
-                or not config.controller.device_sn
-                or not config.controller.model
-                or not config.controller.package_versions
-                or not config.deadlines.state_stale_ms
-            ):
-                raise ValueError("authenticated gateway requires confirmed identity and stale limit")
-            sessions = GatewaySessionManager(
-                secret=load_gateway_secret(secret_path),
-                gateway_id=expected_gateway_id,
-                device_sn=config.controller.device_sn,
-                robot_model=config.controller.model,
-                package_versions=tuple(config.controller.package_versions),
-                stale_ms=config.deadlines.state_stale_ms,
+        expected_gateway_id = os.environ.get("GATEWAY_EXPECTED_ID")
+        if (
+            not secret_path
+            or not expected_gateway_id
+            or not config.controller.device_sn
+            or not config.controller.model
+            or not config.controller.package_versions
+            or not config.deadlines.state_stale_ms
+            or not config.tool.tcp_name
+            or not config.limits.max_speed_mm_s
+            or not config.limits.max_step_mm
+        ):
+            raise ValueError(
+                "real runtime requires gateway authentication, confirmed identity, "
+                "TCP and motion limits"
             )
-            mirror = None
-            if mirror_enabled:
-                if (config.joint_mapping.sign is None) != (
-                    config.joint_mapping.zero_offset_deg is None
-                ):
-                    raise ValueError("joint mapping sign and zero offset must be set together")
-                if (config.base_to_sofa.translation_mm is None) != (
-                    config.base_to_sofa.quaternion_xyzw is None
-                ):
-                    raise ValueError(
-                        "Base-to-SOFA translation and quaternion must be set together"
-                    )
-                mirror = RealMirrorWorker(
-                    sessions.telemetry,
-                    stale_ms=config.deadlines.state_stale_ms,
-                    sign=config.joint_mapping.sign,
-                    zero_offset_deg=config.joint_mapping.zero_offset_deg,
-                    base_to_sofa_translation_mm=config.base_to_sofa.translation_mm,
-                    base_to_sofa_quaternion_xyzw=config.base_to_sofa.quaternion_xyzw,
-                )
-            return create_app(
-                provider=HuayanRealStubProvider(sessions, mirror_worker=mirror), mode="real"
-            )
+        sessions = GatewaySessionManager(
+            secret=load_gateway_secret(secret_path),
+            gateway_id=expected_gateway_id,
+            device_sn=config.controller.device_sn,
+            robot_model=config.controller.model,
+            package_versions=tuple(config.controller.package_versions),
+            stale_ms=config.deadlines.state_stale_ms,
+        )
+        mirror = None
         if mirror_enabled:
-            raise ValueError("real SOFA mirror requires authenticated gateway settings")
+            mirror = RealMirrorWorker(
+                sessions.telemetry,
+                stale_ms=config.deadlines.state_stale_ms,
+                sign=config.joint_mapping.sign,
+                zero_offset_deg=config.joint_mapping.zero_offset_deg,
+                base_to_sofa_translation_mm=config.base_to_sofa.translation_mm,
+                base_to_sofa_quaternion_xyzw=config.base_to_sofa.quaternion_xyzw,
+            )
+        policy = RemoteMotionPolicy(
+            tcp_name=config.tool.tcp_name,
+            ucs_name="Base",
+            max_speed_mm_s=config.limits.max_speed_mm_s,
+            max_step_mm=config.limits.max_step_mm,
+        )
+        return create_app(
+            provider=HuayanRealProvider(
+                sessions,
+                mirror_worker=mirror,
+                remote_motion_policy=policy,
+            ),
+            mode="real",
+        )
     return create_app(mode=mode)
 
 

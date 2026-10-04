@@ -62,7 +62,6 @@ def read_motion_limits(
         linear = read_linear_max_motion(command.request(ReadCommand.LINEAR_MAX_MOTION))
 
     return {
-        "control_mode": "observe-only",
         "captured_at_ms": initial.summary["captured_at_ms"],
         "device_sn": initial.summary["device_sn"],
         "robot_model": model,

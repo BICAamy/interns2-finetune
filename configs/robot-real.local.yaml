@@ -1,6 +1,5 @@
-# 项目唯一真机的 Git 跟踪配置；Mac 和服务器使用同一提交。当前仅允许读取状态，禁止运动控制。
+# 项目唯一真机的 Git 跟踪配置；Mac 和服务器使用同一提交。
 schema_version: "1.0"
-allowed_control: observe-only
 
 controller:
   host: 192.168.0.10
@@ -48,7 +47,7 @@ limits:
   max_absolute_displacement_mm: 1000
 
 motion:
-  speed_mm_s: 70.0 # WayPoint直线运动速度，2mm/s
+  speed_mm_s: 70.0 # WayPoint 直线运动速度，单位 mm/s
   controller_override: 1.0 # 控制器速度倍率，1.0就是100%
 
 deadlines:

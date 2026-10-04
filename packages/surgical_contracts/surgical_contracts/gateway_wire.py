@@ -14,7 +14,6 @@ from pydantic import Field, model_validator
 
 from .base import ContractModel
 from .gateway import (
-    GatewayControlMode,
     GatewayHandshake,
     RobotCommandEnvelope,
     RobotCommandResult,
@@ -45,10 +44,8 @@ class GatewayStateFrame(ContractModel):
     def state_matches_session(self) -> "GatewayStateFrame":
         if self.state.gateway_session_id != self.gateway_session_id:
             raise ValueError("state belongs to another gateway session")
-        if self.state.runtime_mode != RuntimeMode.REAL or self.state.control_mode not in {
-            "observe-only", "enabled",
-        }:
-            raise ValueError("gateway state must be real with an explicit control mode")
+        if self.state.runtime_mode != RuntimeMode.REAL:
+            raise ValueError("gateway state must be real")
         return self
 
 

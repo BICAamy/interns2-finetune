@@ -39,8 +39,6 @@ class ProbeResult:
 
 def validate_probe_config(config: RealRobotConfig) -> None:
     controller = config.controller
-    if config.allowed_control != "observe-only":
-        raise ValueError("real config must remain observe-only")
     if not controller.host:
         raise ValueError("controller.host must be confirmed from the vendor page")
     _private_controller_host(controller.host)
@@ -206,7 +204,6 @@ def probe_once(
         raise ValueError("command and DataSheet joint positions disagree by more than 0.5 degrees")
     summary: dict[str, object] = {
         "captured_at_ms": time.time_ns() // 1_000_000,
-        "control_mode": "observe-only",
         "device_sn": sample.device_sn,
         "robot_model": model,
         "package_version": version,
@@ -259,8 +256,7 @@ def validate_probe_summary(
     if type(captured_at) is not int or not 0 <= now_ms - captured_at <= 60 * 60 * 1000:
         raise ValueError("probe summary is older than one hour or has a future timestamp")
     if (
-        summary.get("control_mode") != "observe-only"
-        or summary.get("device_sn") != config.controller.device_sn
+        summary.get("device_sn") != config.controller.device_sn
         or summary.get("robot_model") != config.controller.model
         or summary.get("package_version") not in config.controller.package_versions
         or summary.get("datasheet_byte_order") != byte_order

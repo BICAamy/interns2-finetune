@@ -21,6 +21,7 @@ from surgical_contracts import (
     MoveRelativeRequest,
     RobotMotionProposal,
     RobotTelemetry,
+    SetEnabledResult,
     SimulationTelemetry,
     SimulationCameraControlRequest,
     SimulationCameraState,
@@ -104,16 +105,6 @@ _CURRENT_TOOLS = {
 _TELEMETRY_TRAJECTORY_LIMIT = 160
 
 
-class _DisconnectedRealRobot:
-    """No outbound robot client exists before the Mac gateway is implemented."""
-
-    def __getattr__(self, name: str):
-        raise RuntimeError(f"real robot operation {name} is unavailable in observe-only mode")
-
-    def close(self) -> None:
-        pass
-
-
 class WebRuntime:
     def __init__(
         self,
@@ -129,10 +120,6 @@ class WebRuntime:
     ) -> None:
         settings.validate()
         self._real_mode = settings.runtime_mode == RuntimeMode.REAL
-        self._real_enabled = (
-            self._real_mode and settings.robot_control_mode == "enabled"
-        )
-        self._real_observe_only = self._real_mode and not self._real_enabled
         self.settings = settings
         self.store = store or SessionStore()
         self._model_http: OpenAICompatibleHTTPClient | None = None
@@ -143,15 +130,11 @@ class WebRuntime:
             self._model_http = OpenAICompatibleHTTPClient(settings)
             parser = InternS2Agent(settings, client=self._model_http)
         self.parser = parser
-        self.robot = robot or (
-            _DisconnectedRealRobot()
-            if self._real_observe_only else
-            RobotSimulationHTTPController(
+        self.robot = robot or RobotSimulationHTTPController(
                 settings.robot_simulation_base_url,
                 http_timeout_s=settings.robot_simulation_http_timeout,
                 command_timeout_s=settings.robot_simulation_command_timeout,
                 poll_interval_s=settings.robot_simulation_poll_interval,
-            )
         )
         self.planner = planner or PlannerAdapterHTTPClient(
             settings.planner_adapter_base_url,
@@ -202,8 +185,6 @@ class WebRuntime:
 
     async def create_session(self) -> SessionSnapshot:
         snapshot = self.store.create()
-        if self._real_observe_only:
-            return snapshot
         try:
             state = await asyncio.to_thread(self.robot.get_state)
         except Exception:
@@ -222,6 +203,21 @@ class WebRuntime:
 
     def get_session(self, session_id: str) -> SessionSnapshot:
         return self.store.snapshot(session_id)
+
+    async def set_robot_enabled(
+        self, session_id: str, *, enabled: bool,
+    ) -> SetEnabledResult:
+        """Change the physical enable state through the authenticated Mac gateway."""
+        if not self._real_mode:
+            raise SessionConflict("使能/去使能只适用于真实机械臂")
+        session = self.store.snapshot(session_id)
+        if session.status in _BUSY_STATUSES:
+            raise SessionConflict("当前任务正在执行，不能切换使能状态")
+        return await asyncio.to_thread(
+            self.robot.set_enabled,
+            enabled,
+            f"web-{'enable' if enabled else 'disable'}-{uuid4().hex}",
+        )
 
     def get_robot_telemetry(self, session_id: str) -> SimulationTelemetryView:
         session = self.store.snapshot(session_id)
@@ -253,7 +249,6 @@ class WebRuntime:
             return SimulationTelemetryView(
                 connected=telemetry.freshness.value == "fresh",
                 runtime_mode="real",
-                control_mode=telemetry.control_mode,
                 provider=telemetry.provider.value,
                 freshness=telemetry.freshness.value,
                 source_age_ms=telemetry.state_age_ms,
@@ -367,7 +362,6 @@ class WebRuntime:
         return SimulationTelemetryView(
             connected=False,
             runtime_mode=("real" if self._real_mode else "simulation"),
-            control_mode=(self.settings.robot_control_mode if self._real_mode else None),
             freshness="disconnected",
             connections={"server": "disconnected"},
             sequence=0,
@@ -432,7 +426,6 @@ class WebRuntime:
     def health(self) -> HealthResponse:
         return HealthResponse(
             runtime_mode=self.settings.runtime_mode.value,
-            control_mode=(self.settings.robot_control_mode if self._real_mode else None),
             puncture_execution_enabled=False,
             sessions=self.store.count,
             downstream={
@@ -570,7 +563,7 @@ class WebRuntime:
                 image_path.unlink(missing_ok=True)
 
         motion_proposal: RobotMotionProposal | None = None
-        if self._real_enabled and parsed.command.intent != CommandIntent.CLARIFY:
+        if self._real_mode and parsed.command.intent != CommandIntent.CLARIFY:
             if (
                 parsed.command.intent != CommandIntent.MOVE_RELATIVE
                 or parsed.command.relative_motion is None
@@ -652,16 +645,11 @@ class WebRuntime:
                 # even when the parser considers a relative command unambiguous.
                 record.status = SessionStatus.AWAITING_CONFIRMATION
                 record.pending_command = parsed.command
-                record.message = (
-                    "已解析任务；真实模式仅供观察，不能确认执行"
-                    if self._real_observe_only
-                    else "请核对结构化任务，确认后才会调用机械臂"
-                )
+                record.message = "请核对结构化任务，确认后才会调用机械臂"
                 if motion_proposal is not None:
                     record.message = "不可执行 proposal 已生成；核对 fingerprint 后确认一次即可"
                 if (
-                    not self._real_observe_only
-                    and asr_transcription is not None
+                    asr_transcription is not None
                     and asr_transcription.low_confidence
                 ):
                     record.message = (
@@ -673,14 +661,12 @@ class WebRuntime:
     async def confirm(
         self, session_id: str, *, fingerprint: str | None = None,
     ) -> SessionSnapshot:
-        if self._real_observe_only:
-            raise SessionConflict("真实机械臂当前仅供观察；禁止执行命令")
         selected: dict[str, Any] = {}
 
         def begin(record) -> None:
             if record.pending_command is None:
                 raise SessionConflict("session has no command awaiting confirmation")
-            if self._real_enabled:
+            if self._real_mode:
                 proposal = RobotMotionProposal.model_validate(record.motion_proposal)
                 if fingerprint != proposal.fingerprint:
                     raise SessionConflict(
@@ -701,7 +687,7 @@ class WebRuntime:
 
         snapshot = self.store.mutate(session_id, begin)
         command: ParsedCommand = selected["command"]
-        if self._real_enabled:
+        if self._real_mode:
             try:
                 proposal = RobotMotionProposal.model_validate(selected["motion_proposal"])
                 confirmed_record = await asyncio.to_thread(

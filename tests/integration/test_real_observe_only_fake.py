@@ -98,9 +98,8 @@ def test_fake_controller_to_mac_gateway_to_runtime_is_read_only(tmp_path: Path) 
                 time.sleep(0.02)
             assert seen is not None and seen["joint_positions_deg"][2] == 81.099
             assert seen["runtime_mode"] == "real"
-            assert seen["control_mode"] == "observe-only"
             assert seen["actual_pose_robot_base"]["frame"] == "robot_base"
-            assert health["ready_for_motion"] is False
+            assert health["ready_for_motion"] is True
             first_session_id = seen["gateway_session_id"]
             first_sequence = seen["sequence"]
             time.sleep(0.18)
@@ -169,7 +168,7 @@ def test_fake_controller_to_mac_gateway_to_runtime_is_read_only(tmp_path: Path) 
                 time.sleep(0.02)
             else:
                 raise AssertionError("real-mode gateway did not publish fake state")
-            assert real_health["ready_for_motion"] is False
+            assert real_health["ready_for_motion"] is True
             assert _json(f"http://127.0.0.1:{server_port}/v1/state")["device_sn"] == "FAKE-E05-001"
             real_mode_thread.join(timeout=3)
             assert not real_mode_thread.is_alive()
@@ -196,8 +195,7 @@ def test_fake_controller_to_mac_gateway_to_runtime_is_read_only(tmp_path: Path) 
                 time.sleep(0.02)
             else:
                 raise AssertionError("restarted gateway did not establish a fresh session")
-            assert restarted_state["control_mode"] == "observe-only"
-            assert restarted_health["ready_for_motion"] is False
+            assert restarted_health["ready_for_motion"] is True
             restarted_thread.join(timeout=3)
             assert not restarted_thread.is_alive()
             assert not errors, errors

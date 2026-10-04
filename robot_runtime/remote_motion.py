@@ -34,6 +34,8 @@ from surgical_contracts import (
     RobotCommandResult,
     RobotMotionProposal,
     RobotTelemetry,
+    SetEnabledRequest,
+    SetEnabledResult,
     SourceFreshness,
     ToolStatus,
     command_fingerprint,
@@ -76,6 +78,7 @@ class RemoteMotionStore:
         self._lock = RLock()
         self._records: OrderedDict[str, RobotCommandRecord] = OrderedDict()
         self._proposals: dict[str, RobotMotionProposal] = {}
+        self._frames: dict[str, GatewayCommandFrame] = {}
         self._pending: deque[str] = deque()
         self._dispatched: set[str] = set()
 
@@ -87,8 +90,7 @@ class RemoteMotionStore:
         state = self._telemetry()
         links = state.connections
         if (
-            state.control_mode != "enabled"
-            or state.freshness != SourceFreshness.FRESH
+            state.freshness != SourceFreshness.FRESH
             or state.gateway_session_id is None
             or state.actual_pose_robot_base is None
             or state.actual_pose_robot_base.frame != CoordinateFrame.ROBOT_BASE
@@ -201,12 +203,135 @@ class RemoteMotionStore:
             )
             self._records[request.command_id] = record
             self._proposals[request.command_id] = proposal
+            self._frames[request.command_id] = GatewayCommandFrame(
+                fingerprint=proposal.fingerprint,
+                envelope=envelope,
+            )
+            return record.model_copy(deep=True), True
+
+    def set_enabled(self, request: SetEnabledRequest) -> tuple[RobotCommandRecord, bool]:
+        """Queue one authenticated group enable/disable request from the web UI."""
+        with self._lock:
+            existing = self._records.get(request.command_id)
+            request_key = request.model_dump(mode="json")
+            if existing is not None:
+                if existing.request != request_key:
+                    raise RobotRuntimeServiceError(
+                        ErrorCode.COMMAND_CONFLICT,
+                        "command_id was already used with different arguments",
+                        status_code=409,
+                        command_id=request.command_id,
+                    )
+                return existing.model_copy(deep=True), False
+            if len(self._records) >= self._max_records:
+                raise RobotRuntimeServiceError(
+                    ErrorCode.COMMAND_CONFLICT,
+                    "remote command idempotency ledger is full",
+                    status_code=503,
+                    command_id=request.command_id,
+                )
+            if any(
+                record.status == CommandExecutionStatus.RUNNING
+                for record in self._records.values()
+            ):
+                raise RobotRuntimeServiceError(
+                    ErrorCode.COMMAND_CONFLICT,
+                    "another remote robot command is active",
+                    status_code=409,
+                    command_id=request.command_id,
+                )
+            state = self._telemetry()
+            links = state.connections
+            if (
+                state.freshness != SourceFreshness.FRESH
+                or state.gateway_session_id is None
+                or state.vendor_fault is not None
+                or state.physical_estop_active is not False
+                or state.emergency_stop_circuit_fault is not False
+                or state.safeguard_active is not False
+                or state.safeguard_circuit_fault is not False
+                or any(
+                    link != LinkState.CONNECTED
+                    for link in (
+                        links.gateway, links.datasheet,
+                        links.command_socket, links.controller_box,
+                    )
+                )
+            ):
+                raise RobotRuntimeServiceError(
+                    ErrorCode.OPERATION_NOT_ENABLED,
+                    "real feedback is not ready to change robot enable state",
+                    status_code=409,
+                    command_id=request.command_id,
+                )
+            if not request.enabled and (
+                state.moving is not False
+                or state.potentially_moving is not False
+                or state.in_position is not True
+            ):
+                raise RobotRuntimeServiceError(
+                    ErrorCode.OPERATION_NOT_ENABLED,
+                    "robot must be confirmed stationary before disable",
+                    status_code=409,
+                    command_id=request.command_id,
+                )
+            now_ms = time.time_ns() // 1_000_000
+            if state.enabled is request.enabled:
+                result = SetEnabledResult(
+                    command_id=request.command_id,
+                    status=ToolStatus.SUCCESS,
+                    requested_enabled=request.enabled,
+                    confirmed_enabled=request.enabled,
+                    message="Robot feedback already reports the requested enable state",
+                )
+                record = RobotCommandRecord(
+                    command_id=request.command_id,
+                    kind=RobotCommandKind.SET_ENABLED,
+                    status=CommandExecutionStatus.SUCCEEDED,
+                    submitted_at_ms=now_ms,
+                    updated_at_ms=now_ms,
+                    request=request_key,
+                    result=result.model_dump(mode="json"),
+                )
+                self._records[request.command_id] = record
+                return record.model_copy(deep=True), True
+            envelope = RobotCommandEnvelope(
+                gateway_session_id=state.gateway_session_id,
+                command_id=request.command_id,
+                command_kind=GatewayCommandKind.SET_ENABLED,
+                created_at_ms=now_ms,
+                expires_at_ms=now_ms + self.policy.proposal_ttl_ms,
+                based_on_robot_state_sequence=state.sequence,
+                payload=request,
+            )
+            frame = GatewayCommandFrame(
+                fingerprint=command_fingerprint(envelope),
+                envelope=envelope,
+            )
+            record = RobotCommandRecord(
+                command_id=request.command_id,
+                kind=RobotCommandKind.SET_ENABLED,
+                status=CommandExecutionStatus.RUNNING,
+                submitted_at_ms=now_ms,
+                updated_at_ms=now_ms,
+                request=request_key,
+            )
+            self._records[request.command_id] = record
+            self._frames[request.command_id] = frame
+            self._pending.append(request.command_id)
             return record.model_copy(deep=True), True
 
     def confirm(self, command_id: str, fingerprint: str) -> RobotCommandRecord:
         with self._lock:
             record = self._get_locked(command_id)
-            proposal = self._proposals[command_id]
+            proposal = self._proposals.get(command_id)
+            if proposal is None:
+                raise RobotRuntimeServiceError(
+                    ErrorCode.OPERATION_NOT_ENABLED,
+                    "only a motion proposal can be confirmed by fingerprint",
+                    status_code=409,
+                    command_id=command_id,
+                )
             if fingerprint != proposal.fingerprint:
                 raise RobotRuntimeServiceError(
                     ErrorCode.COMMAND_CONFLICT,
@@ -250,34 +375,31 @@ class RemoteMotionStore:
             while self._pending:
                 command_id = self._pending.popleft()
                 record = self._records.get(command_id)
-                proposal = self._proposals.get(command_id)
-                if record is None or proposal is None or record.status != CommandExecutionStatus.RUNNING:
+                frame = self._frames.get(command_id)
+                if record is None or frame is None or record.status != CommandExecutionStatus.RUNNING:
                     continue
                 if command_id in self._dispatched:
                     continue
-                if proposal.envelope.gateway_session_id != session_id:
+                if frame.envelope.gateway_session_id != session_id:
                     self._fail_locked(
                         command_id, ErrorCode.COMMAND_EXPIRED,
                         "proposal belongs to an inactive gateway session",
                     )
                     continue
                 self._dispatched.add(command_id)
-                return GatewayCommandFrame(
-                    fingerprint=proposal.fingerprint,
-                    envelope=proposal.envelope,
-                )
+                return frame.model_copy(deep=True)
         return None
 
     def finish(self, fingerprint: str, result: RobotCommandResult) -> None:
         with self._lock:
             record = self._get_locked(result.command_id)
-            proposal = self._proposals[result.command_id]
+            frame = self._frames[result.command_id]
             if (
                 record.status != CommandExecutionStatus.RUNNING
                 or result.command_id not in self._dispatched
-                or fingerprint != proposal.fingerprint
-                or result.gateway_session_id != proposal.envelope.gateway_session_id
-                or result.command_kind != proposal.envelope.command_kind
+                or fingerprint != frame.fingerprint
+                or result.gateway_session_id != frame.envelope.gateway_session_id
+                or result.command_kind != frame.envelope.command_kind
             ):
                 raise RobotRuntimeServiceError(
                     ErrorCode.COMMAND_CONFLICT,
@@ -286,7 +408,28 @@ class RemoteMotionStore:
                     command_id=result.command_id,
                 )
             now_ms = time.time_ns() // 1_000_000
-            if result.status == ToolStatus.SUCCESS:
+            if (
+                result.command_kind == GatewayCommandKind.SET_ENABLED
+                and result.status == ToolStatus.SUCCESS
+            ):
+                requested = frame.envelope.payload
+                assert isinstance(requested, SetEnabledRequest)
+                if result.confirmed_enabled is not requested.enabled:
+                    raise RobotRuntimeServiceError(
+                        ErrorCode.INTERNAL_ERROR,
+                        "Mac enable result disagrees with the requested state",
+                        command_id=result.command_id,
+                    )
+                payload = SetEnabledResult(
+                    command_id=result.command_id,
+                    status=ToolStatus.SUCCESS,
+                    requested_enabled=requested.enabled,
+                    confirmed_enabled=result.confirmed_enabled,
+                    message="10003 and a newer 10004 frame confirmed the requested state",
+                )
+                status = CommandExecutionStatus.SUCCEEDED
+                error = None
+            elif result.status == ToolStatus.SUCCESS:
                 pose = result.final_pose_robot_base
                 if pose is None:
                     raise RobotRuntimeServiceError(
@@ -318,7 +461,7 @@ class RemoteMotionStore:
                 error = ErrorResponse(
                     code=code,
                     command_id=result.command_id,
-                    message="Mac rejected or failed the confirmed motion proposal",
+                    message="Mac rejected or failed the dispatched robot command",
                 )
             self._records[result.command_id] = record.model_copy(update={
                 "status": status,
@@ -331,12 +474,12 @@ class RemoteMotionStore:
         """A dispatched motion has unknown transport outcome and is never replayed."""
         with self._lock:
             for command_id in tuple(self._dispatched):
-                proposal = self._proposals.get(command_id)
+                frame = self._frames.get(command_id)
                 record = self._records.get(command_id)
                 if (
-                    proposal is not None
+                    frame is not None
                     and record is not None
-                    and proposal.envelope.gateway_session_id == session_id
+                    and frame.envelope.gateway_session_id == session_id
                     and record.status == CommandExecutionStatus.RUNNING
                 ):
                     self._fail_locked(

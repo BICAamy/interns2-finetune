@@ -114,7 +114,7 @@ class RobotTelemetryTests(unittest.TestCase):
             status="healthy",
         )
         self.assertFalse(health.ready_for_motion)
-        with self.assertRaisesRegex(ValidationError, "enabled control mode"):
+        with self.assertRaisesRegex(ValidationError, "fresh healthy state"):
             RobotHealth(
                 runtime_mode=RuntimeMode.REAL,
                 provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
@@ -130,7 +130,6 @@ class RobotTelemetryTests(unittest.TestCase):
         enabled = RobotHealth(
             runtime_mode=RuntimeMode.REAL,
             provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
-            control_mode="enabled",
             status="healthy",
             freshness=SourceFreshness.FRESH,
             connections=connected,

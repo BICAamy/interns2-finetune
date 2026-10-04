@@ -90,7 +90,6 @@ export interface SimulationTelemetry {
   type: "telemetry";
   connected: boolean;
   runtime_mode: "simulation" | "real";
-  control_mode: string | null;
   provider: string | null;
   freshness: "fresh" | "stale" | "disconnected" | "unknown";
   source_age_ms: number | null;

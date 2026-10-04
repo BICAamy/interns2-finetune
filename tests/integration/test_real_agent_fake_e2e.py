@@ -28,7 +28,10 @@ from robot_runtime.gateway_session import GatewaySessionManager
 from robot_runtime.providers.huayan_real import HuayanRealStubProvider
 from robot_runtime.real_config import load_real_config
 from robot_runtime.remote_motion import RemoteMotionPolicy
-from surgical_contracts import GatewayControlMode
+from surgical_contracts import (
+    ErrorCode, GatewayCommandKind, RobotCommandResult, SetEnabledRequest,
+    ToolStatus, command_fingerprint,
+)
 from tests.fakes.huayan_controller import FakeHuayanController
 from tests.integration.test_agent_web import StubParser, relative_command, settings
 from web.backend.main import create_app as create_web_app
@@ -94,7 +97,6 @@ def test_web_confirmation_runs_one_remote_fake_motion_from_actual_feedback(tmp_p
         robot_model="E05-Pro",
         package_versions=("6.3.6.20240305",),
         stale_ms=config.deadlines.state_stale_ms,
-        control_mode=GatewayControlMode.ENABLED,
     )
     provider = HuayanRealStubProvider(
         sessions,
@@ -139,6 +141,7 @@ def test_web_confirmation_runs_one_remote_fake_motion_from_actual_feedback(tmp_p
 
         with FakeHuayanController(
             accept_fake_motion=True,
+            initial_enabled=False,
             simulate_waypoint_motion=True,
             waypoint_motion_s=0.2,
         ) as fake:
@@ -195,6 +198,48 @@ def test_web_confirmation_runs_one_remote_fake_motion_from_actual_feedback(tmp_p
                 feedback=lambda: (snapshot(), "step12 fake actual feedback"),
                 poll_interval_s=0.02,
             )
+
+            def command_handler(envelope, fingerprint):
+                if envelope.command_kind == GatewayCommandKind.MOVE_RELATIVE:
+                    return executor.execute(envelope, fingerprint)
+                if (
+                    envelope.command_kind != GatewayCommandKind.SET_ENABLED
+                    or command_fingerprint(envelope) != fingerprint
+                    or not isinstance(envelope.payload, SetEnabledRequest)
+                ):
+                    return RobotCommandResult(
+                        gateway_session_id=envelope.gateway_session_id,
+                        command_id=envelope.command_id,
+                        command_kind=envelope.command_kind,
+                        status=ToolStatus.FAILED,
+                        error_code=ErrorCode.INVALID_COMMAND_SCHEMA,
+                    )
+                desired = envelope.payload.enabled
+                before_sequence = snapshot().sequence
+                assert motion_client.set_enabled(desired)
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    record, _events = holder["gateway"].state.snapshot()
+                    if (
+                        record is not None
+                        and record.sequence > before_sequence
+                        and record.sample.enabled is desired
+                    ):
+                        return RobotCommandResult(
+                            gateway_session_id=envelope.gateway_session_id,
+                            command_id=envelope.command_id,
+                            command_kind=envelope.command_kind,
+                            status=ToolStatus.SUCCESS,
+                            confirmed_enabled=desired,
+                        )
+                    time.sleep(0.02)
+                return RobotCommandResult(
+                    gateway_session_id=envelope.gateway_session_id,
+                    command_id=envelope.command_id,
+                    command_kind=envelope.command_kind,
+                    status=ToolStatus.FAILED,
+                    error_code=ErrorCode.ROBOT_TIMEOUT,
+                )
             edge_config = EdgeConfig(
                 fake_command_port=fake.command_port,
                 fake_datasheet_port=fake.datasheet_port,
@@ -204,9 +249,8 @@ def test_web_confirmation_runs_one_remote_fake_motion_from_actual_feedback(tmp_p
                 datasheet_byte_order="little",
                 audit_path=tmp_path / "edge.log",
                 stale_ms=config.deadlines.state_stale_ms,
-                cloud_control="enabled",
             )
-            gateway = EdgeGateway(edge_config, command_handler=executor.execute)
+            gateway = EdgeGateway(edge_config, command_handler=command_handler)
             holder["gateway"] = gateway
 
             def run_gateway() -> None:
@@ -220,19 +264,18 @@ def test_web_confirmation_runs_one_remote_fake_motion_from_actual_feedback(tmp_p
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline:
                 try:
-                    if robot_http.get_runtime_health().ready_for_motion:
+                    if robot_http.get_runtime_health().status == "healthy":
                         break
                 except Exception:
                     pass
                 time.sleep(0.02)
             else:
-                raise AssertionError("enabled fake gateway did not become ready")
+                raise AssertionError("fake gateway did not become healthy")
 
             actual_before = robot_http.get_telemetry().actual_pose_robot_base.translation_mm
             web_settings = replace(
                 settings(),
                 runtime_mode="real",
-                robot_control_mode="enabled",
                 real_config_path="configs/robot-real.local.yaml",
                 robot_simulation_base_url=f"http://127.0.0.1:{robot_port}",
                 robot_move_speed_mm_s=2.0,
@@ -250,6 +293,20 @@ def test_web_confirmation_runs_one_remote_fake_motion_from_actual_feedback(tmp_p
             )
             with TestClient(create_web_app(runtime, static_dir="/missing")) as web:
                 session_id = web.post("/api/sessions").json()["session_id"]
+                enabled = web.post(
+                    f"/api/sessions/{session_id}/robot/enabled",
+                    json={"enabled": True},
+                )
+                assert enabled.status_code == 200, enabled.text
+                assert enabled.json()["confirmed_enabled"] is True
+                assert len([x for x in fake.received_commands if x.startswith(b"GrpEnable,")]) == 1
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if robot_http.get_telemetry().enabled is True:
+                        break
+                    time.sleep(0.02)
+                else:
+                    raise AssertionError("enabled feedback did not reach robot-runtime")
                 proposal_response = web.post(
                     f"/api/sessions/{session_id}/commands/text",
                     json={"prompt": "沿 Base +Z 移动 8 mm"},

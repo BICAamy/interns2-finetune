@@ -1,4 +1,4 @@
-"""Single-use 10003 writer, reachable only from Mac-local commissioning.
+"""Single-use 10003 writer for Mac-local commissioning and the Mac gateway.
 
 The regular gateway imports only the read-only CommandClient. Constructing
 this class does not connect; connect() checks the local terminal and controller
@@ -28,10 +28,16 @@ from .motion_codec import (
 
 
 class LocalRealMotionClient:
-    def __init__(self, config: RealRobotConfig, *, timeout_s: float) -> None:
+    def __init__(
+        self,
+        config: RealRobotConfig,
+        *,
+        timeout_s: float,
+        require_local_terminal: bool = True,
+    ) -> None:
         controller = config.controller
-        if config.allowed_control != "observe-only" or config.tool.setup != "flange_only_no_tool":
-            raise ValueError("local commissioning requires the observe-only bare-flange profile")
+        if config.tool.setup != "flange_only_no_tool":
+            raise ValueError("real control requires the approved bare-flange profile")
         if config.blocking_fields():
             raise ValueError("real commissioning config has missing fields")
         if controller.host is None or controller.command_port != 10003:
@@ -43,6 +49,7 @@ class LocalRealMotionClient:
             raise ValueError("socket timeout must not exceed configured response_ms")
         self.timeout_s = timeout_s
         self.config = config
+        self.require_local_terminal = require_local_terminal
         self._socket: socket.socket | None = None
         self._decoder = CommandFrameDecoder()
         self._lock = threading.Lock()
@@ -51,10 +58,10 @@ class LocalRealMotionClient:
         self.package_version: str | None = None
 
     def connect(self) -> None:
-        # Lazy import avoids making the read-only gateway depend on this CLI.
-        from edge_gateway.commissioning_cli import require_local_mac_terminal
+        if self.require_local_terminal:
+            from edge_gateway.commissioning_cli import require_local_mac_terminal
 
-        require_local_mac_terminal()
+            require_local_mac_terminal()
         if self._socket is not None:
             raise RuntimeError("commissioning command socket is already connected")
         self._socket = socket.create_connection((self.host, self.port), self.timeout_s)

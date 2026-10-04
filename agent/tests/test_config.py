@@ -23,17 +23,14 @@ def settings() -> AgentSettings:
 
 
 class AgentSettingsTests(unittest.TestCase):
-    def test_real_environment_is_observe_only_and_requires_config(self):
+    def test_real_environment_requires_config_without_a_control_mode(self):
         base = {
             "RUNTIME_MODE": "real",
             "ROBOT_MODE": "real",
-            "ROBOT_CONTROL_MODE": "observe-only",
             "REAL_CONFIG_PATH": "/tmp/robot-real.local.yaml",
         }
         with patch.dict("os.environ", base, clear=True):
             self.assertEqual(AgentSettings.from_env().runtime_mode.value, "real")
-        with patch.dict("os.environ", {**base, "ROBOT_CONTROL_MODE": "enabled"}, clear=True):
-            self.assertEqual(AgentSettings.from_env().robot_control_mode, "enabled")
         with patch.dict("os.environ", {**base, "REAL_CONFIG_PATH": ""}, clear=True):
             with self.assertRaisesRegex(ValueError, "config path"):
                 AgentSettings.from_env()

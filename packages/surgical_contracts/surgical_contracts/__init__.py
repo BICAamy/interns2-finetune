@@ -17,7 +17,6 @@ from .events import EventPhase, ToolEvent, ToolName
 from .gateway import (
     GatewayAcknowledgementStatus,
     GatewayCommandKind,
-    GatewayControlMode,
     GatewayHandshake,
     MotionSafetyLimits,
     MotionStopConfirmation,
@@ -66,6 +65,8 @@ from .robot import (
     RobotTelemetry,
     RuntimeMode,
     SourceFreshness,
+    SetEnabledRequest,
+    SetEnabledResult,
     ToolStatus,
     VendorFault,
 )
@@ -110,7 +111,6 @@ __all__ = [
     "GatewayCommandAcceptedFrame",
     "GatewayCommandFrame",
     "GatewayCommandResultFrame",
-    "GatewayControlMode",
     "GatewayHandshake",
     "GatewayHeartbeat",
     "GatewayHello",
@@ -157,6 +157,8 @@ __all__ = [
     "SoftwareStopRequest",
     "SoftwareStopResult",
     "SourceFreshness",
+    "SetEnabledRequest",
+    "SetEnabledResult",
     "StopDelivery",
     "ToolEvent",
     "ToolName",

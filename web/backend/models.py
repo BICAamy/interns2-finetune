@@ -65,6 +65,10 @@ class ConfirmationRequest(WebModel):
     fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
+class RobotEnableRequest(WebModel):
+    enabled: bool
+
+
 class InputSource(str, Enum):
     TEXT = "text"
     VOICE = "voice"
@@ -99,7 +103,6 @@ class HealthResponse(WebModel):
     status: Literal["healthy"] = "healthy"
     service: Literal["agent-web"] = "agent-web"
     runtime_mode: str
-    control_mode: str | None = None
     puncture_execution_enabled: Literal[False] = False
     sessions: int = Field(ge=0)
     downstream: dict[str, str]
@@ -113,7 +116,6 @@ class SimulationTelemetryView(WebModel):
     type: Literal["telemetry"] = "telemetry"
     connected: bool
     runtime_mode: Literal["simulation", "real"] = "simulation"
-    control_mode: str | None = None
     provider: str | None = None
     freshness: str = "unknown"
     source_age_ms: float | None = Field(default=None, ge=0)

@@ -26,6 +26,7 @@ from surgical_contracts import (
     GatewayStateFrame,
     MoveRelativeRequest,
     MoveToEntryRequest,
+    SetEnabledRequest,
     ResetSimulationRequest,
     RobotActionRequest,
     RobotCommandKind,
@@ -66,9 +67,9 @@ def create_provider(
         return SimulationProvider(worker)
     if worker is not None:
         raise ValueError("a simulation worker cannot be used by the real provider")
-    from .providers.huayan_real import HuayanRealStubProvider
+    from .providers.huayan_real import HuayanRealProvider
 
-    return HuayanRealStubProvider()
+    return HuayanRealProvider()
 
 
 def _error_payload(
@@ -218,7 +219,6 @@ def create_app(
                 await websocket.send_json({
                     "type": "accepted",
                     "gateway_session_id": hello.handshake.gateway_session_id,
-                    "control_mode": manager.control_mode.value,
                 })
                 while True:
                     raw = await asyncio.wait_for(
@@ -325,6 +325,21 @@ def create_app(
     )
     def move_relative(request: MoveRelativeRequest) -> RobotCommandRecord:
         return runtime_provider.submit(RobotCommandKind.MOVE_RELATIVE, request)[0]
+
+    @router.post(
+        "/v1/commands/set-enabled",
+        response_model=RobotCommandRecord,
+        status_code=202,
+    )
+    def set_enabled(request: SetEnabledRequest) -> RobotCommandRecord:
+        if selected != RuntimeMode.REAL:
+            raise RobotRuntimeServiceError(
+                ErrorCode.OPERATION_NOT_ENABLED,
+                "robot enable/disable is available only for the real runtime",
+                status_code=403,
+                command_id=request.command_id,
+            )
+        return runtime_provider.submit(RobotCommandKind.SET_ENABLED, request)[0]
 
     @router.post(
         "/v1/commands/{command_id}/confirm",

@@ -48,19 +48,17 @@ try:
         robot_health = json.load(response)
     if robot_health.get("runtime_mode") == "real":
         robot_ok = (
-            robot_health.get("control_mode") == "observe-only"
-            and robot_health.get("provider") == "huayan_edge_gateway"
+            robot_health.get("provider") == "huayan_edge_gateway"
             and robot_health.get("status") in {"healthy", "degraded"}
             and robot_health.get("error") in {
                 None, "gateway_disconnected", "datasheet_disconnected",
                 "datasheet_stale", "command_socket_disconnected",
             }
-            and robot_health.get("ready_for_motion") is False
         )
-        mode = "REAL / OBSERVE ONLY" if robot_ok else "REAL / MODE MISMATCH"
+        mode = "REAL" if robot_ok else "REAL / MODE MISMATCH"
         robot_status = (
             "FAILED" if not robot_ok else
-            "HEALTHY (state fresh, observe-only)" if robot_health.get("status") == "healthy"
+            "HEALTHY (state fresh)" if robot_health.get("status") == "healthy"
             else f"DEGRADED ({robot_health.get('error')})"
         )
     else:
@@ -89,8 +87,6 @@ try:
         web_health = json.load(response)
     expected_mode = "real" if mode.startswith("REAL") else "simulation"
     web_ok = robot_ok and web_health.get("runtime_mode") == expected_mode
-    if mode.startswith("REAL"):
-        web_ok = web_ok and web_health.get("control_mode") == "observe-only"
 except Exception as exc:
     web_ok = False
     print(f"  agent-web error: {exc}")
@@ -104,5 +100,5 @@ if failed:
     print("HEALTH CHECK = FAILED")
     sys.exit(1)
 
-print("HEALTH CHECK = PASS" + (" (OBSERVE ONLY)" if mode.startswith("REAL") else ""))
+print("HEALTH CHECK = PASS")
 PY

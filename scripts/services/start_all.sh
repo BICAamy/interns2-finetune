@@ -69,9 +69,7 @@ fail() {
 ENV_ROBOT_MODE="${ROBOT_MODE:-}"
 ROBOT_MODE=simulation
 REAL_CONFIG_INPUT=""
-REQUESTED_CONTROL=observe-only
 MODE_GIVEN=false
-CONTROL_GIVEN=false
 CHECK_CONFIG=false
 
 while (( $# > 0 )); do
@@ -89,19 +87,12 @@ while (( $# > 0 )); do
             REAL_CONFIG_INPUT="$2"
             shift 2
             ;;
-        --real-control)
-            (( $# >= 2 )) || fail "--real-control requires observe-only or enabled."
-            $CONTROL_GIVEN && fail "--real-control was supplied more than once."
-            REQUESTED_CONTROL="$2"
-            CONTROL_GIVEN=true
-            shift 2
-            ;;
         --check-config)
             CHECK_CONFIG=true
             shift
             ;;
         --help|-h)
-            echo "Usage: $0 [--robot-mode simulation|real] [--real-config PATH] [--real-control observe-only|enabled] [--check-config]"
+            echo "Usage: $0 [--robot-mode simulation|real] [--real-config PATH] [--check-config]"
             exit 0
             ;;
         *) fail "Unknown argument: $1" ;;
@@ -110,8 +101,6 @@ done
 
 [[ "$ROBOT_MODE" == simulation || "$ROBOT_MODE" == real ]] \
     || fail "--robot-mode must be simulation or real."
-[[ "$REQUESTED_CONTROL" == observe-only || "$REQUESTED_CONTROL" == enabled ]] \
-    || fail "--real-control must be observe-only or enabled."
 [[ -z "${RUNTIME_MODE:-}" || "$RUNTIME_MODE" == "$ROBOT_MODE" ]] \
     || fail "RUNTIME_MODE conflicts with --robot-mode."
 [[ -z "$ENV_ROBOT_MODE" || "$ENV_ROBOT_MODE" == "$ROBOT_MODE" ]] \
@@ -130,16 +119,11 @@ if [[ "$ROBOT_MODE" == simulation ]]; then
         || fail "--real-config is not allowed in simulation mode."
     [[ -z "${GATEWAY_AUTH_SECRET_FILE:-}" && -z "${GATEWAY_EXPECTED_ID:-}" ]] \
         || fail "gateway authentication is only valid in real mode."
-    $CONTROL_GIVEN && fail "--real-control is only valid in real mode."
-    [[ -z "${ROBOT_CONTROL_MODE:-}" ]] \
-        || fail "ROBOT_CONTROL_MODE is not allowed in simulation mode."
-    unset REAL_CONFIG_PATH ROBOT_CONTROL_MODE
+    unset REAL_CONFIG_PATH
 else
     [[ -n "$REAL_CONFIG_INPUT" ]] || fail "real mode requires --real-config."
     [[ -z "${REAL_CONFIG_PATH:-}" ]] \
         || fail "REAL_CONFIG_PATH must not override --real-config."
-    [[ -z "${ROBOT_CONTROL_MODE:-}" || "$ROBOT_CONTROL_MODE" == "$REQUESTED_CONTROL" ]] \
-        || fail "ROBOT_CONTROL_MODE conflicts with --real-control."
     CONFIG_PYTHON="$SIM_ENV/bin/python"
     if $CHECK_CONFIG && [[ ! -x "$CONFIG_PYTHON" ]]; then
         CONFIG_PYTHON="$(command -v python3)"
@@ -155,7 +139,7 @@ else
     CONFIG_REPORT="$(PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
         "$CONFIG_PYTHON" -m robot_runtime.real_config "$REAL_CONFIG_PATH")" \
         || fail "real config validation failed."
-    read -r CONFIG_ALLOWED CONFIG_MISSING <<<"$CONFIG_REPORT"
+    read -r _CONFIG_LABEL CONFIG_MISSING <<<"$CONFIG_REPORT"
     CONFIG_COORDINATE_CALIBRATED="$(PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
         "$CONFIG_PYTHON" -c '
 from robot_runtime.real_config import load_real_config
@@ -163,12 +147,23 @@ import sys
 c = load_real_config(sys.argv[1])
 print(str(c.joint_mapping.sign is not None and c.base_to_sofa.translation_mm is not None).lower())
 ' "$REAL_CONFIG_PATH")" || fail "could not inspect Step 8 calibration fields."
-    # Step 5 may authenticate a read-only gateway, but cannot ARM or move.
-    ROBOT_CONTROL_MODE=observe-only
-    export ROBOT_CONTROL_MODE REAL_CONFIG_PATH
-    if [[ -n "${GATEWAY_AUTH_SECRET_FILE:-}" || -n "${GATEWAY_EXPECTED_ID:-}" ]]; then
+    read -r REAL_COMMAND_SPEED REAL_MAX_SPEED <<<"$(
+        PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
+            "$CONFIG_PYTHON" -c '
+from robot_runtime.real_config import load_real_config
+import sys
+c = load_real_config(sys.argv[1])
+print(c.motion.speed_mm_s, c.limits.max_speed_mm_s)
+' "$REAL_CONFIG_PATH"
+    )" || fail "could not read real motion speed settings."
+    # In real mode the checked-in robot YAML is the single source of truth for
+    # both the speed displayed in the web proposal and the Mac-side cap.
+    ROBOT_MOVE_SPEED_MM_S="$REAL_COMMAND_SPEED"
+    MAX_ROBOT_SPEED_MM_S="$REAL_MAX_SPEED"
+    export REAL_CONFIG_PATH ROBOT_MOVE_SPEED_MM_S MAX_ROBOT_SPEED_MM_S
+    if ! $CHECK_CONFIG || [[ -n "${GATEWAY_AUTH_SECRET_FILE:-}" || -n "${GATEWAY_EXPECTED_ID:-}" ]]; then
         [[ -n "${GATEWAY_AUTH_SECRET_FILE:-}" && -n "${GATEWAY_EXPECTED_ID:-}" ]] \
-            || fail "gateway authentication requires both GATEWAY_AUTH_SECRET_FILE and GATEWAY_EXPECTED_ID."
+            || fail "real mode requires both GATEWAY_AUTH_SECRET_FILE and GATEWAY_EXPECTED_ID."
         PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
             "$CONFIG_PYTHON" -c '
 import os
@@ -197,7 +192,7 @@ export ROBOT_MODE RUNTIME_MODE="$ROBOT_MODE"
 
 if $CHECK_CONFIG; then
     if [[ "$ROBOT_MODE" == real ]]; then
-        echo "REAL / OBSERVE ONLY (requested=$REQUESTED_CONTROL, config_cap=$CONFIG_ALLOWED, blocking_fields=$CONFIG_MISSING)"
+        echo "REAL (blocking_fields=$CONFIG_MISSING)"
         echo "REAL_CONFIG_PATH=$REAL_CONFIG_PATH"
     else
         echo "SIMULATION"
@@ -306,7 +301,7 @@ echo "BUNDLE_ROOT = $BUNDLE_ROOT"
 echo "APP_ROOT    = $APP_ROOT"
 echo "MODEL_DIR   = $MODEL_DIR"
 if [[ "$ROBOT_MODE" == real ]]; then
-    echo "ROBOT MODE  = REAL / OBSERVE ONLY"
+    echo "ROBOT MODE  = REAL"
     echo "BLOCKERS    = $CONFIG_MISSING"
 else
     echo "ROBOT MODE  = SIMULATION"
@@ -379,7 +374,7 @@ if [[ "$ROBOT_MODE" == simulation ]]; then
     echo "E05             = OK"
 else
     if [[ -n "${GATEWAY_AUTH_SECRET_FILE:-}" ]]; then
-        echo "Gateway         = authenticated observe-only (awaiting Mac connection)"
+        echo "Gateway         = authenticated (awaiting Mac connection)"
     else
         echo "Gateway         = disconnected (no authentication configured)"
     fi
@@ -455,7 +450,7 @@ echo "      log=$LOG_DIR/planner-adapter.log"
 
 
 # --------------------------------------------------
-# 3. robot runtime :8001 (real SOFA mirror is explicit and observe-only)
+# 3. robot runtime :8001
 # --------------------------------------------------
 
 if [[ "$ROBOT_MODE" == simulation || "$ROBOT_REAL_MIRROR" == 1 ]]; then
@@ -520,9 +515,9 @@ else
     ROBOT_LOG="$LOG_DIR/robot-runtime.log"
     ROBOT_SERVICE_LABEL=robot-runtime
     if [[ "$ROBOT_REAL_MIRROR" == 1 ]]; then
-        echo "[3/4] Starting REAL / OBSERVE ONLY robot runtime + passive SOFA mirror..."
+        echo "[3/4] Starting REAL robot runtime + passive SOFA mirror..."
     else
-        echo "[3/4] Starting REAL / OBSERVE ONLY robot runtime..."
+        echo "[3/4] Starting REAL robot runtime..."
     fi
     (
         if [[ "$ROBOT_REAL_MIRROR" == 1 ]]; then
@@ -592,9 +587,7 @@ with urllib.request.urlopen("http://127.0.0.1:8001/health", timeout=3) as respon
 if sys.argv[1] == "real":
     valid = (
         health.get("runtime_mode") == "real"
-        and health.get("control_mode") == "observe-only"
         and health.get("provider") == "huayan_edge_gateway"
-        and health.get("ready_for_motion") is False
         and health.get("status") in {"healthy", "degraded"}
         and health.get("error") in {
             None, "gateway_disconnected", "datasheet_disconnected",

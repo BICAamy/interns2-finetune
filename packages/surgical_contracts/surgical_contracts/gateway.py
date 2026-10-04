@@ -20,14 +20,10 @@ from .robot import (
     MoveRelativeRequest,
     MoveToEntryRequest,
     Pose6D,
+    SetEnabledRequest,
     ToolStatus,
     VendorFault,
 )
-
-
-class GatewayControlMode(str, Enum):
-    OBSERVE_ONLY = "observe-only"
-    ENABLED = "enabled"
 
 
 class GatewayHandshake(ContractModel):
@@ -36,13 +32,13 @@ class GatewayHandshake(ContractModel):
     device_sn: str = Field(min_length=1, max_length=128)
     robot_model: str = Field(min_length=1, max_length=128)
     package_version: str = Field(min_length=1, max_length=128)
-    control_mode: GatewayControlMode = GatewayControlMode.OBSERVE_ONLY
 
 
 class GatewayCommandKind(str, Enum):
     MOVE_TO_ENTRY = "move_to_entry"
     MOVE_RELATIVE = "move_relative"
     SOFTWARE_STOP_REQUEST = "software_stop_request"
+    SET_ENABLED = "set_enabled"
 
 
 class SoftwareStopRequest(ContractModel):
@@ -68,7 +64,7 @@ class RobotCommandEnvelope(ContractModel):
     expected_start_pose_robot_base: Pose6D | None = None
     expected_tcp_name: str | None = Field(default=None, min_length=1, max_length=128)
     expected_ucs_name: str | None = Field(default=None, min_length=1, max_length=128)
-    payload: MoveToEntryRequest | MoveRelativeRequest | SoftwareStopRequest
+    payload: MoveToEntryRequest | MoveRelativeRequest | SoftwareStopRequest | SetEnabledRequest
     safety_limits: MotionSafetyLimits | None = None
     operator_confirmation_id: str | None = Field(default=None, min_length=1, max_length=128)
 
@@ -82,11 +78,15 @@ class RobotCommandEnvelope(ContractModel):
             GatewayCommandKind.MOVE_TO_ENTRY: MoveToEntryRequest,
             GatewayCommandKind.MOVE_RELATIVE: MoveRelativeRequest,
             GatewayCommandKind.SOFTWARE_STOP_REQUEST: SoftwareStopRequest,
+            GatewayCommandKind.SET_ENABLED: SetEnabledRequest,
         }[self.command_kind]
         if not isinstance(self.payload, expected_payload):
             raise ValueError("command_kind does not match typed payload")
 
-        if self.command_kind == GatewayCommandKind.SOFTWARE_STOP_REQUEST:
+        if self.command_kind in {
+            GatewayCommandKind.SOFTWARE_STOP_REQUEST,
+            GatewayCommandKind.SET_ENABLED,
+        }:
             if any(
                 value is not None
                 for value in (
@@ -97,7 +97,7 @@ class RobotCommandEnvelope(ContractModel):
                     self.operator_confirmation_id,
                 )
             ):
-                raise ValueError("software stop cannot contain motion preflight fields")
+                raise ValueError("non-motion command cannot contain motion preflight fields")
         else:
             if self.expected_start_pose_robot_base is None:
                 raise ValueError("motion requires expected_start_pose_robot_base")
@@ -214,6 +214,7 @@ class RobotCommandResult(ContractModel):
     vendor_fault: VendorFault | None = None
     software_stop: SoftwareStopResult | None = None
     final_pose_robot_base: Pose6D | None = None
+    confirmed_enabled: bool | None = None
 
     @model_validator(mode="after")
     def validate_result(self) -> "RobotCommandResult":
@@ -222,6 +223,11 @@ class RobotCommandResult(ContractModel):
                 raise ValueError("software stop result requires delivery and motion_stop")
         elif self.software_stop is not None:
             raise ValueError("motion result cannot contain software stop fields")
+        if self.command_kind == GatewayCommandKind.SET_ENABLED:
+            if self.status == ToolStatus.SUCCESS and self.confirmed_enabled is None:
+                raise ValueError("successful enable result requires confirmed_enabled")
+        elif self.confirmed_enabled is not None:
+            raise ValueError("only enable results may contain confirmed_enabled")
         if (
             self.final_pose_robot_base is not None
             and self.final_pose_robot_base.frame != CoordinateFrame.ROBOT_BASE

@@ -84,7 +84,6 @@ def test_cli_dry_actions_never_open_a_socket(
     config_path = tmp_path / "real.yaml"
     config_path.write_text("""\
 schema_version: '1.0'
-allowed_control: observe-only
 controller:
   host: 192.168.0.10
   command_port: 10003

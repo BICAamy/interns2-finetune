@@ -80,7 +80,6 @@ class AgentSettings:
     top_p: float
     max_tool_rounds: int
     runtime_mode: RuntimeMode = RuntimeMode.SIMULATION
-    robot_control_mode: str | None = None
     real_config_path: str | None = None
     default_coordinate_frame: CoordinateFrame = CoordinateFrame.ROBOT_BASE
     default_distance_unit: DistanceUnit = DistanceUnit.MILLIMETER
@@ -118,7 +117,6 @@ class AgentSettings:
             top_p=_as_float("INTERNS2_TOP_P", 0.95),
             max_tool_rounds=_as_int("INTERNS2_MAX_TOOL_ROUNDS", 3),
             runtime_mode=selected_mode,
-            robot_control_mode=os.getenv("ROBOT_CONTROL_MODE", "").strip() or None,
             real_config_path=os.getenv("REAL_CONFIG_PATH", "").strip() or None,
             default_coordinate_frame=CoordinateFrame(
                 os.getenv(
@@ -171,8 +169,6 @@ class AgentSettings:
 
     def validate(self) -> None:
         if self.runtime_mode == RuntimeMode.REAL:
-            if self.robot_control_mode not in {"observe-only", "enabled"}:
-                raise ValueError("real mode requires observe-only or enabled control mode")
             if not self.real_config_path:
                 raise ValueError("real mode requires config path")
         elif self.real_config_path:

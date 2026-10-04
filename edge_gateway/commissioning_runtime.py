@@ -378,7 +378,7 @@ def read_local_observation(
         controller_is_simulation=False, command_connected=True,
         watchdog=sampler.watchdog, robot_status=state,
         emergency_status=emergency,
-    ).model_copy(update={"control_mode": "enabled"})
+    )
     if telemetry.state_age_ms is None or telemetry.state_age_ms > config.deadlines.state_stale_ms:
         raise ValueError("DataSheet became stale during 10003 cross-check")
     if state.enabled is not True or sample.enabled is not True:
@@ -424,7 +424,6 @@ def read_motion_feedback(
         watchdog=sampler.watchdog, robot_status=state, emergency_status=emergency,
     )
     telemetry = base_telemetry.model_copy(update={
-        "control_mode": "enabled",
         # Never let one channel's optimistic value hide the other's warning.
         "enabled": state.enabled and sample.enabled,
         "in_position": state.in_position and sample.in_position,

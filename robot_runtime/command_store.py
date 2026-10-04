@@ -1,4 +1,4 @@
-"""Bounded in-memory rejected-command records for observe-only real mode.
+"""Bounded in-memory rejected-command records for unavailable real operations.
 
 This is not a durable motion journal. A future executable real provider must
 implement its own persistent idempotency and unknown-execution handling.

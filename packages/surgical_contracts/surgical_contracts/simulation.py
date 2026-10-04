@@ -18,6 +18,7 @@ class RobotCommandKind(str, Enum):
     MOVE_RELATIVE = "move_relative"
     STOP = "stop"
     ESTOP = "estop"
+    SET_ENABLED = "set_enabled"
 
 
 class CameraControlAction(str, Enum):

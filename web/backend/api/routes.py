@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from surgical_contracts import (
+    SetEnabledResult,
     SimulationCameraControlRequest,
     SimulationCameraState,
 )
@@ -16,6 +17,7 @@ from ..models import (
     ConfirmationRequest,
     HealthResponse,
     SessionSnapshot,
+    RobotEnableRequest,
     SimulationTelemetryView,
     TextCommandRequest,
 )
@@ -114,6 +116,21 @@ async def confirm(
     return await _runtime(request).confirm(
         session_id,
         fingerprint=(confirmation.fingerprint if confirmation is not None else None),
+    )
+
+
+@router.post(
+    "/api/sessions/{session_id}/robot/enabled",
+    response_model=SetEnabledResult,
+)
+async def set_robot_enabled(
+    session_id: str,
+    body: RobotEnableRequest,
+    request: Request,
+) -> SetEnabledResult:
+    return await _runtime(request).set_robot_enabled(
+        session_id,
+        enabled=body.enabled,
     )
 
 

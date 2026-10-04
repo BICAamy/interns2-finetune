@@ -52,16 +52,8 @@ def test_real_process_entry_requires_matching_mode_and_config(monkeypatch) -> No
     monkeypatch.setenv("ROBOT_MODE", "real")
     monkeypatch.setenv("RUNTIME_MODE", "real")
     monkeypatch.setenv("REAL_CONFIG_PATH", str(example))
-    monkeypatch.setenv("ROBOT_CONTROL_MODE", "observe-only")
-    with TestClient(app_from_environment()) as client:
-        health = client.get("/health").json()
-        assert health["control_mode"] == "observe-only"
-        assert health["ready_for_motion"] is False
-
-    monkeypatch.setenv("ROBOT_CONTROL_MODE", "enabled")
-    with pytest.raises(ValueError, match="observe-only"):
+    with pytest.raises(ValueError, match="gateway authentication"):
         app_from_environment()
-    monkeypatch.setenv("ROBOT_CONTROL_MODE", "observe-only")
     monkeypatch.setenv("RUNTIME_MODE", "simulation")
     with pytest.raises(ValueError, match="disagree"):
         app_from_environment()
@@ -74,8 +66,7 @@ def test_real_mirror_is_explicit_and_requires_an_authenticated_gateway(monkeypat
         app_from_environment()
     monkeypatch.setenv("ROBOT_MODE", "real")
     monkeypatch.setenv("REAL_CONFIG_PATH", str(example))
-    monkeypatch.setenv("ROBOT_CONTROL_MODE", "observe-only")
-    with pytest.raises(ValueError, match="authenticated gateway"):
+    with pytest.raises(ValueError, match="gateway authentication"):
         app_from_environment()
     monkeypatch.setenv("ROBOT_REAL_MIRROR", "yes")
     with pytest.raises(ValueError, match="must be 0 or 1"):

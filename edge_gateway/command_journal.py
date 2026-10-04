@@ -1,6 +1,6 @@
 """Fail-closed write-ahead journal for fake and Mac-local motion trials.
 
-This journal is deliberately not wired into the real observe-only gateway.
+The real gateway uses this journal before the first WayPoint byte is sent.
 Every transition is append-only and fsynced before the caller may continue.
 """
 

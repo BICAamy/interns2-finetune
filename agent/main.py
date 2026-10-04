@@ -59,8 +59,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = AgentSettings.from_env(args.env_file)
         if not args.parse_only and settings.runtime_mode.value != "simulation":
             raise SystemExit(
-                "Real robot runtime is observe-only in Step 3; "
-                "CLI motion execution is disabled"
+                "Real robot execution requires the web fingerprint confirmation flow; "
+                "direct CLI execution is disabled"
             )
         parsed = InternS2Agent(settings).parse_command(
             args.prompt,

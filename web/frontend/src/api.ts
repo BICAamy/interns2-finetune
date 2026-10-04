@@ -23,7 +23,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  health: () => request<{ runtime_mode: "simulation" | "real"; control_mode: string | null }>("/health"),
+  health: () => request<{ runtime_mode: "simulation" | "real" }>("/health"),
   createSession: () =>
     request<SessionSnapshot>("/api/sessions", { method: "POST" }),
   getSession: (sessionId: string) =>
@@ -65,6 +65,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(fingerprint ? { fingerprint } : {}),
     }),
+  setRobotEnabled: (sessionId: string, enabled: boolean) =>
+    request<{ requested_enabled: boolean; confirmed_enabled: boolean }>(
+      `/api/sessions/${sessionId}/robot/enabled`,
+      {
+        method: "POST",
+        body: JSON.stringify({ enabled }),
+      },
+    ),
   telemetry: (sessionId: string) =>
     request<SimulationTelemetry>(
       `/api/sessions/${sessionId}/robot/telemetry`,

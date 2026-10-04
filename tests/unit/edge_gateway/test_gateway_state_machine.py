@@ -14,20 +14,20 @@ def sample(*, fsm: int = 33, error: int = 0):
     return DatasheetFrameDecoder(byte_order="little").feed(datasheet_frame(document))[0]
 
 
-def test_edge_is_never_armed_and_reconnect_requires_new_session() -> None:
+def test_edge_connection_state_and_reconnect_require_new_session() -> None:
     state = EdgeState()
     assert state.mode == EdgeMode.DISCONNECTED
     assert not state.motion_enabled
     state.command_connected = True
     state.observe(sample())
     state.start_cloud_session("a" * 32)
-    assert state.mode == EdgeMode.OBSERVE_ONLY
+    assert state.mode == EdgeMode.CONNECTED
     state.cloud_lost()
     assert state.session_id is None
     assert state.mode == EdgeMode.DISCONNECTED
     state.start_cloud_session("b" * 32)
-    assert state.mode == EdgeMode.OBSERVE_ONLY
-    assert not state.motion_enabled
+    assert state.mode == EdgeMode.CONNECTED
+    assert state.motion_enabled
 
 
 def test_pose_slot_is_latest_wins_but_status_and_errors_remain_bounded() -> None:

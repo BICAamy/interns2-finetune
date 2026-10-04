@@ -34,8 +34,6 @@ if TYPE_CHECKING:
 def first_motion_config_blockers(config: RealRobotConfig) -> tuple[str, ...]:
     """Report configuration blockers without treating a filled YAML as Gate C."""
     blockers = list(config.blocking_fields())
-    if config.allowed_control != "observe-only":
-        blockers.append("allowed_control must remain observe-only")
     if config.tool.setup != "flange_only_no_tool":
         blockers.append("Step 11 currently supports only a verified bare flange")
     return tuple(blockers)

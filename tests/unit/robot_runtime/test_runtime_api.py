@@ -136,7 +136,6 @@ def test_real_stub_is_disconnected_and_rejects_every_command() -> None:
         health = client.get("/health")
         assert health.status_code == 200
         assert health.json()["runtime_mode"] == "real"
-        assert health.json()["control_mode"] == "observe-only"
         assert health.json()["status"] == "degraded"
         assert health.json()["error"] == "gateway_disconnected"
         assert health.json()["ready_for_motion"] is False
@@ -235,7 +234,7 @@ def test_generic_http_controller_keeps_old_name_and_reads_real_status() -> None:
 
     client = httpx.Client(base_url="http://robot.test", transport=httpx.MockTransport(handler))
     robot = RobotRuntimeHTTPController("http://robot.test", client=client)
-    assert robot.get_runtime_health().control_mode == "observe-only"
+    assert robot.get_runtime_health().runtime_mode.value == "real"
     assert robot.get_telemetry().runtime_mode.value == "real"
     with pytest.raises(RobotRuntimeUnavailableError):
         robot.health()

@@ -12,7 +12,6 @@ from surgical_contracts import (
     CommandExecutionStatus,
     CoordinateFrame,
     GatewayCommandKind,
-    GatewayControlMode,
     GatewayHandshake,
     GatewayHello,
     LinkState,
@@ -43,7 +42,6 @@ def enabled_provider():
         stale_ms=250,
         gateway_timeout_ms=1000,
         transit_budget_ms=10,
-        control_mode=GatewayControlMode.ENABLED,
         clock_ns=lambda: clock[0],
     )
     challenge = sessions.new_challenge()
@@ -53,7 +51,6 @@ def enabled_provider():
         device_sn=DEVICE_SN,
         robot_model=MODEL,
         package_version=VERSION,
-        control_mode=GatewayControlMode.ENABLED,
     )
     greeting = GatewayHello(
         gateway_id="mac-edge-test",
@@ -70,7 +67,6 @@ def enabled_provider():
     frame = state_frame(session_id)
     frame = frame.model_copy(update={
         "state": frame.state.model_copy(update={
-            "control_mode": "enabled",
             "connections": RobotConnectionState(
                 gateway=LinkState.CONNECTED,
                 datasheet=LinkState.CONNECTED,

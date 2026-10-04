@@ -51,7 +51,7 @@ def telemetry(*, sequence: int = 10, x: float = 100.0,
               in_position: bool = True) -> RobotTelemetry:
     return RobotTelemetry(
         runtime_mode=RuntimeMode.REAL, provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
-        control_mode="enabled", sequence=sequence, freshness=SourceFreshness.FRESH,
+        sequence=sequence, freshness=SourceFreshness.FRESH,
         connections=RobotConnectionState(
             gateway=LinkState.CONNECTED, datasheet=LinkState.CONNECTED,
             command_socket=LinkState.CONNECTED, controller_box=LinkState.CONNECTED,

@@ -210,8 +210,8 @@ def preflight_relative(
         raise ValueError("local trial supports only single-axis move_relative")
     if not envelope.created_at_ms <= now_ms < envelope.expires_at_ms:
         raise ValueError("motion envelope expired or has a future creation time")
-    if snapshot.runtime_mode != RuntimeMode.REAL or snapshot.control_mode != "enabled":
-        raise ValueError("local motion telemetry must be enabled")
+    if snapshot.runtime_mode != RuntimeMode.REAL:
+        raise ValueError("local motion requires real runtime feedback")
     if snapshot.freshness != SourceFreshness.FRESH or snapshot.state_age_ms is None or snapshot.state_age_ms > approval.state_stale_ms:
         raise ValueError("DataSheet is stale")
     if any(link != LinkState.CONNECTED for link in (

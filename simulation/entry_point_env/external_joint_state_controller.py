@@ -121,7 +121,6 @@ class ExternalJointStateController:
         if (
             telemetry.runtime_mode != RuntimeMode.REAL
             or telemetry.provider != RobotProvider.HUAYAN_EDGE_GATEWAY
-            or telemetry.control_mode != "observe-only"
             or telemetry.controller_is_simulation is not False
         ):
             self.freeze(SourceFreshness.STALE, "not_observe_only_real_feedback")

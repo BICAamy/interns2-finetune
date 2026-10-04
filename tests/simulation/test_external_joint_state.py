@@ -29,7 +29,6 @@ def telemetry(
     return RobotTelemetry(
         runtime_mode=RuntimeMode.REAL,
         provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
-        control_mode="observe-only",
         sequence=sequence,
         freshness=freshness,
         gateway_session_id=session,

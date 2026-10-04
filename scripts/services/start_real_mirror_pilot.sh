@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run only the authenticated, observe-only real runtime + passive SOFA mirror.
+# Run only the authenticated real runtime + passive SOFA mirror.
 # This pilot uses :18011 and a separate Xvfb display; it does not restart the
 # existing four-service simulation stack or send controller commands.
 set -Eeuo pipefail
@@ -31,9 +31,7 @@ PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
 from robot_runtime.real_config import load_real_config
 from surgical_contracts import load_gateway_secret
 import os
-config = load_real_config(os.environ["REAL_CONFIG_PATH"])
-if config.allowed_control != "observe-only":
-    raise ValueError("pilot must remain observe-only")
+load_real_config(os.environ["REAL_CONFIG_PATH"])
 load_gateway_secret(os.environ["GATEWAY_AUTH_SECRET_FILE"])
 '
 
@@ -47,7 +45,7 @@ test -x "$SOFA_ROOT/bin/runSofa"
 test -d "$SOFAPYTHON3_ROOT"
 test -d "$E05_MODEL_DIR"
 
-export ROBOT_MODE=real RUNTIME_MODE=real ROBOT_CONTROL_MODE=observe-only
+export ROBOT_MODE=real RUNTIME_MODE=real
 export ROBOT_REAL_MIRROR=1
 export ROBOT_SIMULATION_HOST=127.0.0.1
 export ROBOT_SIMULATION_PORT="${ROBOT_SIMULATION_PORT:-18011}"

@@ -11,7 +11,6 @@ from surgical_contracts import (
     CoordinateFrame,
     DistanceUnit,
     ErrorCode,
-    GatewayControlMode,
     GatewayCommandFrame,
     GatewayCommandAcceptedFrame,
     GatewayCommandResultFrame,
@@ -66,7 +65,6 @@ def telemetry_from_sample(
     controller_is_simulation: bool,
     command_connected: bool,
     watchdog: StateWatchdog,
-    control_mode: GatewayControlMode | str = GatewayControlMode.OBSERVE_ONLY,
     robot_status: RobotStateRead | None = None,
     emergency_status: EmergencyInfoRead | None = None,
 ) -> RobotTelemetry:
@@ -88,7 +86,6 @@ def telemetry_from_sample(
     return RobotTelemetry(
         runtime_mode=RuntimeMode.REAL,
         provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
-        control_mode=GatewayControlMode(control_mode).value,
         sequence=record.sequence,
         freshness=SourceFreshness.FRESH,
         connections=RobotConnectionState(
@@ -173,7 +170,6 @@ class CloudTransport:
         *,
         secret: bytes,
         gateway_id: str,
-        control_mode: GatewayControlMode | str = GatewayControlMode.OBSERVE_ONLY,
         command_handler: Callable[[RobotCommandEnvelope, str], RobotCommandResult] | None = None,
     ) -> None:
         self.url = validate_cloud_url(url)
@@ -181,12 +177,7 @@ class CloudTransport:
             raise ValueError("gateway secret is too short")
         self.secret = secret
         self.gateway_id = gateway_id
-        self.control_mode = GatewayControlMode(control_mode)
         self.command_handler = command_handler
-        if self.control_mode == GatewayControlMode.ENABLED and command_handler is None:
-            raise ValueError("enabled cloud transport requires a local command handler")
-        if self.control_mode == GatewayControlMode.OBSERVE_ONLY and command_handler is not None:
-            raise ValueError("observe-only transport cannot install a command handler")
         self.session_id: str | None = None
         self._connection = None
         self._message_sequence = 0
@@ -215,7 +206,6 @@ class CloudTransport:
                 device_sn=device_sn,
                 robot_model=robot_model,
                 package_version=package_version,
-                control_mode=self.control_mode,
             )
             hello = GatewayHello(
                 gateway_id=self.gateway_id,
@@ -231,7 +221,6 @@ class CloudTransport:
             if (
                 accepted.get("type") != "accepted"
                 or accepted.get("gateway_session_id") != session_id
-                or accepted.get("control_mode") != self.control_mode.value
             ):
                 raise ValueError("gateway session was not accepted")
         except Exception:
@@ -306,7 +295,7 @@ class CloudTransport:
                         frame.envelope, active_session_id=self.session_id,
                     )
                     raise PermissionError(
-                        f"observe-only gateway rejected {rejection.command_id}"
+                        f"gateway has no command executor for {rejection.command_id}"
                     )
                 with self._command_lock:
                     if self._active_command_id is not None:

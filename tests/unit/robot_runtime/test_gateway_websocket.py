@@ -22,7 +22,7 @@ def test_authenticated_websocket_accepts_state_then_closes_on_duplicate_sequence
             challenge = ws.receive_json()["challenge"]
             greeting = hello(challenge)
             ws.send_json(greeting.model_dump(mode="json"))
-            assert ws.receive_json()["control_mode"] == "observe-only"
+            assert ws.receive_json()["type"] == "accepted"
             frame = state_frame(greeting.handshake.gateway_session_id)
             ws.send_json(frame.model_dump(mode="json"))
             assert ws.receive_json() == {"type": "ack", "message_sequence": 1}
@@ -69,9 +69,10 @@ def test_gateway_endpoint_is_closed_without_configured_secret() -> None:
 def test_real_process_environment_loads_authenticated_observe_only_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    example = Path(__file__).resolve().parents[3] / "configs" / "robot-real.example.yaml"
+    example = Path(__file__).resolve().parents[3] / "configs" / "robot-real.local.yaml"
     config_data = yaml.safe_load(example.read_text(encoding="utf-8"))
     config_data["controller"]["device_sn"] = "FAKE-E05-001"
+    config_data["controller"]["model"] = "E05-Pro"
     config_data["controller"]["package_versions"] = ["6.3.6.20240305"]
     config_data["deadlines"]["state_stale_ms"] = 350
     config_path = tmp_path / "robot-real-fake.yaml"
@@ -82,7 +83,6 @@ def test_real_process_environment_loads_authenticated_observe_only_session(
     monkeypatch.setenv("ROBOT_MODE", "real")
     monkeypatch.setenv("RUNTIME_MODE", "real")
     monkeypatch.setenv("REAL_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("ROBOT_CONTROL_MODE", "observe-only")
     monkeypatch.setenv("GATEWAY_AUTH_SECRET_FILE", str(secret_path))
     monkeypatch.setenv("GATEWAY_EXPECTED_ID", "mac-edge-test")
 
@@ -95,4 +95,4 @@ def test_real_process_environment_loads_authenticated_observe_only_session(
             greeting = hello(challenge)
             ws.send_json(greeting.model_dump(mode="json"))
             assert ws.receive_json()["gateway_session_id"] == greeting.handshake.gateway_session_id
-            assert client.get("/health").json()["control_mode"] == "observe-only"
+            assert client.get("/health").json()["runtime_mode"] == "real"

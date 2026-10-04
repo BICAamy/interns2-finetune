@@ -1,14 +1,17 @@
-"""Separate fake and explicitly approved real read-only Mac settings."""
+"""Separate fake and explicitly approved real Mac gateway settings."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING
 
 from .cloud_transport import validate_cloud_url
 from .huayan.command_client import _private_controller_host
+
+if TYPE_CHECKING:
+    from robot_runtime.real_config import RealRobotConfig
 
 
 @dataclass(frozen=True)
@@ -21,7 +24,6 @@ class EdgeConfig:
     datasheet_byte_order: str
     audit_path: Path
     stale_ms: int = 250
-    cloud_control: Literal["observe-only", "enabled"] = "observe-only"
 
     def __post_init__(self) -> None:
         for name in ("fake_command_port", "fake_datasheet_port"):
@@ -51,11 +53,12 @@ class RealEdgeConfig:
     datasheet_byte_order: str
     audit_path: Path
     stale_ms: int
+    robot_config: "RealRobotConfig | None" = None
 
     def __post_init__(self) -> None:
         _private_controller_host(self.controller_host)
         if self.command_port != 10003 or self.datasheet_port != 10004:
-            raise ValueError("first real read-only gateway requires ports 10003 and 10004")
+            raise ValueError("real gateway requires ports 10003 and 10004")
         if not self.expected_device_sn or not self.expected_robot_model or not self.approved_package_versions:
             raise ValueError("real gateway identity must be complete")
         validate_cloud_url(self.server_url)

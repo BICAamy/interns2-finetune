@@ -1,4 +1,4 @@
-"""Authenticated single-owner, observe-only session for the Mac edge gateway."""
+"""Authenticated single-owner session for the Mac edge gateway."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from threading import RLock
 from typing import Callable
 
 from surgical_contracts import (
-    GatewayControlMode,
     GatewayHeartbeat,
     GatewayHello,
     GatewayStateFrame,
@@ -41,7 +40,6 @@ class GatewaySessionManager:
         stale_ms: int = 250,
         gateway_timeout_ms: int = 1500,
         transit_budget_ms: int = 100,
-        control_mode: GatewayControlMode | str = GatewayControlMode.OBSERVE_ONLY,
         clock_ns: Callable[[], int] = time.monotonic_ns,
     ) -> None:
         if len(secret) < 32:
@@ -58,7 +56,6 @@ class GatewaySessionManager:
         self.stale_ms = stale_ms
         self.gateway_timeout_ms = gateway_timeout_ms
         self.transit_budget_ms = transit_budget_ms
-        self.control_mode = GatewayControlMode(control_mode)
         self._clock_ns = clock_ns
         self._lock = RLock()
         self._connection_key: str | None = None
@@ -106,7 +103,6 @@ class GatewaySessionManager:
             or identity.device_sn != self.device_sn
             or identity.robot_model != self.robot_model
             or identity.package_version not in self.package_versions
-            or identity.control_mode != self.control_mode
         ):
             raise GatewaySessionError("gateway identity does not match real config")
         session_id = identity.gateway_session_id
@@ -150,7 +146,6 @@ class GatewaySessionManager:
         state = frame.state
         if (
             state.provider != RobotProvider.HUAYAN_EDGE_GATEWAY
-            or state.control_mode != self.control_mode.value
             or state.freshness != SourceFreshness.FRESH
             or state.device_sn != self.device_sn
             or state.robot_model != self.robot_model
@@ -225,17 +220,28 @@ class GatewaySessionManager:
 
     def health(self) -> RobotHealth:
         freshness, connections, error, _age = self._snapshot()
+        with self._lock:
+            latest = self._latest
+        ready = bool(
+            error is None
+            and latest is not None
+            and latest.enabled is True
+            and latest.moving is False
+            and latest.potentially_moving is False
+            and latest.in_position is True
+            and latest.vendor_fault is None
+            and latest.physical_estop_active is False
+            and latest.emergency_stop_circuit_fault is False
+            and latest.safeguard_active is False
+            and latest.safeguard_circuit_fault is False
+        )
         return RobotHealth(
             runtime_mode=RuntimeMode.REAL,
             provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
-            control_mode=self.control_mode.value,
             status="healthy" if error is None else "degraded",
             freshness=freshness,
             connections=connections,
-            ready_for_motion=(
-                self.control_mode == GatewayControlMode.ENABLED
-                and error is None
-            ),
+            ready_for_motion=ready,
             error=error,
         )
 
@@ -250,14 +256,12 @@ class GatewaySessionManager:
             return RobotTelemetry(
                 runtime_mode=RuntimeMode.REAL,
                 provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
-                control_mode=self.control_mode.value,
                 sequence=0,
                 freshness=freshness,
                 connections=connections,
                 gateway_session_id=session_id,
             )
         return latest.model_copy(update={
-            "control_mode": self.control_mode.value,
             "freshness": freshness,
             "connections": connections,
             "state_age_ms": age_ms,

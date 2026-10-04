@@ -33,7 +33,6 @@ def real_telemetry(sequence: int) -> RobotTelemetry:
     return RobotTelemetry(
         runtime_mode=RuntimeMode.REAL,
         provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
-        control_mode="observe-only",
         sequence=sequence,
         freshness=SourceFreshness.FRESH,
         gateway_session_id="session-step8-web",
@@ -116,7 +115,6 @@ def _client():
     real_settings = replace(
         settings(),
         runtime_mode=RuntimeMode.REAL,
-        robot_control_mode="observe-only",
         real_config_path="configs/robot-real.local.yaml",
     )
     observer = RealObserver()
@@ -131,7 +129,7 @@ def _client():
     return TestClient(create_app(runtime, static_dir="/missing")), observer, robot
 
 
-def test_real_generic_routes_expose_only_actual_observe_only_state() -> None:
+def test_real_generic_routes_expose_only_actual_state() -> None:
     client, observer, robot = _client()
     with client:
         session = client.post("/api/sessions").json()
@@ -140,7 +138,7 @@ def test_real_generic_routes_expose_only_actual_observe_only_state() -> None:
         assert generic.status_code == 200
         payload = generic.json()
         assert payload["runtime_mode"] == "real"
-        assert payload["control_mode"] == "observe-only"
+        assert "control_mode" not in payload
         assert payload["sequence"] == 42
         assert payload["joint_positions_deg"][2] == 97.585
         assert payload["connections"] == {
