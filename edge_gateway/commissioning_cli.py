@@ -71,7 +71,7 @@ def require_local_mac_terminal(
 
 def _report(
     config: RealRobotConfig, *, record: Path | None = None,
-    probe_summary: dict[str, object] | None = None,
+    probe_result: dict[str, object] | None = None,
 ) -> dict[str, object]:
     blockers = first_motion_config_blockers(config)
     return {
@@ -81,8 +81,8 @@ def _report(
         "effective_first_motion_caps": effective_first_motion_caps(config),
         "read_only_record": str(record) if record is not None else None,
         "no_tool_readback_verified": (
-            probe_summary.get("no_tool_readback_verified") is True
-            if probe_summary is not None else None
+            probe_result.get("no_tool_readback_verified") is True
+            if probe_result is not None else None
         ),
         "three_position_enable_required": False,
         "motion_authorized": False,
@@ -455,7 +455,7 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, RuntimeError, PermissionError) as exc:
         print(f"READ-ONLY PREFLIGHT BLOCKED: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps(_report(config, record=record, probe_summary=result.summary),
+    print(json.dumps(_report(config, record=record, probe_result=result.summary),
                      ensure_ascii=False, indent=2))
     return 0  # Read-only preflight succeeded; real motion remains closed.
 

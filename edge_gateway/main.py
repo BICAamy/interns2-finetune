@@ -554,7 +554,6 @@ def main() -> None:
     parser.add_argument("--fake-command-port", type=int)
     parser.add_argument("--fake-datasheet-port", type=int)
     parser.add_argument("--real-config", type=Path)
-    parser.add_argument("--probe-summary", type=Path)
     parser.add_argument("--connect-real", action="store_true")
     parser.add_argument("--server-url", required=True)
     parser.add_argument("--secret-file", type=Path, required=True)
@@ -569,13 +568,10 @@ def main() -> None:
             parser.error("real gateway requires --connect-real")
         from robot_runtime.real_config import load_real_config
 
-        from .huayan.real_probe import validate_probe_config, validate_probe_summary
+        from .huayan.real_probe import validate_probe_config
 
         real = load_real_config(args.real_config)
         validate_probe_config(real)
-        if args.probe_summary is None:
-            parser.error("real gateway requires a recent successful --probe-summary")
-        validate_probe_summary(args.probe_summary, real, byte_order=args.datasheet_byte_order)
         config = RealEdgeConfig(
             robot_config=real,
             controller_host=real.controller.host,
@@ -592,7 +588,7 @@ def main() -> None:
             stale_ms=real.deadlines.state_stale_ms,
         )
     else:
-        if args.connect_real or args.probe_summary:
+        if args.connect_real:
             parser.error("real-only options require --real-config")
         if args.fake_command_port is None or args.fake_datasheet_port is None:
             parser.error("fake mode requires both fake ports")

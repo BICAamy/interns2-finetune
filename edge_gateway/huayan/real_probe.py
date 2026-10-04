@@ -239,46 +239,6 @@ def probe_once(
     return ProbeResult(summary, raw_frame)
 
 
-def validate_probe_summary(
-    path: Path, config: RealRobotConfig, *, byte_order: Literal["little", "big"],
-) -> None:
-    """Require a recent successful local probe before continuous real streaming."""
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024:
-        raise ValueError("probe summary must be a regular, bounded local file")
-    try:
-        summary = json.loads(path.read_text(encoding="utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("probe summary is not valid JSON") from exc
-    if not isinstance(summary, dict):
-        raise ValueError("probe summary must be an object")
-    captured_at = summary.get("captured_at_ms")
-    now_ms = time.time_ns() // 1_000_000
-    if type(captured_at) is not int or not 0 <= now_ms - captured_at <= 60 * 60 * 1000:
-        raise ValueError("probe summary is older than one hour or has a future timestamp")
-    if (
-        summary.get("device_sn") != config.controller.device_sn
-        or summary.get("robot_model") != config.controller.model
-        or summary.get("package_version") not in config.controller.package_versions
-        or summary.get("datasheet_byte_order") != byte_order
-        or summary.get("moving") is not False
-        or summary.get("error_code") != 0
-        or summary.get("axis_error_codes") != [0, 0, 0, 0, 0, 0]
-    ):
-        raise ValueError("probe summary disagrees with real gateway configuration")
-    state = summary.get("robot_state")
-    emergency = summary.get("emergency_info")
-    if (
-        not isinstance(state, dict) or state.get("moving") is not False
-        or not isinstance(emergency, dict)
-        or emergency.get("emergency_circuit_fault") is not False
-        or emergency.get("safeguard_circuit_fault") is not False
-        or emergency.get("emergency_stop") is not False
-        or emergency.get("safeguard") is not False
-    ):
-        raise ValueError("probe summary has an unsafe or incomplete state")
-    validate_no_tool_probe_summary(summary, config)
-
-
 def _save_probe_result(result: ProbeResult) -> Path:
     app_root = Path(__file__).resolve().parents[2]
     output_dir = (

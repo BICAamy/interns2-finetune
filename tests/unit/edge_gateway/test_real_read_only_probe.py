@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sys
 import os
-import json
 import time
 
 import pytest
@@ -16,7 +15,7 @@ from edge_gateway.huayan.command_codec import decode_reply, encode_read
 from edge_gateway.huayan.datasheet_client import DatasheetClient
 from edge_gateway.huayan.models import ProtocolError, ReadCommand
 from edge_gateway.huayan.real_probe import (
-    main, probe_once, validate_probe_config, validate_probe_summary,
+    main, probe_once, validate_probe_config,
 )
 from edge_gateway.config import RealEdgeConfig
 from edge_gateway.main import EdgeGateway, main as gateway_main
@@ -171,7 +170,7 @@ def test_real_gateway_accepts_repeated_stamps_but_faults_on_source_stall(
             gateway.close()
 
 
-def test_fake_probe_reads_only_allowlisted_commands_and_captures_one_frame(tmp_path) -> None:
+def test_fake_probe_reads_only_allowlisted_commands_and_captures_one_frame() -> None:
     with FakeHuayanController() as fake:
         config = fake_config(fake)
         result = probe_once(
@@ -188,13 +187,6 @@ def test_fake_probe_reads_only_allowlisted_commands_and_captures_one_frame(tmp_p
             b"GetBaseInstallingAngle", b"ReadCurTCP", b"ReadCurUCS",
             b"ReadTCPByName", b"ReadUCSByName",
         ]
-        summary_file = tmp_path / "summary.json"
-        summary_file.write_text(json.dumps(result.summary), encoding="utf-8")
-        validate_probe_summary(summary_file, config, byte_order="little")
-        with pytest.raises(ValueError, match="disagrees"):
-            validate_probe_summary(summary_file, config, byte_order="big")
-
-
 def test_probe_stops_on_unapproved_version_before_other_queries() -> None:
     with FakeHuayanController(command_actions={
         ReadCommand.PACKAGE_VERSION: [CommandAction((b"PackageVersion,OK,unapproved,;",))],
@@ -204,7 +196,7 @@ def test_probe_stops_on_unapproved_version_before_other_queries() -> None:
         assert fake.received_commands == [b"PackageVersion,;"]
 
 
-def test_real_probe_check_config_never_connects_and_gateway_requires_read_only_flag(
+def test_real_probe_check_config_never_connects_and_gateway_needs_no_probe_summary(
     tmp_path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path = tmp_path / "robot-real.local.yaml"
@@ -236,3 +228,25 @@ deadlines:
     ])
     with pytest.raises(SystemExit, match="2"):
         gateway_main()
+
+    secret = tmp_path / "secret"
+    secret.write_bytes(b"s" * 32)
+    os.chmod(secret, 0o600)
+    started: list[RealEdgeConfig] = []
+
+    def no_network_run(gateway: EdgeGateway) -> None:
+        assert isinstance(gateway.config, RealEdgeConfig)
+        started.append(gateway.config)
+        gateway.close()
+
+    monkeypatch.setattr(EdgeGateway, "run", no_network_run)
+    monkeypatch.setattr(sys, "argv", [
+        "gateway", "--real-config", str(config_path), "--connect-real",
+        "--server-url", "ws://127.0.0.1:18001/v1/gateway/connect",
+        "--secret-file", str(secret), "--gateway-id", "mac-edge",
+        "--datasheet-byte-order", "little",
+        "--audit-path", str(tmp_path / "audit.log"),
+    ])
+    gateway_main()
+    assert len(started) == 1
+    assert started[0].expected_device_sn == "CONFIRMED-SN"

@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from edge_gateway.huayan.models import ReadCommand
-from edge_gateway.huayan.real_probe import probe_once, validate_probe_summary
+from edge_gateway.huayan.real_probe import probe_once
 from robot_runtime.real_config import RealRobotConfig
 from tests.fakes.huayan_controller import CommandAction, FakeHuayanController
 
@@ -47,7 +45,7 @@ def zero_read_actions() -> dict[ReadCommand, list[CommandAction]]:
     }
 
 
-def test_no_tool_probe_reads_current_and_named_zero_values_then_validates_record(tmp_path) -> None:
+def test_no_tool_probe_reads_and_validates_current_and_named_zero_values() -> None:
     with FakeHuayanController(command_actions=zero_read_actions()) as fake:
         config = no_tool_config(fake)
         result = probe_once(config, byte_order="little")
@@ -57,16 +55,6 @@ def test_no_tool_probe_reads_current_and_named_zero_values_then_validates_record
         assert b"ReadTCPByName,0,FAKE_FLANGE,;" in fake.received_commands
         assert b"ReadUCSByName,0,Base,;" in fake.received_commands
         assert all(b"WayPoint" not in item and b"GrpStop" not in item for item in fake.received_commands)
-
-        record = tmp_path / "probe.json"
-        record.write_text(json.dumps(result.summary), encoding="utf-8")
-        validate_probe_summary(record, config, byte_order="little")
-
-        changed = dict(result.summary)
-        changed["payload"] = {**changed["payload"], "mass_kg": 0.1}
-        record.write_text(json.dumps(changed), encoding="utf-8")
-        with pytest.raises(ValueError, match="no-tool"):
-            validate_probe_summary(record, config, byte_order="little")
 
 
 @pytest.mark.parametrize("command", [
