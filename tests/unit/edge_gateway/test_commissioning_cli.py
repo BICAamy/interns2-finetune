@@ -13,7 +13,10 @@ from edge_gateway import commissioning_cli as cli
 from robot_runtime.real_config import RealRobotConfig
 
 
-def config(*, speed: float = 5.0, step: float = 1.0) -> RealRobotConfig:
+def config(
+    *, speed: float = 5.0, acceleration: float = 20.0,
+    step: float = 1.0,
+) -> RealRobotConfig:
     return RealRobotConfig.model_validate({
         "controller": {
             "host": "192.168.0.10", "command_port": 10003,
@@ -31,7 +34,7 @@ def config(*, speed: float = 5.0, step: float = 1.0) -> RealRobotConfig:
         "limits": {
             "joint_soft_limits_deg": [[-180, 180]] * 6, "joint_margin_deg": 5,
             "workspace_low_mm": [0, 0, 0], "workspace_high_mm": [800, 800, 800],
-            "max_speed_mm_s": speed, "max_acceleration_mm_s2": 20,
+            "max_speed_mm_s": speed, "max_acceleration_mm_s2": acceleration,
             "max_step_mm": step, "max_rotation_deg": 1,
             "max_absolute_displacement_mm": 1,
         },
@@ -75,14 +78,14 @@ def test_local_terminal_accepts_interactive_mac():
     )
 
 
-def test_first_motion_caps_are_intersection_with_controller_maxima():
+def test_motion_limits_come_directly_from_yaml_without_hidden_caps():
     assert cli.first_motion_config_blockers(config()) == ()
-    wide = config(speed=2000, step=1000)
+    wide = config(speed=2000, acceleration=2500, step=1000)
     assert cli.first_motion_config_blockers(wide) == ()
     assert cli.effective_first_motion_caps(wide) == {
-        "max_speed_mm_s": 5.0,
-        "max_acceleration_mm_s2": 20.0,
-        "max_step_mm": 1.0,
+        "max_speed_mm_s": 2000.0,
+        "max_acceleration_mm_s2": 2500.0,
+        "max_step_mm": 1000.0,
         "rotation_deg": 0.0,
     }
     assert cli.effective_first_motion_caps(config(speed=2, step=0.5))["max_step_mm"] == 0.5
@@ -144,7 +147,7 @@ def test_preflight_uses_fixed_read_only_probe_and_never_arms(monkeypatch, capsys
     assert called == [("little", "private-read-only")]
     assert report["motion_authorized"] is False
     assert report["no_tool_readback_verified"] is True
-    assert report["effective_first_motion_caps"]["max_step_mm"] == 1.0
+    assert report["effective_first_motion_caps"]["max_step_mm"] == 1000.0
     assert report["read_only_record"] == "read-only-summary.json"
 
 

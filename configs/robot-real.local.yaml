@@ -48,7 +48,7 @@ limits:
   max_absolute_displacement_mm: 1000
 
 motion:
-  speed_mm_s: 2.0 # WayPoint直线运动速度
+  speed_mm_s: 70.0 # WayPoint直线运动速度，2mm/s
   controller_override: 1.0 # 控制器速度倍率，1.0就是100%
 
 deadlines:

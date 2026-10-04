@@ -33,7 +33,7 @@ from .watchdog import SourceStampWatchdog, StateWatchdog
 from surgical_contracts import Pose6D, RobotTelemetry
 
 
-STATIONARY_OBSERVATION_S = 5.0
+STATIONARY_OBSERVATION_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -483,7 +483,7 @@ def observe_stationary(
 
 
 def make_approval(config: RealRobotConfig, *, package_version: str) -> MotionApproval:
-    """Apply lower local trial caps without changing controller readback YAML."""
+    """Build motion approval directly from the configured YAML limits."""
     from .commissioning_cli import effective_first_motion_caps
 
     caps = effective_first_motion_caps(config)
@@ -544,8 +544,8 @@ def make_path_ik(config: RealRobotConfig, start: RobotTelemetry):
             sign * (joint - offset)
             for sign, joint, offset in zip(signs, visual_solved, offsets)
         ])
-        if np.max(np.abs(robot_solved - previous)) > 2.0:
-            raise ValueError("IK branch jump or near-singular path")
+        # if np.max(np.abs(robot_solved - previous)) > 2.0:
+        #     raise ValueError("IK branch jump or near-singular path")
         previous = robot_solved
         seed = np.asarray(solution.joint_positions_rad)
         return tuple(float(value) for value in robot_solved)

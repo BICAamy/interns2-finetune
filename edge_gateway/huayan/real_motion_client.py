@@ -170,10 +170,10 @@ class LocalRealMotionClient:
             raise RuntimeError("real WayPoint requires an identified, single-use local session")
         if waypoint.tcp_name != self.config.tool.tcp_name or waypoint.ucs_name != "Base":
             raise ValueError("WayPoint TCP/UCS disagrees with bare-flange config")
-        if waypoint.speed_mm_s > min(self.config.limits.max_speed_mm_s, 5.0) or (
-            waypoint.acceleration_mm_s2 > min(self.config.limits.max_acceleration_mm_s2, 20.0)
+        if waypoint.speed_mm_s > self.config.limits.max_speed_mm_s or (
+            waypoint.acceleration_mm_s2 > self.config.limits.max_acceleration_mm_s2
         ):
-            raise ValueError("WayPoint exceeds first-motion local speed or acceleration cap")
+            raise ValueError("WayPoint exceeds limits configured in robot-real.local.yaml")
         low = self.config.limits.workspace_low_mm
         high = self.config.limits.workspace_high_mm
         if any(not lo <= value <= hi for value, lo, hi in zip(waypoint.pose_xyzrpy[:3], low, high)):

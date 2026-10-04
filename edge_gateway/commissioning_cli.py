@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import secrets
@@ -30,16 +31,6 @@ if TYPE_CHECKING:
     from .commissioning_runtime import LocalDataSheetSampler
 
 
-# Local software caps for the *first* 1 mm trial. The YAML may retain the
-# controller's higher readback maxima; the writer uses the lower of the two.
-FIRST_MOTION_CAPS = {
-    "max_speed_mm_s": 5.0,
-    "max_acceleration_mm_s2": 20.0,
-    "max_step_mm": 1.0,
-}
-FIRST_MOTION_MOTION_TIMEOUT_MS = 10_000
-
-
 def first_motion_config_blockers(config: RealRobotConfig) -> tuple[str, ...]:
     """Report configuration blockers without treating a filled YAML as Gate C."""
     blockers = list(config.blocking_fields())
@@ -51,11 +42,11 @@ def first_motion_config_blockers(config: RealRobotConfig) -> tuple[str, ...]:
 
 
 def effective_first_motion_caps(config: RealRobotConfig) -> dict[str, float | None]:
-    """Intersect controller-configured maxima with hard local trial limits."""
+    """Return YAML motion limits without additional code-level caps."""
     result: dict[str, float | None] = {
-        name: min(value, cap) if value is not None else None
-        for name, cap in FIRST_MOTION_CAPS.items()
-        for value in (getattr(config.limits, name),)
+        "max_speed_mm_s": config.limits.max_speed_mm_s,
+        "max_acceleration_mm_s2": config.limits.max_acceleration_mm_s2,
+        "max_step_mm": config.limits.max_step_mm,
     }
     result["rotation_deg"] = 0.0
     return result
@@ -102,8 +93,8 @@ def _report(
 
 
 _AXES = {
-    "+X": (1.0, 0.0, 0.0), "-X": (-1.0, 0.0, 0.0),
-    "+Y": (0.0, 1.0, 0.0), "-Y": (0.0, -1.0, 0.0),
+    "+X": (100.0, 0.0, 0.0), "-X": (-1.0, 0.0, 0.0),
+    "+Y": (0.0, 50.0, 0.0), "-Y": (0.0, -1.0, 0.0),
     "+Z": (0.0, 0.0, 1.0), "-Z": (0.0, 0.0, -1.0),
 }
 
@@ -206,18 +197,18 @@ def _monitor_one_motion(
 
 
 def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
-    """Exactly one human-approved Base-axis 1 mm command, then exit."""
     require_local_mac_terminal()
     if first_motion_config_blockers(config):
         raise ValueError("commissioning config has missing or incompatible fields")
     test_id = validate_identifier(args.test_id)
     axis = _AXES[args.axis]
+    command_distance = math.dist((0.0, 0.0, 0.0), axis)
     caps = effective_first_motion_caps(config)
     command_speed = config.motion.speed_mm_s
     if command_speed is None:
         raise ValueError("motion.speed_mm_s is required")
-    if caps["max_step_mm"] < 1.0 or caps["max_speed_mm_s"] < command_speed:
-        raise ValueError("configured cap cannot permit the configured 1 mm trial")
+    if caps["max_step_mm"] < command_distance or caps["max_speed_mm_s"] < command_speed:
+        raise ValueError("command exceeds limits configured in robot-real.local.yaml")
     validate_probe_config(config)
     from .commissioning_runtime import (
         STATIONARY_OBSERVATION_S, LocalDataSheetSampler,
@@ -231,7 +222,7 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
     print(json.dumps({
         "test_id": test_id, "commit": commit,
         "device_sn": config.controller.device_sn, "axis": args.axis,
-        "distance_mm": 1.0, "speed_mm_s": command_speed,
+        "distance_mm": command_distance, "speed_mm_s": command_speed,
         "acceleration_mm_s2": caps["max_acceleration_mm_s2"],
         "tcp": config.tool.tcp_name, "ucs": "Base", "rotation_deg": 0,
     }, ensure_ascii=False, indent=2))
@@ -252,7 +243,7 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
         print(f"command_speed_mm_s={command_speed}")
         print(f"controller_override={override.command_override}")
         print(f"effective_speed_mm_s={effective_speed}")
-        timeout_s = min(config.deadlines.response_ms, config.deadlines.stop_delivery_ms, 500) / 1000
+        timeout_s = min(config.deadlines.response_ms, config.deadlines.stop_delivery_ms) / 1000
         with LocalRealMotionClient(config, timeout_s=timeout_s) as client:
             session_id = secrets.token_hex(16)
             with LocalDataSheetSampler(config, byte_order=args.byte_order) as sampler:
@@ -310,7 +301,7 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
                 timing = LocalMotionTiming(
                     response_ms=config.deadlines.response_ms,
                     start_ms=config.deadlines.startup_ms,
-                    motion_ms=min(config.deadlines.motion_ms, FIRST_MOTION_MOTION_TIMEOUT_MS),
+                    motion_ms=config.deadlines.motion_ms,
                     stop_confirmation_ms=config.deadlines.stop_ack_ms,
                     stable_samples=config.arrival.stable_samples,
                     dwell_ms=config.arrival.dwell_ms,

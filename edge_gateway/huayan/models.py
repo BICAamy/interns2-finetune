@@ -18,27 +18,27 @@ class ResponseUnknown(RuntimeError):
 
 # 把huayan厂商那边的字符串整理为项目内统一的Enum
 class ReadCommand(str, Enum):
-    IS_SIMULATION = "IsSimulation"
-    CONTROLLER_STATE = "ReadControllerState"
-    ROBOT_MODEL = "ReadRobotModel"
-    PACKAGE_VERSION = "PackageVersion"
-    FAST_COMMAND_PORT = "ReadFastCmdPort"
-    ROBOT_STATE = "ReadRobotState"
-    CURRENT_FSM = "ReadCurFSM"
-    ACTUAL_POSITION = "ReadActPos"
-    EMERGENCY_INFO = "ReadEmergencyInfo"
-    CURRENT_WAYPOINT_ID = "ReadCurWayPointID"
+    IS_SIMULATION = "IsSimulation" # 当前控制器是不是仿真模式
+    CONTROLLER_STATE = "ReadControllerState" # 控制器是否启动/工作
+    ROBOT_MODEL = "ReadRobotModel" # 机器人型号
+    PACKAGE_VERSION = "PackageVersion" # 控制器软件/API Package 版本
+    FAST_COMMAND_PORT = "ReadFastCmdPort" # 查询厂家快速命令端口
+    ROBOT_STATE = "ReadRobotState" # 一次读取一大组机器人状态
+    CURRENT_FSM = "ReadCurFSM" # 当前 FSM 状态码
+    ACTUAL_POSITION = "ReadActPos" # 实际关节与笛卡尔位置等
+    EMERGENCY_INFO = "ReadEmergencyInfo" #
+    CURRENT_WAYPOINT_ID = "ReadCurWayPointID" # 当前 WayPoint ID
     OVERRIDE = "ReadOverride"
-    AXIS_ERROR_CODE = "ReadAxisErrorCode"
-    PAYLOAD = "ReadPayload"
-    JOINT_MAX_VELOCITY = "ReadJointMaxVel"
-    JOINT_MAX_ACCELERATION = "ReadJointMaxAcc"
-    LINEAR_MAX_MOTION = "ReadLinearMaxVel"
-    BASE_INSTALLING_ANGLE = "GetBaseInstallingAngle"
-    CURRENT_TCP = "ReadCurTCP"
-    CURRENT_UCS = "ReadCurUCS"
-    TCP_BY_NAME = "ReadTCPByName"
-    UCS_BY_NAME = "ReadUCSByName"
+    AXIS_ERROR_CODE = "ReadAxisErrorCode" # 总组错误 + 六个轴错误
+    PAYLOAD = "ReadPayload" # 当前负载质量和质心
+    JOINT_MAX_VELOCITY = "ReadJointMaxVel" # 六轴最大角速度配置
+    JOINT_MAX_ACCELERATION = "ReadJointMaxAcc" # 六轴最大角加速度配置
+    LINEAR_MAX_MOTION = "ReadLinearMaxVel" # 线性最大速度
+    BASE_INSTALLING_ANGLE = "GetBaseInstallingAngle" # 机器人底座安装角
+    CURRENT_TCP = "ReadCurTCP" # 当前选中的 TCP 参数
+    CURRENT_UCS = "ReadCurUCS" # 当前选中的 UCS 参数
+    TCP_BY_NAME = "ReadTCPByName" # 按名称读取某个 TCP
+    UCS_BY_NAME = "ReadUCSByName" # 按名称读取某个 UCS
 
 
 ROBOT_ID_COMMANDS = frozenset({
@@ -126,27 +126,27 @@ class CommandReply:
 # 10004 持续推过来的实时状态数据解析之后的 Python 对象格式。（持续推流）
 @dataclass(frozen=True)
 class DatasheetSample:
-    source_timestamp_ms: int
-    received_wall_ms: int
-    received_monotonic_ns: int
-    joint_positions_deg: tuple[float, ...]
-    current_pose: tuple[float, ...]
-    base_pose: tuple[float, ...]
-    tcp_pose: tuple[float, ...]
-    joint_velocities_deg_s: tuple[float, ...]
-    joint_accelerations_deg_s2: tuple[float, ...]
-    override: float
-    fsm_code: int
-    enabled: bool
-    moving: bool
-    paused: bool
-    blending_done: bool
-    in_position: bool
-    error_code: int
-    error_axis: int
-    auto_mode: bool
-    reduced_mode: bool
-    free_drive_mode: bool
-    axis_error_codes: tuple[int, ...]
-    force_control_state: int
-    device_sn: str | None
+    source_timestamp_ms: int # 控制器则时间戳
+    received_wall_ms: int # Mac 收到这帧时的系统时间
+    received_monotonic_ns: int # Mac 收到这帧时的单调时钟
+    joint_positions_deg: tuple[float, ...] # J1～J6 实际关节角，单位 °
+    current_pose: tuple[float, ...] # 随关节值一起给出的 6D 实际位姿（六元组：x, y, z, rx, ry, rz）
+    base_pose: tuple[float, ...] # 当前实际位姿，以 Base 坐标系表达
+    tcp_pose: tuple[float, ...] # 当前实际位姿，以 TCP 相关坐标表达
+    joint_velocities_deg_s: tuple[float, ...] # J1～J6 当前角速度，°/s
+    joint_accelerations_deg_s2: tuple[float, ...] # J1～J6 当前角加速度，°/s²
+    override: float # 当前速度倍率
+    fsm_code: int # 厂商 FSM 状态码
+    enabled: bool # 机器人是否使能
+    moving: bool # 是否正在运动
+    paused: bool # 是否暂停
+    blending_done: bool #
+    in_position: bool # 是否到位
+    error_code: int # 当前机器人错误码
+    error_axis: int # 错误对应轴号
+    auto_mode: bool # 是否自动模式（自动模式：让机器人按照程序、外部控制命令自动运行）
+    reduced_mode: bool # 是否缩减模式（缩减模式：）
+    free_drive_mode: bool # 是否自由拖拽模式
+    axis_error_codes: tuple[int, ...] # 六个轴各自错误码
+    force_control_state: int # 力控状态
+    device_sn: str | None # 机械臂设备序列号

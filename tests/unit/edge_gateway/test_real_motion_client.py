@@ -110,9 +110,31 @@ def test_real_writer_rejects_unapproved_limits_before_write(monkeypatch):
                 speed_mm_s=100, acceleration_mm_s2=10, waypoint_id="LOCAL_1",
                 reference_joints_deg=(0, 0, 90, 0, 90, 0),
             )
-            with pytest.raises(ValueError, match="speed"):
+            with pytest.raises(ValueError, match="configured"):
                 client.waypoint(unsafe)
         assert not any(frame.startswith((b"WayPoint,", b"GrpStop,")) for frame in fake.received_commands)
+
+
+def test_real_writer_uses_yaml_speed_and_acceleration_limits_without_hidden_caps(monkeypatch):
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        redirect_controller(monkeypatch, fake)
+        config = real_shaped_config()
+        config = config.model_copy(update={
+            "limits": config.limits.model_copy(update={
+                "max_speed_mm_s": 2000.0,
+                "max_acceleration_mm_s2": 2500.0,
+            }),
+        })
+        high_configured_waypoint = LinearWaypoint(
+            pose_xyzrpy=(101, 100, 100, 0, 0, 0), tcp_name="TCP", ucs_name="Base",
+            speed_mm_s=2000, acceleration_mm_s2=2500, waypoint_id="LOCAL_HIGH",
+            reference_joints_deg=(0, 0, 90, 0, 90, 0),
+        )
+        with LocalRealMotionClient(config, timeout_s=0.1) as client:
+            assert client.waypoint(high_configured_waypoint) is True
+        assert len([
+            frame for frame in fake.received_commands if frame.startswith(b"WayPoint,")
+        ]) == 1
 
 
 @pytest.mark.parametrize("target,frame", [
