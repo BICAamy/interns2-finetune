@@ -75,7 +75,10 @@ class EntryPointControllerTests(unittest.TestCase):
     def test_out_of_workspace_entry_is_rejected_before_motion(self):
         controller = ContinuousTrajectoryController(CONFIG)
         with self.assertRaises(WorkspaceViolationError):
-            controller.move_to_entry(Point3D(x=701.0, y=0.0, z=500.0), speed_mm_s=10.0)
+            controller.move_to_entry(
+                Point3D(x=CONFIG.workspace.high_mm[0] + 1.0, y=0.0, z=500.0),
+                speed_mm_s=10.0,
+            )
         self.assertEqual(controller.get_state().motion_state, MotionState.IDLE)
         self.assertEqual(len(controller.trajectory_mm), 1)
 

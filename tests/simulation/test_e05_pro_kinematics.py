@@ -22,7 +22,7 @@ class E05ProConfigurationTests(unittest.TestCase):
         self.assertEqual(CONFIG.robot.force_flange_offset_mm, 184.0)
         self.assertEqual(
             CONFIG.robot.tool_transform.translation_mm,
-            (0.0, 0.0, 150.0),
+            (0.0, 0.0, 0.0),
         )
         self.assertTrue(CONFIG.robot.tool_transform.provisional)
         self.assertFalse(CONFIG.robot.tool_transform.real_robot_motion_allowed)
@@ -51,7 +51,7 @@ class E05ProKinematicsTests(unittest.TestCase):
         )
         np.testing.assert_allclose(
             snapshot.tcp_transform[:3, 3],
-            (0.0, 0.0, 1354.0),
+            (0.0, 0.0, 1204.0),
             atol=0.01,
         )
 
@@ -59,7 +59,7 @@ class E05ProKinematicsTests(unittest.TestCase):
         tcp_position = self.controller.get_state().tcp_position.as_tuple()
         np.testing.assert_allclose(
             tcp_position,
-            (530.7307, 0.0, 520.7475),
+            (455.7307, 0.0, 650.6513),
             atol=0.01,
         )
         self.assertTrue(CONFIG.workspace.contains(tcp_position))

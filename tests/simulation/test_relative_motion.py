@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from dataclasses import replace
 from math import dist
 
 import numpy as np
@@ -10,6 +11,7 @@ from simulation.entry_point_env import (
     ContinuousTrajectoryController,
     EntryPointEnvConfig,
     InvalidMotionCommand,
+    WorkspaceBounds,
     WorkspaceViolationError,
 )
 from surgical_contracts import MotionState
@@ -89,12 +91,21 @@ class RelativeMotionControllerTests(unittest.TestCase):
         with self.assertRaises(InvalidMotionCommand):
             controller.move_relative((0.0, 0.0, 0.0))
         with self.assertRaises(InvalidMotionCommand):
-            controller.move_relative((0.0, 0.0, 51.0))
+            controller.move_relative(
+                (0.0, 0.0, CONFIG.maximum_relative_distance_mm + 1.0)
+            )
 
-        controller.move_to_entry(Point3D(x=699.0, y=0.0, z=500.0))
-        run_until_settled(controller)
+        initial = controller.get_state().tcp_position
+        bounded_config = replace(
+            CONFIG,
+            workspace=WorkspaceBounds(
+                low_mm=(initial.x - 10.0, initial.y - 10.0, initial.z - 10.0),
+                high_mm=(initial.x + 1.0, initial.y + 10.0, initial.z + 10.0),
+            ),
+        )
+        bounded_controller = ContinuousTrajectoryController(bounded_config)
         with self.assertRaises(WorkspaceViolationError):
-            controller.move_relative((5.0, 0.0, 0.0))
+            bounded_controller.move_relative((5.0, 0.0, 0.0))
 
     def test_active_motion_cannot_be_silently_replaced(self):
         controller = ContinuousTrajectoryController(CONFIG)

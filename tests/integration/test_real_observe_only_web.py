@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 from fastapi.testclient import TestClient
+import yaml
 
 from agent.tools.puncture_planner import FakePuncturePlannerClient
 from agent.tools.robot import FakeRobotController
+from robot_runtime.real_config import load_real_config
+from simulation.runtime_config import load_simulation_motion_policy
 from surgical_contracts import (
     CoordinateFrame,
     DistanceUnit,
@@ -162,6 +166,60 @@ def _dual_mode_client():
         real_observer,
         simulation_robot,
     )
+
+
+def test_real_and_simulation_motion_values_match_but_load_independently() -> None:
+    real_config = load_real_config("configs/robot-real.local.yaml")
+    simulation_policy = load_simulation_motion_policy("configs/simulation.yaml")
+
+    assert simulation_policy.move_speed_mm_s == real_config.motion.speed_mm_s
+    assert simulation_policy.max_speed_mm_s == real_config.limits.max_speed_mm_s
+    assert (
+        simulation_policy.max_relative_translation_mm
+        == real_config.limits.max_step_mm
+    )
+    assert simulation_policy.entry_tolerance_mm == real_config.arrival.position_tolerance_mm
+
+    simulation_data = yaml.safe_load(
+        Path("configs/simulation.yaml").read_text(encoding="utf-8")
+    )["entry_point_env"]
+    assert tuple(simulation_data["workspace"]["low_mm"]) == real_config.limits.workspace_low_mm
+    assert tuple(simulation_data["workspace"]["high_mm"]) == real_config.limits.workspace_high_mm
+    assert tuple(
+        tuple(pair) for pair in simulation_data["robot"]["joint_limits_deg"]
+    ) == real_config.limits.joint_soft_limits_deg
+
+    contaminated_settings = replace(
+        settings(),
+        runtime_mode=RuntimeMode.REAL,
+        real_config_path="configs/robot-real.local.yaml",
+        robot_simulation_fallback_base_url="http://127.0.0.1:8003",
+        robot_move_speed_mm_s=11.0,
+        max_robot_speed_mm_s=12.0,
+        max_relative_translation_mm=13.0,
+        entry_tolerance_mm=14.0,
+    )
+    runtime = WebRuntime(
+        contaminated_settings,
+        parser=StubParser(relative_command()),
+        robot=FakeRobotController(),
+        planner=FakePuncturePlannerClient(),
+        simulation_observer=RealObserver(),
+    )
+    try:
+        real_policy = runtime._orchestrators[RuntimeMode.REAL].policy
+        fallback_policy = runtime._orchestrators[RuntimeMode.SIMULATION].policy
+        assert real_policy.move_speed_mm_s == real_config.motion.speed_mm_s
+        assert real_policy.max_speed_mm_s == real_config.limits.max_speed_mm_s
+        assert fallback_policy.move_speed_mm_s == simulation_policy.move_speed_mm_s
+        assert fallback_policy.max_speed_mm_s == simulation_policy.max_speed_mm_s
+        assert (
+            fallback_policy.max_relative_translation_mm
+            == simulation_policy.max_relative_translation_mm
+        )
+        assert fallback_policy.entry_tolerance_mm == simulation_policy.entry_tolerance_mm
+    finally:
+        runtime.close()
 
 
 def test_real_generic_routes_expose_only_actual_state() -> None:

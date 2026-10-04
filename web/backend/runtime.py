@@ -44,6 +44,7 @@ from agent.parsing import CommandParsingError
 from agent.runtime import InternS2Agent, ParsedCommandResponse
 from agent.tools.puncture_planner import PlannerAdapterHTTPClient
 from agent.tools.robot import RobotSimulationHTTPController
+from simulation.runtime_config import load_simulation_motion_policy
 
 from .asr import (
     ASRService,
@@ -124,6 +125,22 @@ class WebRuntime:
         settings.validate()
         parser_was_provided = parser is not None
         configured_mode = RuntimeMode(settings.runtime_mode)
+        fallback_url = settings.robot_simulation_fallback_base_url
+        simulation_policy = None
+        if configured_mode == RuntimeMode.SIMULATION or fallback_url:
+            simulation_policy = load_simulation_motion_policy()
+        if configured_mode == RuntimeMode.SIMULATION:
+            assert simulation_policy is not None
+            settings = replace(
+                settings,
+                entry_tolerance_mm=simulation_policy.entry_tolerance_mm,
+                max_relative_translation_mm=(
+                    simulation_policy.max_relative_translation_mm
+                ),
+                robot_move_speed_mm_s=simulation_policy.move_speed_mm_s,
+                max_robot_speed_mm_s=simulation_policy.max_speed_mm_s,
+            )
+            settings.validate()
         self._configured_mode = configured_mode
         self._real_mode = configured_mode == RuntimeMode.REAL
         self._real_config = None
@@ -182,7 +199,8 @@ class WebRuntime:
                 expected_runtime_mode=configured_mode,
                 move_tcp_name=(
                     (real.tool.tcp_name or "needle_tip")
-                    if real is not None else "needle_tip"
+                    if real is not None
+                    else simulation_policy.tcp_name
                 ),
                 entry_orientation_policy=(
                     "hold_current_actual_orientation"
@@ -204,15 +222,22 @@ class WebRuntime:
             configured_mode: self.orchestrator,
         }
         self._secondary_resources: list[Any] = []
-        fallback_url = settings.robot_simulation_fallback_base_url
         if self._real_mode and fallback_url:
+            assert simulation_policy is not None
             simulation_settings = replace(
                 settings,
                 runtime_mode=RuntimeMode.SIMULATION,
                 real_config_path=None,
                 robot_simulation_base_url=fallback_url,
                 robot_simulation_fallback_base_url=None,
+                entry_tolerance_mm=simulation_policy.entry_tolerance_mm,
+                max_relative_translation_mm=(
+                    simulation_policy.max_relative_translation_mm
+                ),
+                robot_move_speed_mm_s=simulation_policy.move_speed_mm_s,
+                max_robot_speed_mm_s=simulation_policy.max_speed_mm_s,
             )
+            simulation_settings.validate()
             simulation_robot = RobotSimulationHTTPController(
                 fallback_url,
                 http_timeout_s=settings.robot_simulation_http_timeout,
@@ -239,6 +264,7 @@ class WebRuntime:
                     move_speed_mm_s=simulation_settings.robot_move_speed_mm_s,
                     max_speed_mm_s=simulation_settings.max_robot_speed_mm_s,
                     expected_runtime_mode=RuntimeMode.SIMULATION,
+                    move_tcp_name=simulation_policy.tcp_name,
                 ),
                 event_sink=self._on_tool_event,
             )

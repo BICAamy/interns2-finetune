@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 from edge_gateway.commissioning_runtime import make_path_ik
-from robot_runtime.real_config import JointMapping, RealRobotConfig
+from robot_runtime.real_config import load_real_config
 from surgical_contracts import CoordinateFrame, DistanceUnit, Pose6D, RobotTelemetry
 
 
@@ -23,9 +23,7 @@ def test_step8_independent_pose_supports_bounded_one_mm_axis_paths():
     telemetry = RobotTelemetry.model_construct(
         joint_positions_deg=joints, actual_pose_robot_base=pose,
     )
-    config = RealRobotConfig.model_construct(
-        joint_mapping=JointMapping(sign=(1,) * 6, zero_offset_deg=(0.0,) * 6),
-    )
+    config = load_real_config("configs/robot-real.local.yaml")
     for axis in range(3):
         for direction in (-1.0, 1.0):
             solve = make_path_ik(config, telemetry)
@@ -50,9 +48,7 @@ def test_ik_rejects_pose_that_disagrees_with_calibrated_flange():
     telemetry = RobotTelemetry.model_construct(
         joint_positions_deg=joints, actual_pose_robot_base=pose,
     )
-    config = RealRobotConfig.model_construct(
-        joint_mapping=JointMapping(sign=(1,) * 6, zero_offset_deg=(0.0,) * 6),
-    )
+    config = load_real_config("configs/robot-real.local.yaml")
     import pytest
     with pytest.raises(ValueError, match="FK disagrees"):
         make_path_ik(config, telemetry)

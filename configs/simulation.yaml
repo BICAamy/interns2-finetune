@@ -1,17 +1,17 @@
 entry_point_env:
-  tcp_name: needle_tip # TCP 的名字叫做needle_tip
+  tcp_name: needle_tip # 仿真逻辑名称；当前数值位置与法兰中心重合
   coordinate_frame: robot_base # 坐标默认以机器人底座坐标系表达
   time_step_s: 0.05 # 仿真控制每 0.05 秒推进一次
-  default_speed_mm_s: 20.0 # 默认 TCP 运动速度 20 mm/s
-  maximum_speed_mm_s: 50.0 # 最大允许 TCP 速度 50 mm/s
+  default_speed_mm_s: 70.0 # 与真机 motion.speed_mm_s 一致
+  maximum_speed_mm_s: 2000.0 # 与真机 limits.max_speed_mm_s 一致
   reach_tolerance_mm: 0.5 # 距目标 ≤ 0.5 mm 时，可以认为“到点”
-  maximum_relative_distance_mm: 50.0 # 单次相对运动最多 50 mm
+  maximum_relative_distance_mm: 1000.0 # 与真机 limits.max_step_mm 一致
   trajectory_history_limit: 2048 # 最多保留 2048 个历史轨迹点
 
-  # workspace是一个长方体，对应xyz三个方向（例如 300.0 <= x <= 700.0），TCP移动后的坐标在任一方向上不能超过这些范围
+  # workspace是一个长方体，对应xyz三个方向；与当前真机配置保持一致
   workspace:
-    low_mm: [300.0, -250.0, 250.0]
-    high_mm: [700.0, 250.0, 750.0]
+    low_mm: [200.0, -1000.0, 100.0]
+    high_mm: [1000.0, 1000.0, 800.0]
 
   robot:
     model_name: E05-Pro # 机器人名字
@@ -39,11 +39,11 @@ entry_point_env:
 
     tool_transform:
       # 从机械臂法兰坐标系，到你安装的工具 TCP/针尖坐标系之间的固定刚体变换
-      translation_mm: [0.0, 0.0, 150.0] # 针尖 TCP 相对于 flange 原点的平移向量xyz
-      rpy_deg: [0.0, 0.0, 0.0] # 针尖 TCP 相对于 flange 坐标系的旋转矩阵Roll、Pitch、Yaw
-      provisional: true # 意思是临时的，表示这个 150mm 只是当前仿真的临时工具参数，不是实际针架安装后的真实标定结果。
-      real_robot_motion_allowed: false # 使用这套 TCP 参数时，不允许认为系统已经可以安全控制真实机器人。
-      note: 仅供仿真使用的临时 150mm 针；无工具真机另用法兰中心零 TCP 配置，装针后再单独标定
+      translation_mm: [0.0, 0.0, 0.0] # 当前统一假设针尖与法兰中心重合
+      rpy_deg: [0.0, 0.0, 0.0] # 当前统一使用零旋转
+      provisional: true # 安装真实工具后必须重新标定，不能继续沿用零偏移假设
+      real_robot_motion_allowed: false # 仿真配置不能替代真机配置授权运动
+      note: 当前无工具，临时按针尖与法兰中心重合；装针后重新标定
   # K 数值求解器的参数
   inverse_kinematics:
     orientation_weight_mm_per_rad: 100.0

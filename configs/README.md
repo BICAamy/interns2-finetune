@@ -8,15 +8,18 @@ The workspace box is only a coarse command filter. A point inside the box is
 accepted only after the full six-axis inverse kinematics also finds a solution
 at the configured safe TCP orientation and within all joint limits.
 
-The `[0, 0, 150] mm` flange-to-needle transform belongs only to simulation.
-Keep its `provisional: true` and `real_robot_motion_allowed: false` flags; do
-not copy it into a real-robot configuration. For bare-flange bench work,
-the separate real configuration may use `tool.setup: flange_only_no_tool`
-only after confirming that no attachment is installed and the controller's
-selected/named TCP, Base UCS, payload, center of gravity, and both base
-installing angles agree with the recorded values. The flange center is then
-the temporary calculation point, not a physical needle tip. Installing any
-attachment invalidates this profile and requires a new calibration.
+The simulation and real-robot YAML files currently use the same command speed,
+maximum speed, maximum relative distance, Cartesian workspace, position
+tolerance, and joint limits. They remain separate sources of truth: simulation
+loads only `simulation.yaml`, while real mode loads only
+`robot-real.local.yaml`. Updating one file never changes the other mode
+implicitly.
+
+The current simulation and real configurations both use zero flange-to-TCP
+translation and rotation because no tool is installed. The flange center is
+therefore the temporary calculation point. The simulation transform remains
+`provisional: true` and cannot authorize real motion. Installing any attachment
+invalidates the zero-offset assumption and requires a new TCP calibration.
 
 ## Real-mode configuration
 
