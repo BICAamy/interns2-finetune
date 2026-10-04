@@ -153,3 +153,44 @@
   font-size: 11px;
   line-height: 1.5;
 }
+
+/* Match the application's white-and-blue visual system. */
+.gesture-overlay {
+  color: #17395f;
+  border-color: #d6e3f2;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 20px 58px rgba(18, 58, 105, 0.18);
+}
+
+.gesture-overlay-heading span,
+.gesture-actions span,
+.gesture-result span { color: #7189a5; }
+
+.gesture-overlay-heading button {
+  color: #155ba7;
+  background: #edf5ff;
+}
+
+.gesture-camera-stage {
+  color: #7189a5;
+  border: 1px solid #d8e5f2;
+  background: #edf4fc;
+}
+
+.gesture-result,
+.gesture-error { background: #f3f7fc; }
+.gesture-result p { color: #355a80; }
+.gesture-result.accepted { outline-color: rgba(22, 164, 119, 0.42); background: #eefaf5; }
+.gesture-result.safety_stop,
+.gesture-result.safety_estop { outline-color: rgba(229, 72, 95, 0.48); background: #fff2f4; }
+.gesture-error { color: #bd344c; border-color: #efc2ca; background: #fff2f4; }
+.gesture-protocol { color: #5f7894; }
+.gesture-protocol summary { color: #234d77; }
+
+.gesture-axis-hint {
+  border-color: #d9e6f3;
+  background: #f2f7fd;
+}
+
+.gesture-axis-hint strong { color: #225487; }
+.gesture-axis-hint span { color: #7189a5; }
