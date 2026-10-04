@@ -13,6 +13,7 @@ from surgical_contracts import (
 )
 
 from ..models import (
+    ConfirmationRequest,
     HealthResponse,
     SessionSnapshot,
     SimulationTelemetryView,
@@ -105,8 +106,15 @@ async def submit_speech(
     response_model=SessionSnapshot,
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def confirm(session_id: str, request: Request) -> SessionSnapshot:
-    return await _runtime(request).confirm(session_id)
+async def confirm(
+    session_id: str,
+    request: Request,
+    confirmation: ConfirmationRequest | None = None,
+) -> SessionSnapshot:
+    return await _runtime(request).confirm(
+        session_id,
+        fingerprint=(confirmation.fingerprint if confirmation is not None else None),
+    )
 
 
 @router.post("/api/sessions/{session_id}/cancel", response_model=SessionSnapshot)

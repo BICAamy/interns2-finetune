@@ -13,10 +13,13 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from surgical_contracts import (
+    CommandExecutionStatus,
     CommandIntent,
     CoordinateSource,
     ParsedCommand,
     Point3D,
+    MoveRelativeRequest,
+    RobotMotionProposal,
     RobotTelemetry,
     SimulationTelemetry,
     SimulationCameraControlRequest,
@@ -125,7 +128,11 @@ class WebRuntime:
         speech_transcriber: SpeechTranscriber | None = None,
     ) -> None:
         settings.validate()
-        self._real_observe_only = settings.runtime_mode == RuntimeMode.REAL
+        self._real_mode = settings.runtime_mode == RuntimeMode.REAL
+        self._real_enabled = (
+            self._real_mode and settings.robot_control_mode == "enabled"
+        )
+        self._real_observe_only = self._real_mode and not self._real_enabled
         self.settings = settings
         self.store = store or SessionStore()
         self._model_http: OpenAICompatibleHTTPClient | None = None
@@ -359,8 +366,8 @@ class WebRuntime:
         command = session.normalized_command or {}
         return SimulationTelemetryView(
             connected=False,
-            runtime_mode=("real" if self._real_observe_only else "simulation"),
-            control_mode=("observe-only" if self._real_observe_only else None),
+            runtime_mode=("real" if self._real_mode else "simulation"),
+            control_mode=(self.settings.robot_control_mode if self._real_mode else None),
             freshness="disconnected",
             connections={"server": "disconnected"},
             sequence=0,
@@ -372,7 +379,7 @@ class WebRuntime:
             error={
                 "code": (
                     "GATEWAY_DISCONNECTED"
-                    if self._real_observe_only
+                    if self._real_mode
                     else "ROBOT_TELEMETRY_UNAVAILABLE"
                 ),
                 "message": str(error) or type(error).__name__,
@@ -387,9 +394,9 @@ class WebRuntime:
 
     def _verify_observer_mode(self) -> None:
         telemetry = self.simulation_observer.get_telemetry()
-        if self._real_observe_only and not isinstance(telemetry, RobotTelemetry):
+        if self._real_mode and not isinstance(telemetry, RobotTelemetry):
             raise SimulationProxyError("robot-runtime 没有运行在 real 模式")
-        if not self._real_observe_only and not isinstance(telemetry, SimulationTelemetry):
+        if not self._real_mode and not isinstance(telemetry, SimulationTelemetry):
             raise SimulationProxyError("robot-runtime 没有运行在 simulation 模式")
 
     async def open_robot_video(self, session_id: str) -> MJPEGStream:
@@ -425,12 +432,12 @@ class WebRuntime:
     def health(self) -> HealthResponse:
         return HealthResponse(
             runtime_mode=self.settings.runtime_mode.value,
-            control_mode="observe-only" if self._real_observe_only else None,
+            control_mode=(self.settings.robot_control_mode if self._real_mode else None),
             puncture_execution_enabled=False,
             sessions=self.store.count,
             downstream={
                 "interns2": self.settings.base_url,
-                ("robot_runtime" if self._real_observe_only else "robot_simulation"):
+                ("robot_runtime" if self._real_mode else "robot_simulation"):
                     self.settings.robot_simulation_base_url,
                 "planner_adapter": self.settings.planner_adapter_base_url,
             },
@@ -507,6 +514,7 @@ class WebRuntime:
             record.active_command_id = None
             record.raw_model_output = None
             record.normalized_command = None
+            record.motion_proposal = None
             record.execution_events = []
             record.live_tool_events = []
             record.orchestration = None
@@ -561,6 +569,49 @@ class WebRuntime:
             if image_path is not None:
                 image_path.unlink(missing_ok=True)
 
+        motion_proposal: RobotMotionProposal | None = None
+        if self._real_enabled and parsed.command.intent != CommandIntent.CLARIFY:
+            if (
+                parsed.command.intent != CommandIntent.MOVE_RELATIVE
+                or parsed.command.relative_motion is None
+            ):
+                return self._record_parse_error(
+                    session_id,
+                    {
+                        "code": "OPERATION_NOT_ENABLED",
+                        "message": "Step 12 目前只开放已通过 Step 11 的 move_relative",
+                        "details": {},
+                    },
+                    parse_token=parse_token,
+                )
+            proposal_request = MoveRelativeRequest(
+                command_id=parsed.command.command_id,
+                translation_mm=parsed.command.relative_motion.translation_mm(),
+                frame=parsed.command.relative_motion.frame,
+                speed_mm_s=self.settings.robot_move_speed_mm_s,
+            )
+            try:
+                proposal_record = await asyncio.to_thread(
+                    self.robot.create_move_relative_proposal,
+                    proposal_request,
+                )
+                if proposal_record.status != CommandExecutionStatus.QUEUED:
+                    raise RuntimeError("robot-runtime did not return a queued proposal")
+                proposal_payload = (proposal_record.result or {}).get("proposal")
+                motion_proposal = RobotMotionProposal.model_validate(proposal_payload)
+                if motion_proposal.web_confirmed or motion_proposal.executable:
+                    raise RuntimeError("new proposal was unexpectedly executable")
+            except Exception as error:
+                return self._record_parse_error(
+                    session_id,
+                    {
+                        "code": getattr(getattr(error, "error_code", None), "value", "INTERNAL_ERROR"),
+                        "message": f"无法生成真机运动 proposal：{error}",
+                        "details": {},
+                    },
+                    parse_token=parse_token,
+                )
+
         parse_finished_ms = time.time_ns() // 1_000_000
 
         def finish(record) -> None:
@@ -569,6 +620,11 @@ class WebRuntime:
             payload = parsed.as_dict()
             record.raw_model_output = payload.get("raw_model_output")
             record.normalized_command = parsed.command.model_dump(mode="json")
+            record.motion_proposal = (
+                motion_proposal.model_dump(mode="json")
+                if motion_proposal is not None
+                else None
+            )
             record.parse_finished_ms = parse_finished_ms
             record.parse_token = None
             record.execution_events = [
@@ -601,6 +657,8 @@ class WebRuntime:
                     if self._real_observe_only
                     else "请核对结构化任务，确认后才会调用机械臂"
                 )
+                if motion_proposal is not None:
+                    record.message = "不可执行 proposal 已生成；核对 fingerprint 后确认一次即可"
                 if (
                     not self._real_observe_only
                     and asr_transcription is not None
@@ -612,7 +670,9 @@ class WebRuntime:
 
         return self.store.mutate(session_id, finish)
 
-    async def confirm(self, session_id: str) -> SessionSnapshot:
+    async def confirm(
+        self, session_id: str, *, fingerprint: str | None = None,
+    ) -> SessionSnapshot:
         if self._real_observe_only:
             raise SessionConflict("真实机械臂当前仅供观察；禁止执行命令")
         selected: dict[str, Any] = {}
@@ -620,11 +680,18 @@ class WebRuntime:
         def begin(record) -> None:
             if record.pending_command is None:
                 raise SessionConflict("session has no command awaiting confirmation")
+            if self._real_enabled:
+                proposal = RobotMotionProposal.model_validate(record.motion_proposal)
+                if fingerprint != proposal.fingerprint:
+                    raise SessionConflict(
+                        "网页确认的 fingerprint 与当前 motion proposal 不一致"
+                    )
             command = record.pending_command
             selected["command"] = command
             selected["parse_started_ms"] = record.parse_started_ms
             selected["parse_finished_ms"] = record.parse_finished_ms
             selected["motion_origin"] = record.current_tcp
+            selected["motion_proposal"] = record.motion_proposal
             record.pending_command = None
             record.active_command_id = command.command_id
             record.status = SessionStatus.EXECUTING
@@ -634,6 +701,37 @@ class WebRuntime:
 
         snapshot = self.store.mutate(session_id, begin)
         command: ParsedCommand = selected["command"]
+        if self._real_enabled:
+            try:
+                proposal = RobotMotionProposal.model_validate(selected["motion_proposal"])
+                confirmed_record = await asyncio.to_thread(
+                    self.robot.confirm_motion_proposal,
+                    command.command_id,
+                    proposal.fingerprint,
+                )
+                if confirmed_record.status != CommandExecutionStatus.RUNNING:
+                    raise RuntimeError("motion proposal was not accepted for dispatch")
+                confirmed_proposal = RobotMotionProposal.model_validate(
+                    (confirmed_record.result or {}).get("proposal")
+                )
+                if (
+                    not confirmed_proposal.web_confirmed
+                    or confirmed_proposal.fingerprint != proposal.fingerprint
+                ):
+                    raise RuntimeError("confirmed proposal fingerprint changed")
+                snapshot = self.store.mutate(
+                    session_id,
+                    lambda record: setattr(
+                        record,
+                        "motion_proposal",
+                        confirmed_proposal.model_dump(mode="json"),
+                    ),
+                )
+            except Exception as error:
+                return self.store.mutate(
+                    session_id,
+                    lambda record: self._mark_background_failure(record, error),
+                )
         origin = _point_from_payload(selected.get("motion_origin"))
         if origin is not None:
             self._motion_origins[session_id] = origin
@@ -661,8 +759,11 @@ class WebRuntime:
         return self.store.mutate(session_id, operation)
 
     async def stop(self, session_id: str, *, emergency: bool) -> SessionSnapshot:
-        if self._real_observe_only:
-            raise SessionConflict("真实机械臂仅供观察；网页不能发送停止或急停，请使用现场物理装置")
+        if self._real_mode:
+            raise SessionConflict(
+                "Step 12 真实模式仅开放已确认的 move_relative；"
+                "网页不能发送停止或急停，请使用现场物理装置"
+            )
         command = ParsedCommand(
             command_id=f"web-{'estop' if emergency else 'stop'}-{uuid4().hex}",
             intent=(
@@ -710,8 +811,8 @@ class WebRuntime:
         return self.store.mutate(session_id, finish)
 
     async def reset_estop(self, session_id: str) -> SessionSnapshot:
-        if self._real_observe_only:
-            raise SessionConflict("真实机械臂仅供观察；禁止远程复位急停")
+        if self._real_mode:
+            raise SessionConflict("Step 12 真实模式禁止远程复位急停")
         # Resolve the session before performing a state-changing tool call.
         self.store.snapshot(session_id)
         command_id = f"web-reset-{uuid4().hex}"

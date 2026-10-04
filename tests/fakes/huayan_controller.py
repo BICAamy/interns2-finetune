@@ -86,6 +86,8 @@ class FakeHuayanController:
         initial_moving: bool = False,
         initial_override: float = 1.0,
         apply_group_state_changes: bool = True,
+        simulate_waypoint_motion: bool = False,
+        waypoint_motion_s: float = 0.12,
     ) -> None:
         if data_interval_s <= 0:
             raise ValueError("data_interval_s must be positive")
@@ -108,6 +110,12 @@ class FakeHuayanController:
         self._moving = initial_moving
         self._override = initial_override
         self._apply_group_state_changes = apply_group_state_changes
+        self._simulate_waypoint_motion = simulate_waypoint_motion
+        self._waypoint_motion_s = waypoint_motion_s
+        initial_document = datasheet_document()
+        self._base_pose = tuple(
+            float(value) for value in initial_document["PosAndVel"]["Actual_PCS_Base"]
+        )
         # Keep test diagnostics bounded during long-running gateway soak tests.
         self.received_commands: list[bytes] = []
         self._stop = threading.Event()
@@ -195,15 +203,22 @@ class FakeHuayanController:
                 continue
             except OSError:
                 return
-            with connection:
-                connection.settimeout(0.1)
-                try:
-                    if kind == "data":
-                        self._serve_data(connection)
-                    else:
-                        self._serve_commands(connection, fast=(kind == "fast"))
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    continue
+            threading.Thread(
+                target=self._serve_connection,
+                args=(connection, kind),
+                daemon=True,
+            ).start()
+
+    def _serve_connection(self, connection: socket.socket, kind: str) -> None:
+        with connection:
+            connection.settimeout(0.1)
+            try:
+                if kind == "data":
+                    self._serve_data(connection)
+                else:
+                    self._serve_commands(connection, fast=(kind == "fast"))
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
 
     def _serve_commands(self, connection: socket.socket, *, fast: bool) -> None:
         buffer = bytearray()
@@ -263,6 +278,7 @@ class FakeHuayanController:
                             valid = False
                     if valid:
                         self._current_waypoint_id = fields[24].decode("ascii", errors="replace")
+                        target_pose = tuple(float(value) for value in fields[2:8])
                 elif name == "GrpStop":
                     valid = fields == [b"GrpStop", b"0"]
                 elif name == "SetOverride":
@@ -300,6 +316,13 @@ class FakeHuayanController:
                             self._enabled = False
                         elif name == "SetOverride":
                             self._override = requested_override
+                        elif name == "WayPoint" and self._simulate_waypoint_motion:
+                            self._moving = True
+                            threading.Thread(
+                                target=self._finish_waypoint,
+                                args=(target_pose,),
+                                daemon=True,
+                            ).start()
                 if pipelined:
                     return
                 continue
@@ -380,7 +403,13 @@ class FakeHuayanController:
             if self.accept_fake_motion:
                 with self._state_lock:
                     enabled, moving, override = self._enabled, self._moving, self._override
+                    base_pose = self._base_pose
                 document["PosAndVel"]["Actual_Override"] = str(override)
+                document["PosAndVel"]["Actual_PCS_Base"] = [str(value) for value in base_pose]
+                document["PosAndVel"]["Actual_PCS_TCP"] = [str(value) for value in base_pose]
+                document["PosAndVel"]["Actual_Position"][6:12] = [
+                    str(value) for value in base_pose
+                ]
                 state = document["StateAndError"]
                 state["robotEnabled"] = int(enabled)
                 state["robotMoving"] = int(moving)
@@ -395,3 +424,10 @@ class FakeHuayanController:
             frame_index += 1
             if self._stop.wait(self._data_interval_s):
                 return
+
+    def _finish_waypoint(self, target_pose: tuple[float, ...]) -> None:
+        if self._stop.wait(self._waypoint_motion_s):
+            return
+        with self._state_lock:
+            self._base_pose = target_pose
+            self._moving = False

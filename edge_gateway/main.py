@@ -6,8 +6,13 @@ import argparse
 from pathlib import Path
 import threading
 import time
+from typing import Callable
 
-from surgical_contracts import LinkState, load_gateway_secret
+from surgical_contracts import (
+    GatewayControlMode, LinkState, RobotCommandEnvelope, RobotCommandResult,
+    RobotTelemetry,
+    load_gateway_secret,
+)
 
 from .audit import EdgeAudit
 from .cloud_transport import CloudTransport, telemetry_from_sample
@@ -24,7 +29,12 @@ from .watchdog import SourceStampWatchdog, StateWatchdog
 
 
 class EdgeGateway:
-    def __init__(self, config: EdgeConfig | RealEdgeConfig) -> None:
+    def __init__(
+        self,
+        config: EdgeConfig | RealEdgeConfig,
+        *,
+        command_handler: Callable[[RobotCommandEnvelope, str], RobotCommandResult] | None = None,
+    ) -> None:
         self.config = config
         self.secret = load_gateway_secret(config.secret_file)
         self.state = EdgeState()
@@ -40,11 +50,19 @@ class EdgeGateway:
         self._command = CommandClient( #一问一答，10003
             self._controller_host, self._command_port, timeout_s=0.5, scope=self._scope,
         )
+        cloud_control = (
+            GatewayControlMode(config.cloud_control)
+            if isinstance(config, EdgeConfig)
+            else GatewayControlMode.OBSERVE_ONLY
+        )
         self._cloud = CloudTransport( # mac与服务器连接（通过websocket）
             config.server_url,
             secret=self.secret,
             gateway_id=config.gateway_id,
+            control_mode=cloud_control,
+            command_handler=command_handler,
         )
+        self._cloud_control = cloud_control
         self.robot_model: str | None = None
         self.package_version: str | None = None
         self.device_sn: str | None = None
@@ -68,7 +86,7 @@ class EdgeGateway:
             if simulation or not started:
                 self.state.fault = True
                 raise ValueError("controller did not report a started hardware state")
-            if self._real:
+            if self._real or self._cloud_control == GatewayControlMode.ENABLED:
                 status = read_robot_state(self._command.request(ReadCommand.ROBOT_STATE))
                 emergency = read_emergency_info(self._command.request(ReadCommand.EMERGENCY_INFO))
                 self.robot_status = status
@@ -94,6 +112,26 @@ class EdgeGateway:
             self._command.close()
             self.state.command_connected = False
             raise
+
+    def local_telemetry(self) -> RobotTelemetry:
+        """Return the newest Mac-side snapshot for remote motion preflight."""
+        session_id = self._cloud.session_id
+        record, _events = self.state.snapshot()
+        if session_id is None or record is None:
+            raise RuntimeError("gateway has no active session or DataSheet sample")
+        return telemetry_from_sample(
+            record,
+            session_id=session_id,
+            device_sn=self.device_sn or "",
+            robot_model=self.robot_model or "",
+            package_version=self.package_version or "",
+            controller_is_simulation=bool(self.controller_is_simulation),
+            command_connected=self.state.command_connected,
+            watchdog=self.watchdog,
+            robot_status=self.robot_status,
+            emergency_status=self.emergency_status,
+            control_mode=self._cloud_control,
+        )
     # 10004连接处
     def _poll_datasheet(self) -> None:
         while not self._stop.is_set() and not self.state.fault:
@@ -231,6 +269,7 @@ class EdgeGateway:
                                 watchdog=self.watchdog,
                                 robot_status=self.robot_status,
                                 emergency_status=self.emergency_status,
+                                control_mode=self._cloud_control,
                             )
                             self._cloud.send_state(telemetry)
                             self.state.acknowledged_through(record.sequence)

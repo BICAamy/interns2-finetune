@@ -41,6 +41,7 @@ class SessionRecord:
     active_command_id: str | None = None
     raw_model_output: dict[str, Any] | None = None
     normalized_command: dict[str, Any] | None = None
+    motion_proposal: dict[str, Any] | None = None
     current_tcp: dict[str, Any] | None = None
     execution_events: list[dict[str, Any]] = field(default_factory=list)
     live_tool_events: list[dict[str, Any]] = field(default_factory=list)
@@ -68,6 +69,7 @@ class SessionRecord:
             active_command_id=self.active_command_id,
             raw_model_output=self.raw_model_output,
             normalized_command=self.normalized_command,
+            motion_proposal=self.motion_proposal,
             current_tcp=self.current_tcp,
             execution_events=list(timeline),
             orchestration=self.orchestration,

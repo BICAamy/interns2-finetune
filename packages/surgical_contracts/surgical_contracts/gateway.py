@@ -6,7 +6,10 @@ This module contains data only. It opens no sockets and cannot move a robot.
 from __future__ import annotations
 
 from enum import Enum
+import hashlib
+import json
 from math import sqrt
+from typing import Literal
 
 from pydantic import Field, FiniteFloat, model_validator
 
@@ -131,6 +134,36 @@ class RobotCommandEnvelope(ContractModel):
         return self
 
 
+def command_fingerprint(envelope: RobotCommandEnvelope) -> str:
+    """Return the one canonical digest used by server, browser and Mac."""
+    canonical = json.dumps(
+        envelope.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class RobotMotionProposal(ContractModel):
+    """A server-side preview. It is never executable until web confirmation."""
+
+    schema_version: SchemaVersion = SCHEMA_VERSION
+    command_id: str = Field(min_length=1, max_length=128)
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    envelope: RobotCommandEnvelope
+    executable: Literal[False] = False
+    web_confirmed: bool = False
+
+    @model_validator(mode="after")
+    def validate_binding(self) -> "RobotMotionProposal":
+        if self.command_id != self.envelope.command_id:
+            raise ValueError("proposal command_id does not match envelope")
+        if self.fingerprint != command_fingerprint(self.envelope):
+            raise ValueError("proposal fingerprint does not match envelope")
+        return self
+
+
 class GatewayAcknowledgementStatus(str, Enum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
@@ -180,6 +213,7 @@ class RobotCommandResult(ContractModel):
     error_code: ErrorCode | None = None
     vendor_fault: VendorFault | None = None
     software_stop: SoftwareStopResult | None = None
+    final_pose_robot_base: Pose6D | None = None
 
     @model_validator(mode="after")
     def validate_result(self) -> "RobotCommandResult":
@@ -188,6 +222,11 @@ class RobotCommandResult(ContractModel):
                 raise ValueError("software stop result requires delivery and motion_stop")
         elif self.software_stop is not None:
             raise ValueError("motion result cannot contain software stop fields")
+        if (
+            self.final_pose_robot_base is not None
+            and self.final_pose_robot_base.frame != CoordinateFrame.ROBOT_BASE
+        ):
+            raise ValueError("final pose must use robot_base frame")
         if self.status == ToolStatus.SUCCESS and self.error_code is not None:
             raise ValueError("successful result cannot contain error_code")
         if self.status != ToolStatus.SUCCESS and self.error_code is None:

@@ -12,14 +12,13 @@ from typing import Callable, Literal
 from surgical_contracts import (
     CoordinateFrame, DistanceUnit, GatewayCommandKind, LinkState,
     MoveRelativeRequest, Pose6D, RobotCommandEnvelope, RobotTelemetry,
-    RuntimeMode, SourceFreshness,
+    RuntimeMode, SourceFreshness, command_fingerprint,
 )
 
 
 def fingerprint(envelope: RobotCommandEnvelope) -> str:
-    canonical = json.dumps(envelope.model_dump(mode="json"), sort_keys=True,
-                           separators=(",", ":"), allow_nan=False)
-    return hashlib.sha256(canonical.encode()).hexdigest()
+    """Compatibility name for the canonical shared contract helper."""
+    return command_fingerprint(envelope)
 
 
 @dataclass(frozen=True)
@@ -107,7 +106,7 @@ class MotionLease:
 
 
 class LocalArm:
-    """May only be constructed from a displayed proposal by a Mac-local caller."""
+    """Mac-local one-shot binding for one exact displayed/confirmed proposal."""
 
     def __init__(
         self, *, test_id: str, command_fingerprint: str, session_id: str,
@@ -201,6 +200,7 @@ def preflight_relative(
     readback: ControllerReadback, approval: MotionApproval,
     arm: LocalArm, leases: tuple[MotionLease, ...],
     path_ik: Callable[[tuple[float, float, float]], tuple[float, ...] | None],
+    required_lease_owner: Literal["local", "remote"] = "local",
     *, now_ms: int | None = None, now_monotonic_ns: int | None = None,
 ) -> Pose6D:
     """Return an absolute target without I/O; consume ARM only after every check."""
@@ -258,8 +258,8 @@ def preflight_relative(
         raise ValueError("command requests unapproved limits")
     if envelope.payload.speed_mm_s > approval.max_speed_mm_s:
         raise ValueError("command speed exceeds approval")
-    if len(leases) != 1 or not leases[0].active or leases[0].owner != "local" or leases[0].session_id != envelope.gateway_session_id or leases[0].expires_monotonic_ns <= now_monotonic_ns:
-        raise ValueError("exclusive local commissioning lease missing")
+    if len(leases) != 1 or not leases[0].active or leases[0].owner != required_lease_owner or leases[0].session_id != envelope.gateway_session_id or leases[0].expires_monotonic_ns <= now_monotonic_ns:
+        raise ValueError(f"exclusive {required_lease_owner} motion lease missing")
     if snapshot.gateway_session_id != envelope.gateway_session_id or snapshot.sequence < envelope.based_on_robot_state_sequence:
         raise ValueError("source session or sequence changed")
     pose = snapshot.actual_pose_robot_base

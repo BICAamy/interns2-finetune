@@ -1,4 +1,4 @@
-"""Authenticated, observe-only wire messages for the Step 5 edge session."""
+"""Authenticated telemetry and confirmed-command wire messages."""
 
 from __future__ import annotations
 
@@ -13,26 +13,26 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from .base import ContractModel
-from .gateway import GatewayControlMode, GatewayHandshake
+from .gateway import (
+    GatewayControlMode,
+    GatewayHandshake,
+    RobotCommandEnvelope,
+    RobotCommandResult,
+    command_fingerprint,
+)
 from .robot import LinkState, RobotTelemetry, RuntimeMode
 
-PROTOCOL_VERSION = "huayan-v6-observe-v1"
+PROTOCOL_VERSION = "huayan-v6-gateway-v2"
 MAX_WIRE_BYTES = 64 * 1024
 
 
 class GatewayHello(ContractModel):
     type: Literal["hello"] = "hello"
     gateway_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
-    protocol_version: Literal["huayan-v6-observe-v1"] = PROTOCOL_VERSION
+    protocol_version: Literal["huayan-v6-gateway-v2"] = PROTOCOL_VERSION
     challenge: str = Field(pattern=r"^[0-9a-f]{32}$")
     handshake: GatewayHandshake
     auth_tag: str = Field(pattern=r"^[0-9a-f]{64}$")
-
-    @model_validator(mode="after")
-    def observe_only(self) -> "GatewayHello":
-        if self.handshake.control_mode != GatewayControlMode.OBSERVE_ONLY:
-            raise ValueError("Step 5 gateway must be observe-only")
-        return self
 
 
 class GatewayStateFrame(ContractModel):
@@ -45,8 +45,10 @@ class GatewayStateFrame(ContractModel):
     def state_matches_session(self) -> "GatewayStateFrame":
         if self.state.gateway_session_id != self.gateway_session_id:
             raise ValueError("state belongs to another gateway session")
-        if self.state.runtime_mode != RuntimeMode.REAL or self.state.control_mode != "observe-only":
-            raise ValueError("Step 5 state must be real and observe-only")
+        if self.state.runtime_mode != RuntimeMode.REAL or self.state.control_mode not in {
+            "observe-only", "enabled",
+        }:
+            raise ValueError("gateway state must be real with an explicit control mode")
         return self
 
 
@@ -56,6 +58,36 @@ class GatewayHeartbeat(ContractModel):
     message_sequence: int = Field(ge=1)
     datasheet: LinkState
     command_socket: LinkState
+
+
+class GatewayCommandFrame(ContractModel):
+    """A web-confirmed command delivered over the authenticated Mac session."""
+
+    type: Literal["command"] = "command"
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    envelope: RobotCommandEnvelope
+
+    @model_validator(mode="after")
+    def validate_fingerprint(self) -> "GatewayCommandFrame":
+        if self.fingerprint != command_fingerprint(self.envelope):
+            raise ValueError("gateway command fingerprint does not match envelope")
+        return self
+
+
+class GatewayCommandResultFrame(ContractModel):
+    """Final Mac result for one exact, previously delivered command."""
+
+    type: Literal["command_result"] = "command_result"
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    result: RobotCommandResult
+
+
+class GatewayCommandAcceptedFrame(ContractModel):
+    """Mac consumed the single-use dispatch and started local preflight."""
+
+    type: Literal["command_accepted"] = "command_accepted"
+    command_id: str = Field(min_length=1, max_length=128)
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 def hello_auth_tag(

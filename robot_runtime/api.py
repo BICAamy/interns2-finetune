@@ -13,12 +13,15 @@ from fastapi import APIRouter, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from surgical_contracts import (
     ErrorCode,
     ErrorResponse,
     GatewayHeartbeat,
+    GatewayCommandFrame,
+    GatewayCommandAcceptedFrame,
+    GatewayCommandResultFrame,
     GatewayHello,
     GatewayStateFrame,
     MoveRelativeRequest,
@@ -45,6 +48,10 @@ from .gateway_session import GatewaySessionError
 
 if TYPE_CHECKING:
     from simulation.server.simulation_worker import SimulationWorker
+
+
+class ProposalConfirmationRequest(BaseModel):
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 def create_provider(
@@ -195,6 +202,9 @@ def create_app(
                 return
             connection_key = secrets.token_hex(16)
             challenge = manager.new_challenge()
+            opened_session_id: str | None = None
+            pending_ack_sequence: int | None = None
+            pending_command: GatewayCommandFrame | None = None
             try:
                 await websocket.send_json({
                     "type": "challenge",
@@ -204,10 +214,11 @@ def create_app(
                 raw = await asyncio.wait_for(websocket.receive_text(), timeout=3)
                 hello = GatewayHello.model_validate(parse_wire_json(raw))
                 manager.open(hello, challenge=challenge, connection_key=connection_key)
+                opened_session_id = hello.handshake.gateway_session_id
                 await websocket.send_json({
                     "type": "accepted",
                     "gateway_session_id": hello.handshake.gateway_session_id,
-                    "control_mode": "observe-only",
+                    "control_mode": manager.control_mode.value,
                 })
                 while True:
                     raw = await asyncio.wait_for(
@@ -215,6 +226,34 @@ def create_app(
                         timeout=manager.gateway_timeout_ms / 1000,
                     )
                     message = parse_wire_json(raw)
+                    if message.get("type") == "command_result":
+                        frame = GatewayCommandResultFrame.model_validate(message)
+                        ingest = getattr(runtime_provider, "ingest_gateway_result", None)
+                        if ingest is None:
+                            raise GatewaySessionError("provider cannot accept command results")
+                        ingest(frame.fingerprint, frame.result)
+                        await websocket.send_json({
+                            "type": "command_result_ack",
+                            "command_id": frame.result.command_id,
+                        })
+                        continue
+                    if message.get("type") == "command_accepted":
+                        accepted = GatewayCommandAcceptedFrame.model_validate(message)
+                        if (
+                            pending_ack_sequence is None
+                            or pending_command is None
+                            or accepted.command_id != pending_command.envelope.command_id
+                            or accepted.fingerprint != pending_command.fingerprint
+                        ):
+                            raise GatewaySessionError("unsolicited command acceptance")
+                        await websocket.send_json({
+                            "type": "ack",
+                            "message_sequence": pending_ack_sequence,
+                            "command_id": accepted.command_id,
+                        })
+                        pending_ack_sequence = None
+                        pending_command = None
+                        continue
                     if message.get("type") == "state":
                         manager.ingest_state(
                             GatewayStateFrame.model_validate(message),
@@ -227,19 +266,35 @@ def create_app(
                         )
                     else:
                         raise GatewaySessionError("unsupported gateway message type")
-                    await websocket.send_json({
-                        "type": "ack",
-                        "message_sequence": message["message_sequence"],
-                    })
+                    take = getattr(runtime_provider, "take_gateway_command", None)
+                    command = take(hello.handshake.gateway_session_id) if take is not None else None
+                    if command is None:
+                        await websocket.send_json({
+                            "type": "ack",
+                            "message_sequence": message["message_sequence"],
+                        })
+                    else:
+                        pending_ack_sequence = int(message["message_sequence"])
+                        pending_command = command
+                        await websocket.send_json(command.model_dump(mode="json"))
             except WebSocketDisconnect:
                 pass
-            except (GatewaySessionError, ValidationError, ValueError, asyncio.TimeoutError):
+            except (
+                GatewaySessionError,
+                RobotRuntimeServiceError,
+                ValidationError,
+                ValueError,
+                asyncio.TimeoutError,
+            ):
                 try:
                     await websocket.close(code=1008, reason="gateway session rejected")
                 except RuntimeError:
                     pass
             finally:
                 manager.disconnect(connection_key=connection_key)
+                disconnected = getattr(runtime_provider, "gateway_disconnected", None)
+                if disconnected is not None and opened_session_id is not None:
+                    disconnected(opened_session_id)
 
     @router.get("/v1/camera", response_model=SimulationCameraState)
     def camera_state() -> SimulationCameraState:
@@ -270,6 +325,23 @@ def create_app(
     )
     def move_relative(request: MoveRelativeRequest) -> RobotCommandRecord:
         return runtime_provider.submit(RobotCommandKind.MOVE_RELATIVE, request)[0]
+
+    @router.post(
+        "/v1/commands/{command_id}/confirm",
+        response_model=RobotCommandRecord,
+    )
+    def confirm_motion_proposal(
+        command_id: str, request: ProposalConfirmationRequest,
+    ) -> RobotCommandRecord:
+        confirm = getattr(runtime_provider, "confirm_command", None)
+        if confirm is None:
+            raise RobotRuntimeServiceError(
+                ErrorCode.OPERATION_NOT_ENABLED,
+                "provider does not support motion proposal confirmation",
+                status_code=403,
+                command_id=command_id,
+            )
+        return confirm(command_id, request.fingerprint)
 
     @router.post("/v1/commands/stop", response_model=RobotCommandRecord, status_code=202)
     def stop(request: RobotActionRequest) -> RobotCommandRecord:

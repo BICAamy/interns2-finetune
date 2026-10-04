@@ -13,6 +13,7 @@ from surgical_contracts import (
     CommandExecutionStatus,
     ErrorCode,
     ErrorResponse,
+    MotionState,
     MoveRelativeRequest,
     MoveRelativeResult,
     MoveToEntryRequest,
@@ -25,6 +26,8 @@ from surgical_contracts import (
     RobotHealth,
     RobotState,
     RobotTelemetry,
+    Point3D,
+    CoordinateSource,
     SimulationHealth,
     SimulationTelemetry,
     ToolStatus,
@@ -140,10 +143,50 @@ class RobotRuntimeHTTPController:
     def get_state(self) -> RobotState:
         telemetry = self.get_telemetry()
         if isinstance(telemetry, RobotTelemetry):
-            raise RobotSimulationUnavailableError(
-                "real robot state cannot be adapted to RobotState before the real provider is connected"
+            pose = telemetry.actual_pose_robot_base
+            if pose is None:
+                raise RobotSimulationUnavailableError("real robot actual Base pose is unavailable")
+            return RobotState(
+                mode=telemetry.runtime_mode,
+                tcp=telemetry.validated_tcp_name or "TCP",
+                tcp_position=Point3D(
+                    x=pose.translation_mm[0],
+                    y=pose.translation_mm[1],
+                    z=pose.translation_mm[2],
+                    frame=pose.frame,
+                    unit=pose.unit,
+                    source=CoordinateSource.STRUCTURED_DATA,
+                ),
+                orientation_xyzw=pose.quaternion_xyzw,
+                motion_state=telemetry.motion_state or MotionState.IDLE,
+                estop=telemetry.physical_estop_active is True,
+                active_command_id=telemetry.active_command_id,
             )
         return telemetry.state
+
+    def create_move_relative_proposal(
+        self, request: MoveRelativeRequest,
+    ) -> RobotCommandRecord:
+        record = self._model_request(
+            "POST",
+            "/v1/commands/move-relative",
+            RobotCommandRecord,
+            json=request.model_dump(mode="json"),
+        )
+        self._validate_record(record, request.command_id, RobotCommandKind.MOVE_RELATIVE)
+        return record
+
+    def confirm_motion_proposal(
+        self, command_id: str, fingerprint: str,
+    ) -> RobotCommandRecord:
+        record = self._model_request(
+            "POST",
+            f"/v1/commands/{command_id}/confirm",
+            RobotCommandRecord,
+            json={"fingerprint": fingerprint},
+        )
+        self._validate_record(record, command_id, RobotCommandKind.MOVE_RELATIVE)
+        return record
 
     def move_to_entry(self, request: MoveToEntryRequest) -> MoveToEntryResult:
         record = self._submit_and_wait(

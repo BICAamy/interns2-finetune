@@ -1,8 +1,4 @@
-"""Local WayPoint lifecycle, exercised on fake before Mac commissioning.
-
-The observe-only gateway and robot-runtime do not import this module. The
-real writer itself requires a Mac-local interactive terminal.
-"""
+"""WayPoint lifecycle shared by local commissioning and remote fake E2E."""
 
 from __future__ import annotations
 
@@ -108,6 +104,7 @@ class LocalMotionTrial:
         readback: ControllerReadback, arm: LocalArm,
         leases: tuple[MotionLease, ...], *, now_ms: int | None = None,
         now_monotonic_ns: int | None = None,
+        required_lease_owner: str = "local",
         final_guard: Callable[[], None] | None = None,
     ) -> str:
         if self.command_id is not None or self.journal.unresolved():
@@ -117,7 +114,8 @@ class LocalMotionTrial:
         try:
             target = preflight_relative(
                 envelope, snapshot, readback, self.approval, arm, leases,
-                self.path_ik, now_ms=now_ms, now_monotonic_ns=now_monotonic_ns,
+                self.path_ik, required_lease_owner=required_lease_owner,
+                now_ms=now_ms, now_monotonic_ns=now_monotonic_ns,
             )
         except Exception:
             arm.revoke()

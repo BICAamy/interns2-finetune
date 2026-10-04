@@ -32,6 +32,7 @@ export interface SessionSnapshot {
   active_command_id: string | null;
   raw_model_output: Record<string, unknown> | null;
   normalized_command: Record<string, any> | null;
+  motion_proposal: Record<string, any> | null;
   current_tcp: Record<string, any> | null;
   execution_events: Array<Record<string, any>>;
   orchestration: Record<string, any> | null;

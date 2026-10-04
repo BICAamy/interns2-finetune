@@ -13,6 +13,7 @@ from surgical_contracts import (
     RobotHealth,
     RobotProvider as RobotProviderKind,
     RobotTelemetry,
+    RobotCommandResult,
     RuntimeMode,
     SimulationCameraControlRequest,
     SimulationCameraState,
@@ -24,6 +25,7 @@ from ..command_store import RejectedCommandStore
 from ..gateway_session import GatewaySessionManager
 from ..mirror_worker import RealMirrorWorker
 from ..provider import ProviderCapabilities, RobotRuntimeServiceError
+from ..remote_motion import RemoteMotionPolicy, RemoteMotionStore
 
 
 class HuayanRealStubProvider:
@@ -36,10 +38,24 @@ class HuayanRealStubProvider:
         self,
         gateway_sessions: GatewaySessionManager | None = None,
         mirror_worker: RealMirrorWorker | None = None,
+        remote_motion_policy: RemoteMotionPolicy | None = None,
     ) -> None:
         self._commands = RejectedCommandStore()
         self.gateway_sessions = gateway_sessions
         self.mirror_worker = mirror_worker
+        if remote_motion_policy is not None and gateway_sessions is None:
+            raise ValueError("remote motion requires authenticated gateway sessions")
+        if (
+            remote_motion_policy is not None
+            and gateway_sessions is not None
+            and gateway_sessions.control_mode.value != "enabled"
+        ):
+            raise ValueError("remote motion requires an enabled gateway session")
+        self.remote_motion = (
+            RemoteMotionStore(remote_motion_policy, telemetry=gateway_sessions.telemetry)
+            if remote_motion_policy is not None and gateway_sessions is not None
+            else None
+        )
         self.capabilities = ProviderCapabilities(
             camera=mirror_worker is not None,
             mjpeg=mirror_worker is not None,
@@ -117,6 +133,11 @@ class HuayanRealStubProvider:
     def submit(
         self, kind: RobotCommandKind, request: Any
     ) -> tuple[RobotCommandRecord, bool]:
+        if (
+            self.remote_motion is not None
+            and kind == RobotCommandKind.MOVE_RELATIVE
+        ):
+            return self.remote_motion.propose(request)
         record, _created = self._commands.reject(
             kind, request, message="Real robot control is not enabled in Step 5"
         )
@@ -128,7 +149,32 @@ class HuayanRealStubProvider:
         )
 
     def get_command(self, command_id: str) -> RobotCommandRecord:
+        if self.remote_motion is not None:
+            try:
+                return self.remote_motion.get(command_id)
+            except RobotRuntimeServiceError as error:
+                if error.error_code != ErrorCode.COMMAND_NOT_FOUND:
+                    raise
         return self._commands.get(command_id)
+
+    def confirm_command(self, command_id: str, fingerprint: str) -> RobotCommandRecord:
+        if self.remote_motion is None:
+            raise self._unavailable()
+        return self.remote_motion.confirm(command_id, fingerprint)
+
+    def take_gateway_command(self, session_id: str):
+        if self.remote_motion is None:
+            return None
+        return self.remote_motion.take_for_gateway(session_id)
+
+    def ingest_gateway_result(self, fingerprint: str, result: RobotCommandResult) -> None:
+        if self.remote_motion is None:
+            raise self._unavailable()
+        self.remote_motion.finish(fingerprint, result)
+
+    def gateway_disconnected(self, session_id: str) -> None:
+        if self.remote_motion is not None:
+            self.remote_motion.gateway_disconnected(session_id)
 
     def register_client(self) -> None:
         if self.mirror_worker is None:

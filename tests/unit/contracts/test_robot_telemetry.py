@@ -114,7 +114,7 @@ class RobotTelemetryTests(unittest.TestCase):
             status="healthy",
         )
         self.assertFalse(health.ready_for_motion)
-        with self.assertRaisesRegex(ValidationError, "preflight"):
+        with self.assertRaisesRegex(ValidationError, "enabled control mode"):
             RobotHealth(
                 runtime_mode=RuntimeMode.REAL,
                 provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
@@ -127,15 +127,16 @@ class RobotTelemetryTests(unittest.TestCase):
             command_socket=LinkState.CONNECTED,
             controller_box=LinkState.CONNECTED,
         )
-        with self.assertRaisesRegex(ValidationError, "preflight"):
-            RobotHealth(
-                runtime_mode=RuntimeMode.REAL,
-                provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
-                status="healthy",
-                freshness=SourceFreshness.FRESH,
-                connections=connected,
-                ready_for_motion=True,
-            )
+        enabled = RobotHealth(
+            runtime_mode=RuntimeMode.REAL,
+            provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
+            control_mode="enabled",
+            status="healthy",
+            freshness=SourceFreshness.FRESH,
+            connections=connected,
+            ready_for_motion=True,
+        )
+        self.assertTrue(enabled.ready_for_motion)
 
 
 if __name__ == "__main__":

@@ -171,8 +171,8 @@ class AgentSettings:
 
     def validate(self) -> None:
         if self.runtime_mode == RuntimeMode.REAL:
-            if self.robot_control_mode != "observe-only":
-                raise ValueError("Step 3 real mode must remain observe-only")
+            if self.robot_control_mode not in {"observe-only", "enabled"}:
+                raise ValueError("real mode requires observe-only or enabled control mode")
             if not self.real_config_path:
                 raise ValueError("real mode requires config path")
         elif self.real_config_path:

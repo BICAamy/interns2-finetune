@@ -61,6 +61,10 @@ class TextCommandRequest(WebModel):
     image_name: str | None = Field(default=None, max_length=255)
 
 
+class ConfirmationRequest(WebModel):
+    fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
 class InputSource(str, Enum):
     TEXT = "text"
     VOICE = "voice"
@@ -83,6 +87,7 @@ class SessionSnapshot(WebModel):
     active_command_id: str | None = None
     raw_model_output: dict[str, Any] | None = None
     normalized_command: dict[str, Any] | None = None
+    motion_proposal: dict[str, Any] | None = None
     current_tcp: dict[str, Any] | None = None
     execution_events: list[dict[str, Any]] = Field(default_factory=list)
     orchestration: dict[str, Any] | None = None

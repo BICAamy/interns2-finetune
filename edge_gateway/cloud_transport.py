@@ -2,14 +2,19 @@
 from __future__ import annotations
 
 import ipaddress
-import json
 import secrets
+import threading
+from typing import Callable
 from urllib.parse import urlparse
 
 from surgical_contracts import (
     CoordinateFrame,
     DistanceUnit,
+    ErrorCode,
     GatewayControlMode,
+    GatewayCommandFrame,
+    GatewayCommandAcceptedFrame,
+    GatewayCommandResultFrame,
     GatewayHandshake,
     GatewayHeartbeat,
     GatewayHello,
@@ -19,11 +24,13 @@ from surgical_contracts import (
     Pose6D,
     PROTOCOL_VERSION,
     RobotCommandEnvelope,
+    RobotCommandResult,
     RobotConnectionState,
     RobotProvider,
     RobotTelemetry,
     RuntimeMode,
     SourceFreshness,
+    ToolStatus,
     VendorFault,
     hello_auth_tag,
     parse_wire_json,
@@ -59,6 +66,7 @@ def telemetry_from_sample(
     controller_is_simulation: bool,
     command_connected: bool,
     watchdog: StateWatchdog,
+    control_mode: GatewayControlMode | str = GatewayControlMode.OBSERVE_ONLY,
     robot_status: RobotStateRead | None = None,
     emergency_status: EmergencyInfoRead | None = None,
 ) -> RobotTelemetry:
@@ -80,7 +88,7 @@ def telemetry_from_sample(
     return RobotTelemetry(
         runtime_mode=RuntimeMode.REAL,
         provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
-        control_mode="observe-only",
+        control_mode=GatewayControlMode(control_mode).value,
         sequence=record.sequence,
         freshness=SourceFreshness.FRESH,
         connections=RobotConnectionState(
@@ -159,16 +167,34 @@ def telemetry_from_sample(
 
 
 class CloudTransport:
-    def __init__(self, url: str, *, secret: bytes, gateway_id: str) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        secret: bytes,
+        gateway_id: str,
+        control_mode: GatewayControlMode | str = GatewayControlMode.OBSERVE_ONLY,
+        command_handler: Callable[[RobotCommandEnvelope, str], RobotCommandResult] | None = None,
+    ) -> None:
         self.url = validate_cloud_url(url)
         if len(secret) < 32:
             raise ValueError("gateway secret is too short")
         self.secret = secret
         self.gateway_id = gateway_id
+        self.control_mode = GatewayControlMode(control_mode)
+        self.command_handler = command_handler
+        if self.control_mode == GatewayControlMode.ENABLED and command_handler is None:
+            raise ValueError("enabled cloud transport requires a local command handler")
+        if self.control_mode == GatewayControlMode.OBSERVE_ONLY and command_handler is not None:
+            raise ValueError("observe-only transport cannot install a command handler")
         self.session_id: str | None = None
         self._connection = None
         self._message_sequence = 0
         self._rejections = RejectOnlyLedger()
+        self._command_lock = threading.Lock()
+        self._command_thread: threading.Thread | None = None
+        self._command_result: GatewayCommandResultFrame | None = None
+        self._active_command_id: str | None = None
 
     def connect(self, *, device_sn: str, robot_model: str, package_version: str) -> str:
         from websockets.sync.client import connect
@@ -189,7 +215,7 @@ class CloudTransport:
                 device_sn=device_sn,
                 robot_model=robot_model,
                 package_version=package_version,
-                control_mode=GatewayControlMode.OBSERVE_ONLY,
+                control_mode=self.control_mode,
             )
             hello = GatewayHello(
                 gateway_id=self.gateway_id,
@@ -205,7 +231,7 @@ class CloudTransport:
             if (
                 accepted.get("type") != "accepted"
                 or accepted.get("gateway_session_id") != session_id
-                or accepted.get("control_mode") != "observe-only"
+                or accepted.get("control_mode") != self.control_mode.value
             ):
                 raise ValueError("gateway session was not accepted")
         except Exception:
@@ -222,20 +248,84 @@ class CloudTransport:
         self._connection = None
         self.session_id = None
         self._message_sequence = 0
+        with self._command_lock:
+            self._command_result = None
+            self._active_command_id = None
+
+    def _run_command(
+        self, frame: GatewayCommandFrame, *, session_id: str,
+    ) -> None:
+        assert self.command_handler is not None
+        try:
+            result = self.command_handler(frame.envelope, frame.fingerprint)
+        except Exception:
+            result = RobotCommandResult(
+                gateway_session_id=frame.envelope.gateway_session_id,
+                command_id=frame.envelope.command_id,
+                command_kind=frame.envelope.command_kind,
+                status=ToolStatus.FAILED,
+                error_code=ErrorCode.INTERNAL_ERROR,
+            )
+        with self._command_lock:
+            if self.session_id == session_id and self._active_command_id == frame.envelope.command_id:
+                self._command_result = GatewayCommandResultFrame(
+                    fingerprint=frame.fingerprint,
+                    result=result,
+                )
+
+    def _flush_command_result(self) -> None:
+        if self._connection is None:
+            raise RuntimeError("cloud is disconnected")
+        with self._command_lock:
+            frame = self._command_result
+        if frame is None:
+            return
+        self._connection.send(frame.model_dump_json())
+        response = parse_wire_json(self._connection.recv(timeout=3))
+        if (
+            response.get("type") != "command_result_ack"
+            or response.get("command_id") != frame.result.command_id
+        ):
+            raise ValueError("gateway command result acknowledgement is missing")
+        with self._command_lock:
+            if self._command_result == frame:
+                self._command_result = None
+                self._active_command_id = None
 
     def _send_and_confirm(self, payload: GatewayStateFrame | GatewayHeartbeat) -> None:
         if self._connection is None:
             raise RuntimeError("cloud is disconnected")
+        self._flush_command_result()
         self._connection.send(payload.model_dump_json())
         while True:
             response = parse_wire_json(self._connection.recv(timeout=3))
             if response.get("type") == "command":
-                envelope = RobotCommandEnvelope.model_validate(response.get("envelope"))
-                rejection = self._rejections.reject(envelope, active_session_id=self.session_id)
-                self._connection.send(json.dumps({
-                    "type": "command_rejected",
-                    "result": rejection.model_dump(mode="json"),
-                }, separators=(",", ":")))
+                frame = GatewayCommandFrame.model_validate(response)
+                if self.command_handler is None:
+                    rejection = self._rejections.reject(
+                        frame.envelope, active_session_id=self.session_id,
+                    )
+                    raise PermissionError(
+                        f"observe-only gateway rejected {rejection.command_id}"
+                    )
+                with self._command_lock:
+                    if self._active_command_id is not None:
+                        raise RuntimeError("gateway already has an active remote command")
+                    self._active_command_id = frame.envelope.command_id
+                session_id = self.session_id
+                if session_id is None:
+                    raise RuntimeError("command arrived without an active gateway session")
+                self._command_thread = threading.Thread(
+                    target=self._run_command,
+                    args=(frame,),
+                    kwargs={"session_id": session_id},
+                    daemon=True,
+                )
+                self._command_thread.start()
+                self._connection.send(GatewayCommandAcceptedFrame(
+                    command_id=frame.envelope.command_id,
+                    fingerprint=frame.fingerprint,
+                ).model_dump_json())
                 continue
             if response.get("type") != "ack" or response.get("message_sequence") != payload.message_sequence:
                 raise ValueError("gateway acknowledgement is missing or mismatched")

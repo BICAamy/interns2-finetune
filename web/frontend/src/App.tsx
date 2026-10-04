@@ -157,6 +157,7 @@ function TrajectoryPlot({ telemetry }: { telemetry: SimulationTelemetry | null }
 export default function App() {
   const [session, setSession] = useState<SessionSnapshot | null>(null);
   const [runtimeMode, setRuntimeMode] = useState<"simulation" | "real" | null>(null);
+  const [controlMode, setControlMode] = useState<string | null>(null);
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [image, setImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -193,7 +194,10 @@ export default function App() {
     let cancelled = false;
     api.health()
       .then((health) => {
-        if (!cancelled) setRuntimeMode(health.runtime_mode);
+        if (!cancelled) {
+          setRuntimeMode(health.runtime_mode);
+          setControlMode(health.control_mode);
+        }
       })
       .catch((error) => {
         if (!cancelled) setRequestError(`无法确认机器人运行模式：${String(error)}`);
@@ -312,6 +316,10 @@ export default function App() {
   }, [videoFailed, runtimeMode]);
 
   const command = session?.normalized_command;
+  const proposal = session?.motion_proposal as {
+    fingerprint?: string;
+    envelope?: { expected_start_pose_robot_base?: { translation_mm?: number[] }; payload?: { translation_mm?: number[]; speed_mm_s?: number } };
+  } | null | undefined;
   const isBusy = session ? busyStatuses.has(session.status) : true;
   const canSubmit = Boolean(
     session &&
@@ -584,7 +592,7 @@ export default function App() {
           <div className="brand-mark">IS</div>
           <div>
             <h1>InternS2 手术导航控制台</h1>
-            <p>{runtimeMode === "real" ? "真实机械臂 · 仅观察 · 实际反馈数字孪生" : runtimeMode === "simulation" ? "E05-Pro 仿真定位 · 人工确认模式" : "正在确认机器人运行模式"}</p>
+            <p>{runtimeMode === "real" ? `真实机械臂 · ${controlMode === "enabled" ? "网页确认控制" : "仅观察"} · 实际反馈数字孪生` : runtimeMode === "simulation" ? "E05-Pro 仿真定位 · 人工确认模式" : "正在确认机器人运行模式"}</p>
           </div>
         </div>
         <div className="topbar-actions">
@@ -620,7 +628,7 @@ export default function App() {
             {session?.message && <p className="operation-message">{session.message}</p>}
           </div>
           <div className="session-meta">
-            <span>{runtimeMode === "real" ? "真实 / 仅观察" : runtimeMode === "simulation" ? "仿真模式" : "模式未确认"}</span>
+            <span>{runtimeMode === "real" ? `真实 / ${controlMode === "enabled" ? "已启用提案" : "仅观察"}` : runtimeMode === "simulation" ? "仿真模式" : "模式未确认"}</span>
             <code>{session?.session_id.slice(-10) ?? "—"}</code>
           </div>
         </section>
@@ -729,10 +737,10 @@ export default function App() {
               </button>
               <button
                 className="button confirm"
-                disabled={!session?.pending_confirmation || runtimeMode !== "simulation"}
-                onClick={() => session && run(() => api.action(session.session_id, "confirm"))}
+                disabled={!session?.pending_confirmation || (runtimeMode === "real" && (controlMode !== "enabled" || realStale))}
+                onClick={() => session && run(() => api.confirm(session.session_id, proposal?.fingerprint))}
               >
-                {runtimeMode === "real" ? "真实模式禁止执行" : "确认并执行"}
+                {runtimeMode === "real" ? (controlMode === "enabled" ? "确认此 fingerprint 并执行" : "真实模式仅观察") : "确认并执行"}
               </button>
               <button
                 className="button secondary"
@@ -751,7 +759,10 @@ export default function App() {
             </div>
             <div className="safety-note">
               <strong>执行边界</strong>
-              <span>{runtimeMode === "real" ? "真实模式当前仅供观察；网页不能执行、停止、急停或复位。现场安全仍以物理急停和厂家页面为准。" : "确认只会移动机械臂并请求不可执行的路径预览，当前版本不会执行穿刺。"}</span>
+              <span>{runtimeMode === "real" ? (controlMode === "enabled" ? "只允许已生成 proposal 的单轴 move_relative；本次网页确认同时触发 Mac 本地 single-use ARM，不执行穿刺。" : "真实模式当前仅供观察；网页不能执行、停止、急停或复位。现场安全仍以物理急停和厂家页面为准。") : "确认只会移动机械臂并请求不可执行的路径预览，当前版本不会执行穿刺。"}</span>
+              {runtimeMode === "real" && proposal?.fingerprint && (
+                <code>fingerprint {proposal.fingerprint}</code>
+              )}
             </div>
           </section>
 
@@ -817,7 +828,7 @@ export default function App() {
                 )}
                 {runtimeMode !== null && <div className="video-overlay top-left">
                   <span className={videoConnected ? "record-dot live" : "record-dot"} />
-                  {videoConnected ? (runtimeMode === "real" ? "REAL / OBSERVE ONLY" : "REMOTE SIMULATION") : "RECONNECTING"}
+                  {videoConnected ? (runtimeMode === "real" ? (controlMode === "enabled" ? "REAL / WEB CONFIRM" : "REAL / OBSERVE ONLY") : "REMOTE SIMULATION") : "RECONNECTING"}
                 </div>}
                 {runtimeMode !== null && <div className="video-overlay bottom-right">
                   frame {telemetry?.frame_sequence ?? 0}
@@ -944,8 +955,8 @@ export default function App() {
       </main>
 
       <footer>
-        <span>InternS2 Surgical Navigation · {runtimeMode === "real" ? "REAL / OBSERVE ONLY" : "SIMULATION"}</span>
-        <strong>{runtimeMode === "real" ? "真机命令发送已禁用" : "当前版本未执行穿刺"}</strong>
+        <span>InternS2 Surgical Navigation · {runtimeMode === "real" ? (controlMode === "enabled" ? "REAL / WEB CONFIRM" : "REAL / OBSERVE ONLY") : "SIMULATION"}</span>
+        <strong>{runtimeMode === "real" ? (controlMode === "enabled" ? "单次网页确认 · Mac 本地一次性授权" : "真机命令发送已禁用") : "当前版本未执行穿刺"}</strong>
       </footer>
     </div>
   );

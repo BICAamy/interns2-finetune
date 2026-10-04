@@ -194,7 +194,8 @@ class RobotHealth(ContractModel):
             raise ValueError("runtime_mode and provider disagree")
         if self.ready_for_motion:
             if self.runtime_mode == RuntimeMode.REAL:
-                raise ValueError("real motion readiness is unavailable before preflight exists")
+                if self.control_mode != "enabled":
+                    raise ValueError("real motion readiness requires enabled control mode")
             if self.status != "healthy" or self.freshness != SourceFreshness.FRESH:
                 raise ValueError("ready_for_motion requires fresh healthy state")
         return self

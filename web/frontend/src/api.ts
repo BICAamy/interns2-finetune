@@ -60,6 +60,11 @@ export const api = {
     request<SessionSnapshot>(`/api/sessions/${sessionId}/${action}`, {
       method: "POST",
     }),
+  confirm: (sessionId: string, fingerprint?: string) =>
+    request<SessionSnapshot>(`/api/sessions/${sessionId}/confirm`, {
+      method: "POST",
+      body: JSON.stringify(fingerprint ? { fingerprint } : {}),
+    }),
   telemetry: (sessionId: string) =>
     request<SimulationTelemetry>(
       `/api/sessions/${sessionId}/robot/telemetry`,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from .cloud_transport import validate_cloud_url
 from .huayan.command_client import _private_controller_host
@@ -20,6 +21,7 @@ class EdgeConfig:
     datasheet_byte_order: str
     audit_path: Path
     stale_ms: int = 250
+    cloud_control: Literal["observe-only", "enabled"] = "observe-only"
 
     def __post_init__(self) -> None:
         for name in ("fake_command_port", "fake_datasheet_port"):
