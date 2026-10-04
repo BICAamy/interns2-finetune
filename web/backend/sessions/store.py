@@ -8,7 +8,7 @@ import time
 from typing import Any, Callable
 from uuid import uuid4
 
-from surgical_contracts import ParsedCommand, ToolEvent, ToolName
+from surgical_contracts import ParsedCommand, RuntimeMode, ToolEvent, ToolName
 
 from ..asr import TranscriptionResult
 from ..models import InputSource, STATUS_LABELS, SessionSnapshot, SessionStatus
@@ -31,6 +31,8 @@ class SessionRecord:
     session_id: str
     created_at_ms: int
     updated_at_ms: int
+    robot_mode: RuntimeMode = RuntimeMode.SIMULATION
+    mode_notice: str | None = None
     revision: int = 1
     status: SessionStatus = SessionStatus.READY
     prompt: str | None = None
@@ -56,6 +58,8 @@ class SessionRecord:
         timeline = self.execution_events or self.live_tool_events
         return SessionSnapshot(
             session_id=self.session_id,
+            robot_mode=self.robot_mode.value,
+            mode_notice=self.mode_notice,
             revision=self.revision,
             status=self.status,
             status_label=STATUS_LABELS[self.status],
@@ -89,12 +93,15 @@ class SessionStore:
         with self._lock:
             return len(self._records)
 
-    def create(self) -> SessionSnapshot:
+    def create(
+        self, *, robot_mode: RuntimeMode = RuntimeMode.SIMULATION
+    ) -> SessionSnapshot:
         now = _now_ms()
         record = SessionRecord(
             session_id=f"session-{uuid4().hex}",
             created_at_ms=now,
             updated_at_ms=now,
+            robot_mode=robot_mode,
         )
         with self._lock:
             self._records[record.session_id] = record

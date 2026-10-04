@@ -233,11 +233,13 @@ PY_MODEL
 }
 
 check_ports_free() {
-    "$PLANNER_ENV/bin/python" - <<'PY_PORTS'
+    "$PLANNER_ENV/bin/python" - "$ROBOT_MODE" <<'PY_PORTS'
 import socket
 import sys
 
-ports = (23333, 8002, 8001, 8000)
+ports = [23333, 8002, 8001, 8000]
+if sys.argv[1] == "real":
+    ports.append(8003)
 busy = []
 
 for port in ports:
@@ -327,10 +329,8 @@ done
 test -x "$INFERENCE_ENV/bin/lmdeploy" \
     || fail "lmdeploy is missing from inference environment."
 
-if [[ "$ROBOT_MODE" == simulation || "$ROBOT_REAL_MIRROR" == 1 ]]; then
-    test -x "$SIM_ENV/bin/Xvfb" \
-        || fail "Xvfb is missing from simulation environment."
-fi
+test -x "$SIM_ENV/bin/Xvfb" \
+    || fail "Xvfb is missing from simulation environment."
 
 test -x "$CUDA_TOOLKIT_ROOT/bin/nvcc" \
     || fail "CUDA 12.8 toolkit is missing at $CUDA_TOOLKIT_ROOT."
@@ -340,14 +340,12 @@ CUDA_VERSION_OUTPUT="$("$CUDA_TOOLKIT_ROOT/bin/nvcc" --version)" \
 [[ "$CUDA_VERSION_OUTPUT" == *"release 12.8"* ]] \
     || fail "Expected CUDA 12.8 at $CUDA_TOOLKIT_ROOT."
 
-if [[ "$ROBOT_MODE" == simulation || "$ROBOT_REAL_MIRROR" == 1 ]]; then
-    test -x "$SOFA_ROOT/bin/runSofa" \
-        || fail "SOFA runtime is missing."
-    test -d "$SOFAPYTHON3_ROOT" \
-        || fail "SofaPython3 is missing."
-    test -d "$E05_MODEL_DIR" \
-        || fail "E05 model directory is missing."
-fi
+test -x "$SOFA_ROOT/bin/runSofa" \
+    || fail "SOFA runtime is missing."
+test -d "$SOFAPYTHON3_ROOT" \
+    || fail "SofaPython3 is missing."
+test -d "$E05_MODEL_DIR" \
+    || fail "E05 model directory is missing."
 
 test -f "$APP_ROOT/models/asr/faster-whisper-small/model.bin" \
     || fail "ASR model is missing."
@@ -455,7 +453,6 @@ echo "      log=$LOG_DIR/planner-adapter.log"
 # 3. robot runtime :8001
 # --------------------------------------------------
 
-if [[ "$ROBOT_MODE" == simulation || "$ROBOT_REAL_MIRROR" == 1 ]]; then
 (
     exec "$SIM_ENV/bin/Xvfb" ":$XVFB_DISPLAY" \
         -screen 0 1280x1024x24 \
@@ -472,7 +469,6 @@ if ! kill -0 "$XVFB_PID" 2>/dev/null; then
     echo "ERROR: Xvfb failed to start."
     tail -n 80 "$LOG_DIR/xvfb.log" || true
     exit 1
-fi
 fi
 
 if [[ "$ROBOT_MODE" == simulation ]]; then
@@ -550,6 +546,33 @@ else
     fi
     echo "      runtime PID=$SIM_PID"
     echo "      log=$ROBOT_LOG"
+
+    # Keep an independent simulation environment alive while the real runtime
+    # waits for the Mac gateway. Browser sessions default to this service and
+    # automatically return here if 10003/10004 feedback becomes unavailable.
+    SIMULATION_FALLBACK_LOG="$LOG_DIR/robot-simulation-fallback.log"
+    echo "      Starting simulation fallback on :8003..."
+    (
+        export SOFA_ROOT="$SOFA_ROOT"
+        export SOFAPYTHON3_ROOT="$SOFAPYTHON3_ROOT"
+        export PATH="$SOFA_ROOT/bin:$SIM_ENV/bin:$PATH"
+        export PYTHONPATH="$SOFAPYTHON3_ROOT/lib/python3/site-packages:$APP_ROOT/third_party/sofa_env:$APP_ROOT/packages/surgical_contracts:$APP_ROOT"
+        export LD_LIBRARY_PATH="$SIM_ENV/lib:$SOFA_ROOT/bin:$SOFA_ROOT/lib:$SOFAPYTHON3_ROOT/lib"
+        export E05_MODEL_DIR="$E05_MODEL_DIR"
+        export DISPLAY=":$XVFB_DISPLAY"
+        export LIBGL_ALWAYS_SOFTWARE=1
+        export LIBGL_DRIVERS_PATH="$SIM_ENV/lib/dri"
+        export QT_QPA_PLATFORM=offscreen
+        export OMP_NUM_THREADS=1
+        export ROBOT_SIMULATION_HOST=127.0.0.1
+        export ROBOT_SIMULATION_PORT=8003
+        export ROBOT_SIMULATION_LOG_LEVEL=info
+        exec "$SIM_ENV/bin/python" -m simulation.server.main
+    ) >"$SIMULATION_FALLBACK_LOG" 2>&1 &
+    SIMULATION_FALLBACK_PID=$!
+    PIDS+=("$SIMULATION_FALLBACK_PID")
+    echo "      simulation fallback PID=$SIMULATION_FALLBACK_PID"
+    echo "      log=$SIMULATION_FALLBACK_LOG"
 fi
 
 
@@ -577,6 +600,14 @@ wait_http \
     "http://127.0.0.1:8001/health" \
     120 \
     "$ROBOT_LOG"
+
+if [[ "$ROBOT_MODE" == real ]]; then
+    wait_http \
+        "simulation fallback" \
+        "http://127.0.0.1:8003/health" \
+        120 \
+        "$SIMULATION_FALLBACK_LOG"
+fi
 
 "$PLANNER_ENV/bin/python" - "$ROBOT_MODE" <<'PY_ROBOT_MODE' \
     || fail "Port 8001 provider mode does not match startup mode."
@@ -624,6 +655,11 @@ echo "[4/4] Starting agent-web..."
     export DEFAULT_DISTANCE_UNIT=mm
 
     export ROBOT_SIMULATION_BASE_URL=http://127.0.0.1:8001
+    if [[ "$ROBOT_MODE" == real ]]; then
+        export ROBOT_SIMULATION_FALLBACK_BASE_URL=http://127.0.0.1:8003
+    else
+        unset ROBOT_SIMULATION_FALLBACK_BASE_URL
+    fi
     export PLANNER_ADAPTER_BASE_URL=http://127.0.0.1:8002
     export PUNCTURE_EXECUTION_ENABLED=false
 
@@ -684,6 +720,9 @@ echo "=================================================="
 echo
 echo " InternS2 inference : http://127.0.0.1:23333"
 echo " $ROBOT_SERVICE_LABEL : http://127.0.0.1:8001"
+if [[ "$ROBOT_MODE" == real ]]; then
+    echo " robot-simulation   : http://127.0.0.1:8003 (web default/fallback)"
+fi
 echo " planner-adapter    : http://127.0.0.1:8002"
 echo " agent-web          : http://127.0.0.1:8000"
 echo

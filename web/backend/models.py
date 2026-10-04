@@ -69,6 +69,10 @@ class RobotEnableRequest(WebModel):
     enabled: bool
 
 
+class RobotModeRequest(WebModel):
+    mode: Literal["simulation", "real"]
+
+
 class InputSource(str, Enum):
     TEXT = "text"
     VOICE = "voice"
@@ -78,6 +82,8 @@ class InputSource(str, Enum):
 class SessionSnapshot(WebModel):
     schema_version: Literal["1.0"] = "1.0"
     session_id: str
+    robot_mode: Literal["simulation", "real"] = "simulation"
+    mode_notice: str | None = None
     revision: int = Field(ge=1)
     status: SessionStatus
     status_label: str
@@ -103,6 +109,10 @@ class HealthResponse(WebModel):
     status: Literal["healthy"] = "healthy"
     service: Literal["agent-web"] = "agent-web"
     runtime_mode: str
+    default_robot_mode: Literal["simulation", "real"] = "simulation"
+    available_robot_modes: list[Literal["simulation", "real"]] = Field(
+        default_factory=lambda: ["simulation"]
+    )
     puncture_execution_enabled: Literal[False] = False
     sessions: int = Field(ge=0)
     downstream: dict[str, str]

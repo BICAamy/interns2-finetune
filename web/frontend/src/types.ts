@@ -19,6 +19,8 @@ export type SessionStatus =
 export interface SessionSnapshot {
   schema_version: "1.0";
   session_id: string;
+  robot_mode: "simulation" | "real";
+  mode_notice: string | null;
   revision: number;
   status: SessionStatus;
   status_label: string;

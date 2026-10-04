@@ -22,8 +22,10 @@ from surgical_contracts import (
 from tests.integration.test_agent_web import (
     StubMJPEGStream,
     StubParser,
+    StubSimulationObserver,
     relative_command,
     settings,
+    wait_for_status,
 )
 from web.backend.main import create_app
 from web.backend.runtime import WebRuntime
@@ -129,6 +131,39 @@ def _client():
     return TestClient(create_app(runtime, static_dir="/missing")), observer, robot
 
 
+def _dual_mode_client():
+    real_settings = replace(
+        settings(),
+        runtime_mode=RuntimeMode.REAL,
+        real_config_path="configs/robot-real.local.yaml",
+    )
+    real_observer = RealObserver()
+    real_robot = FakeRobotController()
+    runtime = WebRuntime(
+        real_settings,
+        parser=StubParser(relative_command()),
+        robot=real_robot,
+        planner=FakePuncturePlannerClient(),
+        simulation_observer=real_observer,
+    )
+    simulation_robot = FakeRobotController()
+    simulation_observer = StubSimulationObserver(simulation_robot)
+    runtime._parsers[RuntimeMode.SIMULATION] = StubParser(relative_command())
+    runtime._robots[RuntimeMode.SIMULATION] = simulation_robot
+    runtime._observers[RuntimeMode.SIMULATION] = simulation_observer
+    runtime._orchestrators[RuntimeMode.SIMULATION] = runtime.orchestrator.__class__(
+        simulation_robot,
+        runtime.planner,
+        event_sink=runtime._on_tool_event,
+    )
+    runtime._default_robot_mode = RuntimeMode.SIMULATION
+    return (
+        TestClient(create_app(runtime, static_dir="/missing")),
+        real_observer,
+        simulation_robot,
+    )
+
+
 def test_real_generic_routes_expose_only_actual_state() -> None:
     client, observer, robot = _client()
     with client:
@@ -182,3 +217,78 @@ def test_real_stale_state_is_disconnected_for_ui_and_keeps_last_pose() -> None:
         assert payload["freshness"] == "stale"
         assert payload["joint_positions_deg"][0] == 0.0
         assert payload["error"]["code"] == "ROBOT_STALE"
+
+
+def test_web_defaults_to_simulation_switches_to_live_real_and_falls_back() -> None:
+    client, real_observer, _simulation_robot = _dual_mode_client()
+    with client:
+        health = client.get("/health").json()
+        assert health["default_robot_mode"] == "simulation"
+        assert health["available_robot_modes"] == ["real", "simulation"]
+
+        session = client.post("/api/sessions").json()
+        session_id = session["session_id"]
+        assert session["robot_mode"] == "simulation"
+        assert session["current_tcp"]["z"] == 100.0
+
+        parsed = client.post(
+            f"/api/sessions/{session_id}/commands/text",
+            json={"prompt": "仿真机械臂沿 Z 正方向移动 8 毫米"},
+        ).json()
+        assert parsed["status"] == "awaiting_confirmation"
+        assert parsed["motion_proposal"] is None
+        confirmed = client.post(f"/api/sessions/{session_id}/confirm", json={})
+        assert confirmed.status_code == 202
+        completed = wait_for_status(client, session_id, {"completed", "failed"})
+        assert completed["status"] == "completed"
+
+        selected = client.put(
+            f"/api/sessions/{session_id}/robot/mode",
+            json={"mode": "real"},
+        )
+        assert selected.status_code == 200
+        assert selected.json()["robot_mode"] == "real"
+        assert selected.json()["current_tcp"] == {
+            "x": 542.0,
+            "y": 0.0,
+            "z": 500.0,
+            "unit": "mm",
+            "frame": "robot_base",
+            "source": None,
+        }
+
+        real_observer.state = real_observer.state.model_copy(
+            update={"freshness": SourceFreshness.DISCONNECTED}
+        )
+        telemetry = client.get(
+            f"/api/sessions/{session_id}/robot/telemetry"
+        ).json()
+        assert telemetry["runtime_mode"] == "simulation"
+        fallback = client.get(f"/api/sessions/{session_id}").json()
+        assert fallback["robot_mode"] == "simulation"
+        assert "未连接机械臂，已自动退回仿真模式" in fallback["mode_notice"]
+
+
+def test_selecting_unavailable_real_mode_stays_in_simulation_with_notice() -> None:
+    client, real_observer, _simulation_robot = _dual_mode_client()
+    real_observer.state = real_observer.state.model_copy(
+        update={
+            "connections": RobotConnectionState(
+                gateway=LinkState.DISCONNECTED,
+                datasheet=LinkState.DISCONNECTED,
+                command_socket=LinkState.DISCONNECTED,
+                controller_box=LinkState.DISCONNECTED,
+            ),
+            "freshness": SourceFreshness.DISCONNECTED,
+        }
+    )
+    with client:
+        session_id = client.post("/api/sessions").json()["session_id"]
+        response = client.put(
+            f"/api/sessions/{session_id}/robot/mode",
+            json={"mode": "real"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["robot_mode"] == "simulation"
+        assert "未连接机械臂" in payload["mode_notice"]

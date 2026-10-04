@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 from threading import RLock
@@ -121,7 +122,10 @@ class WebRuntime:
         speech_transcriber: SpeechTranscriber | None = None,
     ) -> None:
         settings.validate()
-        self._real_mode = settings.runtime_mode == RuntimeMode.REAL
+        parser_was_provided = parser is not None
+        configured_mode = RuntimeMode(settings.runtime_mode)
+        self._configured_mode = configured_mode
+        self._real_mode = configured_mode == RuntimeMode.REAL
         self._real_config = None
         if self._real_mode:
             from robot_runtime.real_config import load_real_config
@@ -175,7 +179,7 @@ class WebRuntime:
                     real.limits.max_speed_mm_s or settings.max_robot_speed_mm_s
                     if real is not None else settings.max_robot_speed_mm_s
                 ),
-                expected_runtime_mode=settings.runtime_mode,
+                expected_runtime_mode=configured_mode,
                 move_tcp_name=(
                     (real.tool.tcp_name or "needle_tip")
                     if real is not None else "needle_tip"
@@ -186,6 +190,67 @@ class WebRuntime:
                 ),
             ),
             event_sink=self._on_tool_event,
+        )
+        self._parsers: dict[RuntimeMode, CommandParser] = {
+            configured_mode: self.parser,
+        }
+        self._robots: dict[RuntimeMode, Any] = {
+            configured_mode: self.robot,
+        }
+        self._observers: dict[RuntimeMode, SimulationObserver] = {
+            configured_mode: self.simulation_observer,
+        }
+        self._orchestrators: dict[RuntimeMode, SurgicalTaskOrchestrator] = {
+            configured_mode: self.orchestrator,
+        }
+        self._secondary_resources: list[Any] = []
+        fallback_url = settings.robot_simulation_fallback_base_url
+        if self._real_mode and fallback_url:
+            simulation_settings = replace(
+                settings,
+                runtime_mode=RuntimeMode.SIMULATION,
+                real_config_path=None,
+                robot_simulation_base_url=fallback_url,
+                robot_simulation_fallback_base_url=None,
+            )
+            simulation_robot = RobotSimulationHTTPController(
+                fallback_url,
+                http_timeout_s=settings.robot_simulation_http_timeout,
+                command_timeout_s=settings.robot_simulation_command_timeout,
+                poll_interval_s=settings.robot_simulation_poll_interval,
+            )
+            simulation_observer = RobotSimulationObservabilityHTTPClient(
+                fallback_url,
+                timeout_s=min(settings.robot_simulation_http_timeout, 2.0),
+            )
+            simulation_parser = (
+                InternS2Agent(simulation_settings, client=self._model_http)
+                if not parser_was_provided
+                else parser
+            )
+            simulation_orchestrator = SurgicalTaskOrchestrator(
+                simulation_robot,
+                self.planner,
+                policy=OrchestrationPolicy(
+                    entry_tolerance_mm=simulation_settings.entry_tolerance_mm,
+                    max_relative_translation_mm=(
+                        simulation_settings.max_relative_translation_mm
+                    ),
+                    move_speed_mm_s=simulation_settings.robot_move_speed_mm_s,
+                    max_speed_mm_s=simulation_settings.max_robot_speed_mm_s,
+                    expected_runtime_mode=RuntimeMode.SIMULATION,
+                ),
+                event_sink=self._on_tool_event,
+            )
+            self._parsers[RuntimeMode.SIMULATION] = simulation_parser
+            self._robots[RuntimeMode.SIMULATION] = simulation_robot
+            self._observers[RuntimeMode.SIMULATION] = simulation_observer
+            self._orchestrators[RuntimeMode.SIMULATION] = simulation_orchestrator
+            self._secondary_resources.extend([simulation_robot, simulation_observer])
+        self._default_robot_mode = (
+            RuntimeMode.SIMULATION
+            if RuntimeMode.SIMULATION in self._robots
+            else configured_mode
         )
         self._tasks: set[asyncio.Task[Any]] = set()
         self._motion_origins: dict[str, Point3D] = {}
@@ -210,11 +275,20 @@ class WebRuntime:
             self.planner.close()
         if self._owns_simulation_observer and self.simulation_observer is not None:
             self.simulation_observer.close()
+        for resource in self._secondary_resources:
+            resource.close()
 
     async def create_session(self) -> SessionSnapshot:
-        snapshot = self.store.create()
+        snapshot = self.store.create(robot_mode=self._default_robot_mode)
         try:
-            state = await asyncio.to_thread(self.robot.get_state)
+            default_robot = self._robots[self._default_robot_mode]
+            if self._real_mode and self._default_robot_mode == RuntimeMode.SIMULATION:
+                state = await asyncio.to_thread(
+                    default_robot.reset_estop,
+                    f"web-default-simulation-{uuid4().hex}",
+                )
+            else:
+                state = await asyncio.to_thread(default_robot.get_state)
         except Exception:
             # A downstream outage must not prevent the doctor from opening the
             # console. Preflight will still reject an execution later.
@@ -232,102 +306,295 @@ class WebRuntime:
     def get_session(self, session_id: str) -> SessionSnapshot:
         return self.store.snapshot(session_id)
 
+    @property
+    def available_robot_modes(self) -> tuple[RuntimeMode, ...]:
+        return tuple(self._robots)
+
+    def _session_mode(self, session_id: str) -> RuntimeMode:
+        return RuntimeMode(self.store.snapshot(session_id).robot_mode)
+
+    def _resources_for_session(
+        self, session_id: str,
+    ) -> tuple[RuntimeMode, CommandParser, Any, SimulationObserver, SurgicalTaskOrchestrator]:
+        mode = self._session_mode(session_id)
+        if mode == self._configured_mode:
+            return (
+                mode,
+                self.parser,
+                self.robot,
+                self.simulation_observer,
+                self.orchestrator,
+            )
+        return (
+            mode,
+            self._parsers[mode],
+            self._robots[mode],
+            self._observers[mode],
+            self._orchestrators[mode],
+        )
+
+    @staticmethod
+    def _real_feedback_available(telemetry: RobotTelemetry) -> bool:
+        connections = telemetry.connections
+        return (
+            telemetry.freshness.value == "fresh"
+            and connections.gateway.value == "connected"
+            and connections.datasheet.value == "connected"
+            and connections.command_socket.value == "connected"
+            and connections.controller_box.value == "connected"
+            and telemetry.actual_pose_robot_base is not None
+            and telemetry.joint_positions_deg is not None
+        )
+
+    async def set_robot_mode(
+        self, session_id: str, *, mode: RuntimeMode,
+    ) -> SessionSnapshot:
+        session = self.store.snapshot(session_id)
+        if session.status in _BUSY_STATUSES or session.pending_confirmation:
+            raise SessionConflict("当前任务尚未结束，不能切换机械臂模式")
+        if mode not in self._robots:
+            raise SessionConflict(f"当前服务没有启动 {mode.value} 运行时")
+
+        if mode == RuntimeMode.REAL:
+            try:
+                telemetry = await asyncio.to_thread(
+                    self._observers[RuntimeMode.REAL].get_telemetry
+                )
+            except Exception as error:
+                return self._fallback_to_simulation(session_id, str(error))
+            if (
+                not isinstance(telemetry, RobotTelemetry)
+                or not self._real_feedback_available(telemetry)
+            ):
+                return self._fallback_to_simulation(
+                    session_id, "未收到完整、新鲜的 10003/10004 真实机械臂状态"
+                )
+            try:
+                await asyncio.to_thread(
+                    self._observers[RuntimeMode.REAL].get_mirror_status
+                )
+            except Exception as error:
+                return self._fallback_to_simulation(
+                    session_id, f"真实机械臂数字孪生未启动：{error}"
+                )
+            pose = telemetry.actual_pose_robot_base
+            assert pose is not None
+            return self.store.mutate(
+                session_id,
+                lambda record: self._apply_mode(
+                    record,
+                    RuntimeMode.REAL,
+                    current_tcp=Point3D(
+                        x=pose.translation_mm[0],
+                        y=pose.translation_mm[1],
+                        z=pose.translation_mm[2],
+                        frame=pose.frame,
+                        unit=pose.unit,
+                    ).model_dump(mode="json"),
+                    notice=None,
+                ),
+            )
+
+        # Entering simulation always resets its single environment owner so the
+        # browser starts from the configured default simulation pose.
+        simulation_robot = self._robots[RuntimeMode.SIMULATION]
+        try:
+            state = await asyncio.to_thread(
+                simulation_robot.reset_estop,
+                f"web-mode-simulation-{uuid4().hex}",
+            )
+        except Exception as error:
+            raise SessionConflict(f"无法重置仿真环境：{error}") from error
+        return self.store.mutate(
+            session_id,
+            lambda record: self._apply_mode(
+                record,
+                RuntimeMode.SIMULATION,
+                current_tcp=state.tcp_position.model_dump(mode="json"),
+                notice=None,
+            ),
+        )
+
+    @staticmethod
+    def _apply_mode(
+        record: Any,
+        mode: RuntimeMode,
+        *,
+        current_tcp: dict[str, Any] | None,
+        notice: str | None,
+    ) -> None:
+        record.robot_mode = mode
+        record.mode_notice = notice
+        record.current_tcp = current_tcp
+        record.status = SessionStatus.READY
+        record.pending_command = None
+        record.active_command_id = None
+        record.raw_model_output = None
+        record.normalized_command = None
+        record.motion_proposal = None
+        record.execution_events = []
+        record.live_tool_events = []
+        record.orchestration = None
+        record.error = None
+        record.message = notice or (
+            "已切换到真实机械臂" if mode == RuntimeMode.REAL else "已切换到仿真模式"
+        )
+
+    def _fallback_to_simulation(
+        self, session_id: str, detail: str,
+    ) -> SessionSnapshot:
+        notice = f"未连接机械臂，已自动退回仿真模式：{detail}"
+        current_tcp = None
+        simulation_robot = self._robots.get(RuntimeMode.SIMULATION)
+        if simulation_robot is not None:
+            try:
+                state = simulation_robot.reset_estop(
+                    f"web-auto-fallback-{uuid4().hex}"
+                )
+                current_tcp = state.tcp_position.model_dump(mode="json")
+            except Exception:
+                pass
+        return self.store.mutate(
+            session_id,
+            lambda record: self._apply_mode(
+                record,
+                RuntimeMode.SIMULATION,
+                current_tcp=current_tcp,
+                notice=notice,
+            ),
+        )
+
     async def set_robot_enabled(
         self, session_id: str, *, enabled: bool,
     ) -> SetEnabledResult:
         """Change the physical enable state through the authenticated Mac gateway."""
-        if not self._real_mode:
+        mode, _parser, robot, _observer, _orchestrator = self._resources_for_session(
+            session_id
+        )
+        if mode != RuntimeMode.REAL:
             raise SessionConflict("使能/去使能只适用于真实机械臂")
         session = self.store.snapshot(session_id)
         if session.status in _BUSY_STATUSES:
             raise SessionConflict("当前任务正在执行，不能切换使能状态")
         return await asyncio.to_thread(
-            self.robot.set_enabled,
+            robot.set_enabled,
             enabled,
             f"web-{'enable' if enabled else 'disable'}-{uuid4().hex}",
         )
 
     def get_robot_telemetry(self, session_id: str) -> SimulationTelemetryView:
+        mode, _parser, _robot, observer, _orchestrator = self._resources_for_session(
+            session_id
+        )
         session = self.store.snapshot(session_id)
-        telemetry = self.simulation_observer.get_telemetry()
+        telemetry = observer.get_telemetry()
         if isinstance(telemetry, RobotTelemetry):
-            try:
-                mirror = self.simulation_observer.get_mirror_status()
-            except SimulationProxyError as error:
-                mirror = {"warning": f"SOFA mirror unavailable: {error}"}
-            pose = telemetry.actual_pose_robot_base
-            current_tcp = (
-                Point3D(
-                    x=pose.translation_mm[0],
-                    y=pose.translation_mm[1],
-                    z=pose.translation_mm[2],
-                    frame=pose.frame,
-                    unit=pose.unit,
+            if not self._real_feedback_available(telemetry):
+                if (
+                    RuntimeMode.SIMULATION not in self._observers
+                    or session.active_command_id is not None
+                    or session.status in _BUSY_STATUSES
+                ):
+                    return self._real_telemetry_view(session, telemetry, observer)
+                self._fallback_to_simulation(
+                    session_id,
+                    "真实机械臂网关、10003 或 10004 连接已断开或状态已过期",
                 )
-                if pose is not None
-                else None
-            )
-            connections = {
-                "server": "connected",
-                **{
-                    key: value.value
-                    for key, value in telemetry.connections.model_dump(mode="python").items()
-                },
-            }
-            return SimulationTelemetryView(
-                connected=telemetry.freshness.value == "fresh",
-                runtime_mode="real",
-                provider=telemetry.provider.value,
-                freshness=telemetry.freshness.value,
-                source_age_ms=telemetry.state_age_ms,
-                connections=connections,
-                sequence=telemetry.sequence,
-                received_at_ms=_now_ms(),
-                source_updated_at_ms=telemetry.server_received_at_ms,
-                state_machine_state=session.status.value,
-                motion_state=(telemetry.motion_state.value if telemetry.motion_state else None),
-                estop=bool(telemetry.physical_estop_active),
-                current_tcp=current_tcp,
-                actual_tcp_robot_base=(pose.model_dump(mode="json") if pose else None),
-                joint_positions_deg=(
-                    [float(value) for value in telemetry.joint_positions_deg]
-                    if telemetry.joint_positions_deg is not None
-                    else []
-                ),
-                frame_sequence=int(mirror.get("frame_sequence", 0)) if mirror else 0,
-                fsm_code=telemetry.fsm_code,
-                enabled=telemetry.enabled,
-                electrified=telemetry.electrified,
-                moving=telemetry.moving,
-                in_position=telemetry.in_position,
-                physical_estop_active=telemetry.physical_estop_active,
-                emergency_stop_circuit_fault=telemetry.emergency_stop_circuit_fault,
-                safeguard_active=telemetry.safeguard_active,
-                safeguard_circuit_fault=telemetry.safeguard_circuit_fault,
-                vendor_fault=(
-                    telemetry.vendor_fault.model_dump(mode="json")
-                    if telemetry.vendor_fault is not None
-                    else None
-                ),
-                mirror_calibrated=(bool(mirror.get("calibrated")) if mirror else None),
-                mirror_warning=(str(mirror.get("warning")) if mirror else None),
-                mirror_reason=(str(mirror.get("reason")) if mirror else None),
-                mirror_source_sequence=(
-                    int(mirror["source_sequence"])
-                    if mirror and mirror.get("source_sequence") is not None
-                    else None
-                ),
-                error=(
-                    None
-                    if telemetry.freshness.value == "fresh"
-                    else {
-                        "code": f"ROBOT_{telemetry.freshness.value.upper()}",
-                        "message": "真实状态不新鲜；画面已冻结",
-                    }
-                ),
-            )
+                return self.get_robot_telemetry(session_id)
+            return self._real_telemetry_view(session, telemetry, observer)
+        if mode != RuntimeMode.SIMULATION:
+            raise SimulationProxyError("真实模式收到了仿真遥测")
         if not isinstance(telemetry, SimulationTelemetry):
             raise SimulationProxyError("robot-runtime 返回了未知遥测类型")
+        return self._simulation_telemetry_view(session, telemetry)
+
+    def _real_telemetry_view(
+        self,
+        session: SessionSnapshot,
+        telemetry: RobotTelemetry,
+        observer: SimulationObserver,
+    ) -> SimulationTelemetryView:
+        try:
+            mirror = observer.get_mirror_status()
+        except SimulationProxyError as error:
+            mirror = {"warning": f"SOFA mirror unavailable: {error}"}
+        pose = telemetry.actual_pose_robot_base
+        current_tcp = (
+            Point3D(
+                x=pose.translation_mm[0],
+                y=pose.translation_mm[1],
+                z=pose.translation_mm[2],
+                frame=pose.frame,
+                unit=pose.unit,
+            )
+            if pose is not None
+            else None
+        )
+        connections = {
+            "server": "connected",
+            **{
+                key: value.value
+                for key, value in telemetry.connections.model_dump(mode="python").items()
+            },
+        }
+        return SimulationTelemetryView(
+            connected=telemetry.freshness.value == "fresh",
+            runtime_mode="real",
+            provider=telemetry.provider.value,
+            freshness=telemetry.freshness.value,
+            source_age_ms=telemetry.state_age_ms,
+            connections=connections,
+            sequence=telemetry.sequence,
+            received_at_ms=_now_ms(),
+            source_updated_at_ms=telemetry.server_received_at_ms,
+            state_machine_state=session.status.value,
+            motion_state=(telemetry.motion_state.value if telemetry.motion_state else None),
+            estop=bool(telemetry.physical_estop_active),
+            current_tcp=current_tcp,
+            actual_tcp_robot_base=(pose.model_dump(mode="json") if pose else None),
+            joint_positions_deg=(
+                [float(value) for value in telemetry.joint_positions_deg]
+                if telemetry.joint_positions_deg is not None
+                else []
+            ),
+            frame_sequence=int(mirror.get("frame_sequence", 0)) if mirror else 0,
+            fsm_code=telemetry.fsm_code,
+            enabled=telemetry.enabled,
+            electrified=telemetry.electrified,
+            moving=telemetry.moving,
+            in_position=telemetry.in_position,
+            physical_estop_active=telemetry.physical_estop_active,
+            emergency_stop_circuit_fault=telemetry.emergency_stop_circuit_fault,
+            safeguard_active=telemetry.safeguard_active,
+            safeguard_circuit_fault=telemetry.safeguard_circuit_fault,
+            vendor_fault=(
+                telemetry.vendor_fault.model_dump(mode="json")
+                if telemetry.vendor_fault is not None
+                else None
+            ),
+            mirror_calibrated=(bool(mirror.get("calibrated")) if mirror else None),
+            mirror_warning=(str(mirror.get("warning")) if mirror else None),
+            mirror_reason=(str(mirror.get("reason")) if mirror else None),
+            mirror_source_sequence=(
+                int(mirror["source_sequence"])
+                if mirror and mirror.get("source_sequence") is not None
+                else None
+            ),
+            error=(
+                None
+                if telemetry.freshness.value == "fresh"
+                else {
+                    "code": f"ROBOT_{telemetry.freshness.value.upper()}",
+                    "message": "真实状态不新鲜；画面已冻结",
+                }
+            ),
+        )
+
+    def _simulation_telemetry_view(
+        self,
+        session: SessionSnapshot,
+        telemetry: SimulationTelemetry,
+    ) -> SimulationTelemetryView:
         command = session.normalized_command or {}
         entry_point = _point_from_payload(command.get("entry_point"))
         target_point = _point_from_payload(command.get("target_point"))
@@ -338,7 +605,7 @@ class WebRuntime:
             else None
         )
         motion_target = entry_point
-        origin = self._motion_origins.get(session_id)
+        origin = self._motion_origins.get(session.session_id)
         relative = command.get("relative_motion")
         if motion_target is None and origin is not None and isinstance(relative, dict):
             motion_target = _relative_target(origin, relative)
@@ -371,7 +638,7 @@ class WebRuntime:
             trajectory_total_points=len(trajectory),
             frame_sequence=telemetry.frame_sequence,
             simulation_fps=self._update_fps(
-                session_id,
+                session.session_id,
                 telemetry.frame_sequence,
             ),
             error=session.error,
@@ -386,10 +653,24 @@ class WebRuntime:
         error: Exception,
     ) -> SimulationTelemetryView:
         session = self.store.snapshot(session_id)
+        selected_mode = RuntimeMode(session.robot_mode)
+        if (
+            selected_mode == RuntimeMode.REAL
+            and RuntimeMode.SIMULATION in self._observers
+            and session.active_command_id is None
+            and session.status not in _BUSY_STATUSES
+        ):
+            self._fallback_to_simulation(session_id, str(error) or type(error).__name__)
+            try:
+                return self.get_robot_telemetry(session_id)
+            except Exception as fallback_error:
+                error = fallback_error
+                session = self.store.snapshot(session_id)
+                selected_mode = RuntimeMode.SIMULATION
         command = session.normalized_command or {}
         return SimulationTelemetryView(
             connected=False,
-            runtime_mode=("real" if self._real_mode else "simulation"),
+            runtime_mode=selected_mode.value,
             freshness="disconnected",
             connections={"server": "disconnected"},
             sequence=0,
@@ -401,7 +682,7 @@ class WebRuntime:
             error={
                 "code": (
                     "GATEWAY_DISCONNECTED"
-                    if self._real_mode
+                    if selected_mode == RuntimeMode.REAL
                     else "ROBOT_TELEMETRY_UNAVAILABLE"
                 ),
                 "message": str(error) or type(error).__name__,
@@ -414,25 +695,30 @@ class WebRuntime:
     ) -> SimulationTelemetryView:
         return self.robot_telemetry_error(session_id, error)
 
-    def _verify_observer_mode(self) -> None:
-        telemetry = self.simulation_observer.get_telemetry()
-        if self._real_mode and not isinstance(telemetry, RobotTelemetry):
+    def _verify_session_observer_mode(self, session_id: str) -> SimulationObserver:
+        mode = self._session_mode(session_id)
+        observer = self._observers[mode]
+        telemetry = observer.get_telemetry()
+        if mode == RuntimeMode.REAL and not isinstance(telemetry, RobotTelemetry):
             raise SimulationProxyError("robot-runtime 没有运行在 real 模式")
-        if not self._real_mode and not isinstance(telemetry, SimulationTelemetry):
+        if mode == RuntimeMode.SIMULATION and not isinstance(telemetry, SimulationTelemetry):
             raise SimulationProxyError("robot-runtime 没有运行在 simulation 模式")
+        return observer
 
     async def open_robot_video(self, session_id: str) -> MJPEGStream:
         self.store.snapshot(session_id)
-        await asyncio.to_thread(self._verify_observer_mode)
-        return await self.simulation_observer.open_mjpeg()
+        observer = await asyncio.to_thread(
+            self._verify_session_observer_mode, session_id
+        )
+        return await observer.open_mjpeg()
 
     async def open_simulation_video(self, session_id: str) -> MJPEGStream:
         return await self.open_robot_video(session_id)
 
     def get_robot_camera(self, session_id: str) -> SimulationCameraState:
         self.store.snapshot(session_id)
-        self._verify_observer_mode()
-        return self.simulation_observer.get_camera_state()
+        observer = self._verify_session_observer_mode(session_id)
+        return observer.get_camera_state()
 
     def get_simulation_camera(self, session_id: str) -> SimulationCameraState:
         return self.get_robot_camera(session_id)
@@ -443,8 +729,8 @@ class WebRuntime:
         request: SimulationCameraControlRequest,
     ) -> SimulationCameraState:
         self.store.snapshot(session_id)
-        self._verify_observer_mode()
-        return self.simulation_observer.control_camera(request)
+        observer = self._verify_session_observer_mode(session_id)
+        return observer.control_camera(request)
 
     def control_simulation_camera(
         self, session_id: str, request: SimulationCameraControlRequest
@@ -453,13 +739,23 @@ class WebRuntime:
 
     def health(self) -> HealthResponse:
         return HealthResponse(
-            runtime_mode=self.settings.runtime_mode.value,
+            runtime_mode=RuntimeMode(self.settings.runtime_mode).value,
+            default_robot_mode=self._default_robot_mode.value,
+            available_robot_modes=[mode.value for mode in self.available_robot_modes],
             puncture_execution_enabled=False,
             sessions=self.store.count,
             downstream={
                 "interns2": self.settings.base_url,
                 ("robot_runtime" if self._real_mode else "robot_simulation"):
                     self.settings.robot_simulation_base_url,
+                **(
+                    {
+                        "robot_simulation":
+                            self.settings.robot_simulation_fallback_base_url
+                    }
+                    if self.settings.robot_simulation_fallback_base_url
+                    else {}
+                ),
                 "planner_adapter": self.settings.planner_adapter_base_url,
             },
             asr=self.asr.status(),
@@ -520,6 +816,9 @@ class WebRuntime:
         asr_transcription: TranscriptionResult | None = None,
         request_started: float | None = None,
     ) -> SessionSnapshot:
+        selected_mode, parser, robot, _observer, orchestrator = (
+            self._resources_for_session(session_id)
+        )
         parse_started_ms = time.time_ns() // 1_000_000
         parse_token = uuid4().hex
 
@@ -551,7 +850,7 @@ class WebRuntime:
             if request.image_data_url:
                 image_path = self._write_temporary_image(request.image_data_url)
             parsed = await asyncio.to_thread(
-                self.parser.parse_command,
+                parser.parse_command,
                 request.prompt,
                 image_path,
                 input_source=(
@@ -591,7 +890,7 @@ class WebRuntime:
                 image_path.unlink(missing_ok=True)
 
         motion_proposal: RobotMotionProposal | None = None
-        if self._real_mode and parsed.command.intent != CommandIntent.CLARIFY:
+        if selected_mode == RuntimeMode.REAL and parsed.command.intent != CommandIntent.CLARIFY:
             if parsed.command.intent not in {
                 CommandIntent.MOVE_RELATIVE,
                 CommandIntent.MOVE_TO_ENTRY,
@@ -620,9 +919,9 @@ class WebRuntime:
                     command_id=parsed.command.command_id,
                     translation_mm=parsed.command.relative_motion.translation_mm(),
                     frame=parsed.command.relative_motion.frame,
-                    speed_mm_s=self.orchestrator.policy.move_speed_mm_s,
+                    speed_mm_s=orchestrator.policy.move_speed_mm_s,
                 )
-                proposal_method = self.robot.create_move_relative_proposal
+                proposal_method = robot.create_move_relative_proposal
             else:
                 if parsed.command.entry_point is None or self._real_config is None:
                     return self._record_parse_error(
@@ -639,9 +938,9 @@ class WebRuntime:
                     entry_point=parsed.command.entry_point,
                     tcp=self._real_config.tool.tcp_name,
                     orientation_policy="hold_current_actual_orientation",
-                    speed_mm_s=self.orchestrator.policy.move_speed_mm_s,
+                    speed_mm_s=orchestrator.policy.move_speed_mm_s,
                 )
-                proposal_method = self.robot.create_move_to_entry_proposal
+                proposal_method = robot.create_move_to_entry_proposal
             try:
                 proposal_record = await asyncio.to_thread(
                     proposal_method,
@@ -720,12 +1019,15 @@ class WebRuntime:
     async def confirm(
         self, session_id: str, *, fingerprint: str | None = None,
     ) -> SessionSnapshot:
+        selected_mode, _parser, robot, _observer, orchestrator = (
+            self._resources_for_session(session_id)
+        )
         selected: dict[str, Any] = {}
 
         def begin(record) -> None:
             if record.pending_command is None:
                 raise SessionConflict("session has no command awaiting confirmation")
-            if self._real_mode:
+            if selected_mode == RuntimeMode.REAL:
                 proposal = RobotMotionProposal.model_validate(record.motion_proposal)
                 if fingerprint != proposal.fingerprint:
                     raise SessionConflict(
@@ -746,11 +1048,11 @@ class WebRuntime:
 
         snapshot = self.store.mutate(session_id, begin)
         command: ParsedCommand = selected["command"]
-        if self._real_mode:
+        if selected_mode == RuntimeMode.REAL:
             try:
                 proposal = RobotMotionProposal.model_validate(selected["motion_proposal"])
                 confirmed_record = await asyncio.to_thread(
-                    self.robot.confirm_motion_proposal,
+                    robot.confirm_motion_proposal,
                     command.command_id,
                     proposal.fingerprint,
                     RobotCommandKind(proposal.envelope.command_kind.value),
@@ -788,6 +1090,7 @@ class WebRuntime:
                 command,
                 int(selected["parse_started_ms"] or _now_ms()),
                 int(selected["parse_finished_ms"] or _now_ms()),
+                orchestrator,
             )
         )
         self._tasks.add(task)
@@ -805,7 +1108,10 @@ class WebRuntime:
         return self.store.mutate(session_id, operation)
 
     async def stop(self, session_id: str, *, emergency: bool) -> SessionSnapshot:
-        if self._real_mode:
+        selected_mode, _parser, _robot, _observer, orchestrator = (
+            self._resources_for_session(session_id)
+        )
+        if selected_mode == RuntimeMode.REAL:
             raise SessionConflict(
                 "Step 12 真实模式仅开放已确认的 move_relative；"
                 "网页不能发送停止或急停，请使用现场物理装置"
@@ -827,7 +1133,7 @@ class WebRuntime:
         self.store.mutate(session_id, begin)
         self.store.bind_command(session_id, command.command_id)
         try:
-            result = await asyncio.to_thread(self.orchestrator.execute, command)
+            result = await asyncio.to_thread(orchestrator.execute, command)
         except Exception as error:  # pragma: no cover - defensive service boundary
             return self.store.mutate(
                 session_id,
@@ -857,13 +1163,16 @@ class WebRuntime:
         return self.store.mutate(session_id, finish)
 
     async def reset_estop(self, session_id: str) -> SessionSnapshot:
-        if self._real_mode:
+        selected_mode, _parser, robot, _observer, _orchestrator = (
+            self._resources_for_session(session_id)
+        )
+        if selected_mode == RuntimeMode.REAL:
             raise SessionConflict("Step 12 真实模式禁止远程复位急停")
         # Resolve the session before performing a state-changing tool call.
         self.store.snapshot(session_id)
         command_id = f"web-reset-{uuid4().hex}"
         try:
-            state = await asyncio.to_thread(self.robot.reset_estop, command_id)
+            state = await asyncio.to_thread(robot.reset_estop, command_id)
         except Exception as error:
             return self.store.mutate(
                 session_id,
@@ -886,9 +1195,10 @@ class WebRuntime:
         command: ParsedCommand,
         parse_started_ms: int,
         parse_finished_ms: int,
+        orchestrator: SurgicalTaskOrchestrator,
     ) -> None:
         try:
-            result = await asyncio.to_thread(self.orchestrator.execute, command)
+            result = await asyncio.to_thread(orchestrator.execute, command)
             events = [
                 event.as_dict()
                 for event in build_runtime_events(

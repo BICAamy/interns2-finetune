@@ -41,7 +41,7 @@ case "${1:-}" in
     all)
         files=()
         if [[ "$mode" == REAL* ]]; then
-            names=(inference robot-runtime planner-adapter agent-web)
+            names=(inference robot-runtime robot-simulation-fallback planner-adapter agent-web xvfb)
         elif [[ "$mode" == SIMULATION ]]; then
             names=(inference robot-simulation planner-adapter agent-web xvfb)
         else
@@ -57,7 +57,11 @@ case "${1:-}" in
         tail -n 200 -F "$LOG_DIR/inference.log"
         ;;
     simulation)
-        tail -n 200 -F "$LOG_DIR/robot-simulation.log"
+        if [[ "$mode" == REAL* ]]; then
+            tail -n 200 -F "$LOG_DIR/robot-simulation-fallback.log"
+        else
+            tail -n 200 -F "$LOG_DIR/robot-simulation.log"
+        fi
         ;;
     robot)
         if [[ "$mode" == REAL* ]]; then

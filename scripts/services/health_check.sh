@@ -73,6 +73,20 @@ robot_name = "robot-runtime" if mode.startswith("REAL") else "robot-simulation"
 print(f"{robot_name:20} : {robot_status}")
 failed |= not robot_ok
 
+fallback_ok = True
+if mode.startswith("REAL"):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8003/health", timeout=3) as response:
+            fallback_health = json.load(response)
+        fallback_ok = (
+            fallback_health.get("service") == "robot-simulation"
+            and fallback_health.get("ready") is True
+        )
+    except Exception:
+        fallback_ok = False
+    print(f"{'simulation fallback':20} : {'HEALTHY' if fallback_ok else 'FAILED'}")
+    failed |= not fallback_ok
+
 try:
     with urllib.request.urlopen("http://127.0.0.1:8002/health", timeout=3) as response:
         planner_ok = 200 <= response.status < 300
@@ -87,6 +101,13 @@ try:
         web_health = json.load(response)
     expected_mode = "real" if mode.startswith("REAL") else "simulation"
     web_ok = robot_ok and web_health.get("runtime_mode") == expected_mode
+    if mode.startswith("REAL"):
+        web_ok = (
+            web_ok
+            and fallback_ok
+            and web_health.get("default_robot_mode") == "simulation"
+            and set(web_health.get("available_robot_modes", [])) == {"simulation", "real"}
+        )
 except Exception as exc:
     web_ok = False
     print(f"  agent-web error: {exc}")

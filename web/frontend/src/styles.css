@@ -28,9 +28,13 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 .brand h1 { font-size: 18px; margin: 0 0 4px; letter-spacing: .02em; }
 .brand p { margin: 0; color: var(--muted); font-size: 12px; }
 .topbar-actions { gap: 10px; }
+.mode-picker { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+.mode-picker select { border: 1px solid var(--line); border-radius: 8px; background: #101922; color: var(--text); padding: 7px 9px; }
+.mode-picker select:disabled { opacity: 0.55; }
 .connection { font-size: 12px; color: var(--muted); margin-right: 8px; }
 .connection::before { content: ""; width: 7px; height: 7px; display: inline-block; margin-right: 7px; border-radius: 50%; background: #7d8995; }
 .connection.online::before { background: var(--green); box-shadow: 0 0 12px var(--green); }
+.mode-notice { margin: 12px 0; padding: 11px 14px; border: 1px solid #c9952e; border-radius: 10px; background: rgba(201, 149, 46, 0.12); color: #f1c76f; }
 
 main { width: min(1500px, calc(100% - 40px)); margin: 24px auto 48px; }
 .status-banner { display: flex; align-items: center; gap: 14px; padding: 16px 20px; border: 1px solid var(--line); border-radius: 16px; background: rgba(14, 30, 48, .78); margin-bottom: 18px; }

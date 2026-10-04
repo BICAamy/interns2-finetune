@@ -156,7 +156,11 @@ function TrajectoryPlot({ telemetry }: { telemetry: SimulationTelemetry | null }
 
 export default function App() {
   const [session, setSession] = useState<SessionSnapshot | null>(null);
-  const [runtimeMode, setRuntimeMode] = useState<"simulation" | "real" | null>(null);
+  const [runtimeMode, setRuntimeMode] = useState<"simulation" | "real">("simulation");
+  const [availableModes, setAvailableModes] = useState<Array<"simulation" | "real">>([
+    "simulation",
+  ]);
+  const [modeBusy, setModeBusy] = useState(false);
   const [enableBusy, setEnableBusy] = useState(false);
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [image, setImage] = useState<File | null>(null);
@@ -189,13 +193,14 @@ export default function App() {
   const audioChunks = useRef<Blob[]>([]);
   const recordingStartedAt = useRef(0);
   const recordingTimer = useRef<number | null>(null);
+  const lastRobotMode = useRef<"simulation" | "real">("simulation");
 
   useEffect(() => {
     let cancelled = false;
     api.health()
       .then((health) => {
         if (!cancelled) {
-          setRuntimeMode(health.runtime_mode);
+          setAvailableModes(health.available_robot_modes);
         }
       })
       .catch((error) => {
@@ -203,6 +208,20 @@ export default function App() {
       });
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    const modeChanged = lastRobotMode.current !== session.robot_mode;
+    lastRobotMode.current = session.robot_mode;
+    setRuntimeMode(session.robot_mode);
+    if (modeChanged) {
+      setTelemetry(null);
+      setCamera(null);
+      setVideoConnected(false);
+      setVideoFailed(false);
+      setVideoAttempt((value) => value + 1);
+    }
+  }, [session?.robot_mode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -343,7 +362,9 @@ export default function App() {
   const entry = (command?.entry_point ?? telemetry?.entry_point) as Point3D | undefined;
   const target = (command?.target_point ?? telemetry?.target_point) as Point3D | undefined;
   const currentTcp = telemetry?.current_tcp ?? session?.current_tcp;
-  const videoUrl = runtimeMode !== null && session ? api.videoUrl(session.session_id, videoAttempt) : "";
+  const videoUrl = session
+    ? api.videoUrl(session.session_id, videoAttempt, runtimeMode)
+    : "";
   const realStale = runtimeMode === "real" && telemetry?.freshness !== "fresh";
 
   const statusTone = useMemo(() => {
@@ -373,6 +394,19 @@ export default function App() {
       setRequestError(error instanceof Error ? error.message : String(error));
     } finally {
       setEnableBusy(false);
+    }
+  }
+
+  async function selectRobotMode(mode: "simulation" | "real") {
+    if (!session || modeBusy || mode === runtimeMode) return;
+    setModeBusy(true);
+    setRequestError(null);
+    try {
+      setSession(await api.setRobotMode(session.session_id, mode));
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setModeBusy(false);
     }
   }
 
@@ -615,6 +649,23 @@ export default function App() {
           </div>
         </div>
         <div className="topbar-actions">
+          <label className="mode-picker">
+            <span>运行模式</span>
+            <select
+              value={runtimeMode}
+              disabled={!session || modeBusy || isBusy || session?.pending_confirmation}
+              onChange={(event) => void selectRobotMode(
+                event.target.value as "simulation" | "real",
+              )}
+            >
+              {availableModes.includes("simulation") && (
+                <option value="simulation">仿真</option>
+              )}
+              {availableModes.includes("real") && (
+                <option value="real">真实机械臂</option>
+              )}
+            </select>
+          </label>
           <span className={`connection ${connected ? "online" : "offline"}`}>
             {runtimeMode === "real" ? `网关 ${telemetry?.connections.gateway ?? "未知"} · DataSheet ${telemetry?.connections.datasheet ?? "未知"}` : connected ? "状态已连接" : "状态连接中"}
           </span>
@@ -674,6 +725,12 @@ export default function App() {
           <section className="error-banner">
             <strong>{requestError ?? String(session?.error?.code ?? "任务错误")}</strong>
             <span>{String(session?.error?.message ?? "")}</span>
+          </section>
+        )}
+
+        {session?.mode_notice && (
+          <section className="mode-notice" role="status">
+            <strong>{session.mode_notice}</strong>
           </section>
         )}
 

@@ -23,11 +23,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  health: () => request<{ runtime_mode: "simulation" | "real" }>("/health"),
+  health: () => request<{
+    runtime_mode: "simulation" | "real";
+    default_robot_mode: "simulation" | "real";
+    available_robot_modes: Array<"simulation" | "real">;
+  }>("/health"),
   createSession: () =>
     request<SessionSnapshot>("/api/sessions", { method: "POST" }),
   getSession: (sessionId: string) =>
     request<SessionSnapshot>(`/api/sessions/${sessionId}`),
+  setRobotMode: (sessionId: string, mode: "simulation" | "real") =>
+    request<SessionSnapshot>(`/api/sessions/${sessionId}/robot/mode`, {
+      method: "PUT",
+      body: JSON.stringify({ mode }),
+    }),
   submitText: (sessionId: string, payload: TextCommandPayload) =>
     request<SessionSnapshot>(`/api/sessions/${sessionId}/commands/text`, {
       method: "POST",
@@ -89,8 +98,12 @@ export const api = {
         body: JSON.stringify(payload),
       },
     ),
-  videoUrl: (sessionId: string, attempt = 0) =>
-    `/api/sessions/${sessionId}/robot/stream.mjpeg?attempt=${attempt}`,
+  videoUrl: (
+    sessionId: string,
+    attempt = 0,
+    mode: "simulation" | "real" = "simulation",
+  ) =>
+    `/api/sessions/${sessionId}/robot/stream.mjpeg?attempt=${attempt}&mode=${mode}`,
 };
 
 export function openSessionSocket(

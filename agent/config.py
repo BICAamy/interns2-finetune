@@ -89,6 +89,7 @@ class AgentSettings:
     robot_move_speed_mm_s: float = 5.0
     max_robot_speed_mm_s: float = 10.0
     robot_simulation_base_url: str = "http://127.0.0.1:8001"
+    robot_simulation_fallback_base_url: str | None = None
     planner_adapter_base_url: str = "http://127.0.0.1:8002"
     robot_simulation_http_timeout: float = 10.0
     robot_simulation_command_timeout: float = 120.0
@@ -142,6 +143,9 @@ class AgentSettings:
                 "ROBOT_SIMULATION_BASE_URL",
                 "http://127.0.0.1:8001",
             ).strip(),
+            robot_simulation_fallback_base_url=(
+                os.getenv("ROBOT_SIMULATION_FALLBACK_BASE_URL", "").strip() or None
+            ),
             planner_adapter_base_url=os.getenv(
                 "PLANNER_ADAPTER_BASE_URL",
                 "http://127.0.0.1:8002",
@@ -209,6 +213,18 @@ class AgentSettings:
             raise ValueError("ROBOT_MOVE_SPEED_MM_S cannot exceed MAX_ROBOT_SPEED_MM_S")
         if not self.robot_simulation_base_url:
             raise ValueError("ROBOT_SIMULATION_BASE_URL cannot be empty")
+        if (
+            self.robot_simulation_fallback_base_url is not None
+            and not self.robot_simulation_fallback_base_url.strip()
+        ):
+            raise ValueError("ROBOT_SIMULATION_FALLBACK_BASE_URL cannot be empty")
+        if (
+            self.robot_simulation_fallback_base_url is not None
+            and self.runtime_mode != RuntimeMode.REAL
+        ):
+            raise ValueError(
+                "ROBOT_SIMULATION_FALLBACK_BASE_URL is only valid when the real runtime is available"
+            )
         if not self.planner_adapter_base_url:
             raise ValueError("PLANNER_ADAPTER_BASE_URL cannot be empty")
         if self.robot_simulation_http_timeout <= 0:

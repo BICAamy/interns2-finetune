@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from surgical_contracts import (
+    RuntimeMode,
     SetEnabledResult,
     SimulationCameraControlRequest,
     SimulationCameraState,
@@ -18,6 +19,7 @@ from ..models import (
     HealthResponse,
     SessionSnapshot,
     RobotEnableRequest,
+    RobotModeRequest,
     SimulationTelemetryView,
     TextCommandRequest,
 )
@@ -131,6 +133,21 @@ async def set_robot_enabled(
     return await _runtime(request).set_robot_enabled(
         session_id,
         enabled=body.enabled,
+    )
+
+
+@router.put(
+    "/api/sessions/{session_id}/robot/mode",
+    response_model=SessionSnapshot,
+)
+async def set_robot_mode(
+    session_id: str,
+    body: RobotModeRequest,
+    request: Request,
+) -> SessionSnapshot:
+    return await _runtime(request).set_robot_mode(
+        session_id,
+        mode=RuntimeMode(body.mode),
     )
 
 
