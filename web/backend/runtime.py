@@ -19,7 +19,9 @@ from surgical_contracts import (
     ParsedCommand,
     Point3D,
     MoveRelativeRequest,
+    MoveToEntryRequest,
     RobotMotionProposal,
+    RobotCommandKind,
     RobotTelemetry,
     SetEnabledResult,
     SimulationTelemetry,
@@ -120,6 +122,11 @@ class WebRuntime:
     ) -> None:
         settings.validate()
         self._real_mode = settings.runtime_mode == RuntimeMode.REAL
+        self._real_config = None
+        if self._real_mode:
+            from robot_runtime.real_config import load_real_config
+
+            self._real_config = load_real_config(settings.real_config_path)
         self.settings = settings
         self.store = store or SessionStore()
         self._model_http: OpenAICompatibleHTTPClient | None = None
@@ -147,15 +154,36 @@ class WebRuntime:
                 timeout_s=min(settings.robot_simulation_http_timeout, 2.0),
             )
         )
+        real = self._real_config
         self.orchestrator = SurgicalTaskOrchestrator(
             self.robot,
             self.planner,
             policy=OrchestrationPolicy(
-                entry_tolerance_mm=settings.entry_tolerance_mm,
-                max_relative_translation_mm=settings.max_relative_translation_mm,
-                move_speed_mm_s=settings.robot_move_speed_mm_s,
-                max_speed_mm_s=settings.max_robot_speed_mm_s,
+                entry_tolerance_mm=(
+                    real.arrival.position_tolerance_mm or settings.entry_tolerance_mm
+                    if real is not None else settings.entry_tolerance_mm
+                ),
+                max_relative_translation_mm=(
+                    real.limits.max_step_mm or settings.max_relative_translation_mm
+                    if real is not None else settings.max_relative_translation_mm
+                ),
+                move_speed_mm_s=(
+                    real.motion.speed_mm_s or settings.robot_move_speed_mm_s
+                    if real is not None else settings.robot_move_speed_mm_s
+                ),
+                max_speed_mm_s=(
+                    real.limits.max_speed_mm_s or settings.max_robot_speed_mm_s
+                    if real is not None else settings.max_robot_speed_mm_s
+                ),
                 expected_runtime_mode=settings.runtime_mode,
+                move_tcp_name=(
+                    (real.tool.tcp_name or "needle_tip")
+                    if real is not None else "needle_tip"
+                ),
+                entry_orientation_policy=(
+                    "hold_current_actual_orientation"
+                    if real is not None else "configured_safe_orientation"
+                ),
             ),
             event_sink=self._on_tool_event,
         )
@@ -564,28 +592,59 @@ class WebRuntime:
 
         motion_proposal: RobotMotionProposal | None = None
         if self._real_mode and parsed.command.intent != CommandIntent.CLARIFY:
-            if (
-                parsed.command.intent != CommandIntent.MOVE_RELATIVE
-                or parsed.command.relative_motion is None
-            ):
+            if parsed.command.intent not in {
+                CommandIntent.MOVE_RELATIVE,
+                CommandIntent.MOVE_TO_ENTRY,
+            }:
                 return self._record_parse_error(
                     session_id,
                     {
                         "code": "OPERATION_NOT_ENABLED",
-                        "message": "Step 12 目前只开放已通过 Step 11 的 move_relative",
+                        "message": "真实模式只开放相对位移和 Base 坐标系绝对 XYZ 运动",
                         "details": {},
                     },
                     parse_token=parse_token,
                 )
-            proposal_request = MoveRelativeRequest(
-                command_id=parsed.command.command_id,
-                translation_mm=parsed.command.relative_motion.translation_mm(),
-                frame=parsed.command.relative_motion.frame,
-                speed_mm_s=self.settings.robot_move_speed_mm_s,
-            )
+            if parsed.command.intent == CommandIntent.MOVE_RELATIVE:
+                if parsed.command.relative_motion is None:
+                    return self._record_parse_error(
+                        session_id,
+                        {
+                            "code": "INVALID_COMMAND_SCHEMA",
+                            "message": "相对运动缺少位移参数",
+                            "details": {},
+                        },
+                        parse_token=parse_token,
+                    )
+                proposal_request = MoveRelativeRequest(
+                    command_id=parsed.command.command_id,
+                    translation_mm=parsed.command.relative_motion.translation_mm(),
+                    frame=parsed.command.relative_motion.frame,
+                    speed_mm_s=self.orchestrator.policy.move_speed_mm_s,
+                )
+                proposal_method = self.robot.create_move_relative_proposal
+            else:
+                if parsed.command.entry_point is None or self._real_config is None:
+                    return self._record_parse_error(
+                        session_id,
+                        {
+                            "code": "INVALID_COMMAND_SCHEMA",
+                            "message": "绝对运动缺少 Base XYZ 目标",
+                            "details": {},
+                        },
+                        parse_token=parse_token,
+                    )
+                proposal_request = MoveToEntryRequest(
+                    command_id=parsed.command.command_id,
+                    entry_point=parsed.command.entry_point,
+                    tcp=self._real_config.tool.tcp_name,
+                    orientation_policy="hold_current_actual_orientation",
+                    speed_mm_s=self.orchestrator.policy.move_speed_mm_s,
+                )
+                proposal_method = self.robot.create_move_to_entry_proposal
             try:
                 proposal_record = await asyncio.to_thread(
-                    self.robot.create_move_relative_proposal,
+                    proposal_method,
                     proposal_request,
                 )
                 if proposal_record.status != CommandExecutionStatus.QUEUED:
@@ -694,6 +753,7 @@ class WebRuntime:
                     self.robot.confirm_motion_proposal,
                     command.command_id,
                     proposal.fingerprint,
+                    RobotCommandKind(proposal.envelope.command_kind.value),
                 )
                 if confirmed_record.status != CommandExecutionStatus.RUNNING:
                     raise RuntimeError("motion proposal was not accepted for dispatch")

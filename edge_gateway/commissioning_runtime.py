@@ -28,9 +28,6 @@ from .watchdog import SourceStampWatchdog, StateWatchdog
 from surgical_contracts import Pose6D, RobotTelemetry
 
 
-STATIONARY_OBSERVATION_S = 1.0
-
-
 @dataclass(frozen=True)
 class LocalObservation:
     telemetry: RobotTelemetry
@@ -440,44 +437,6 @@ def read_motion_feedback(
     )
 
 
-def observe_stationary(
-    sampler: LocalDataSheetSampler, *, duration_s: float = STATIONARY_OBSERVATION_S,
-    poll_s: float = 0.05,
-) -> None:
-    """Short pre-motion stationary observation; any unexpected motion aborts."""
-    from scipy.spatial.transform import Rotation
-
-    initial = sampler.snapshot().sample
-    start_pose = initial.base_pose[:3]
-    start_joints = initial.joint_positions_deg
-    start_orientation = Rotation.from_quat(fixed_xyz_quaternion(initial.base_pose[3:6]))
-    mode = (initial.auto_mode, initial.reduced_mode)
-    if (
-        initial.moving or initial.fsm_code != 33 or not initial.enabled
-        or not initial.in_position
-        or initial.free_drive_mode or initial.force_control_state or initial.paused
-    ):
-        raise ValueError("robot is not stationary, enabled and READY")
-    end_ns = time.monotonic_ns() + int(duration_s * 1_000_000_000)
-    while time.monotonic_ns() < end_ns:
-        sample = sampler.snapshot().sample
-        if (
-            sample.moving or sample.fsm_code != 33 or not sample.enabled
-            or not sample.in_position or sample.paused
-            or sample.free_drive_mode or sample.force_control_state
-            or not _same_override(sample.override, initial.override)
-            or (sample.auto_mode, sample.reduced_mode) != mode
-            or math.dist(sample.base_pose[:3], start_pose) > 0.25
-            or max(abs(a - b) for a, b in zip(sample.joint_positions_deg, start_joints)) > 0.1
-            or math.degrees((
-                start_orientation.inv()
-                * Rotation.from_quat(fixed_xyz_quaternion(sample.base_pose[3:6]))
-            ).magnitude()) > 0.1
-        ):
-            raise ValueError("robot moved or changed safety mode during observation")
-        time.sleep(poll_s)
-
-
 def make_approval(config: RealRobotConfig, *, package_version: str) -> MotionApproval:
     """Build motion approval directly from the configured YAML limits."""
     from .commissioning_cli import effective_first_motion_caps
@@ -498,7 +457,10 @@ def make_approval(config: RealRobotConfig, *, package_version: str) -> MotionApp
         max_speed_mm_s=caps["max_speed_mm_s"],
         max_acceleration_mm_s2=caps["max_acceleration_mm_s2"],
         max_step_mm=caps["max_step_mm"],
-        max_start_drift_mm=0.25, max_start_rotation_deg=0.5,
+        max_absolute_displacement_mm=config.limits.max_absolute_displacement_mm,
+        max_start_drift_mm=config.arrival.position_tolerance_mm,
+        max_start_rotation_deg=config.arrival.orientation_tolerance_deg,
+        path_sample_step_mm=config.arrival.position_tolerance_mm,
         state_stale_ms=config.deadlines.state_stale_ms,
         ready_fsm_code=33,
         controller_override=config.motion.controller_override,
@@ -506,7 +468,7 @@ def make_approval(config: RealRobotConfig, *, package_version: str) -> MotionApp
 
 
 def make_path_ik(config: RealRobotConfig, start: RobotTelemetry):
-    """Use the Step 8 calibrated E05-Pro model for every 0.1 mm path sample."""
+    """Build the Step 8 calibrated E05-Pro IK checker for one held orientation."""
     import numpy as np
     from scipy.spatial.transform import Rotation
 
@@ -534,7 +496,10 @@ def make_path_ik(config: RealRobotConfig, start: RobotTelemetry):
     position_error = math.dist(fk[:3, 3], actual_pose.translation_mm)
     orientation = Rotation.from_quat(actual_pose.quaternion_xyzw)
     angle_error_deg = math.degrees((orientation.inv() * Rotation.from_matrix(fk[:3, :3])).magnitude())
-    if position_error > 0.5 or angle_error_deg > 0.5:
+    if (
+        position_error > config.arrival.position_tolerance_mm
+        or angle_error_deg > config.arrival.orientation_tolerance_deg
+    ):
         raise ValueError("current FK disagrees with actual Base flange pose")
     previous = np.asarray(start.joint_positions_deg, dtype=float)
 
@@ -568,14 +533,12 @@ def validate_final_observation(
         raise ValueError("safety state or controller setup changed after proposal")
     if a.actual_pose_robot_base is None or b.actual_pose_robot_base is None or math.dist(
         a.actual_pose_robot_base.translation_mm, b.actual_pose_robot_base.translation_mm,
-    ) > 0.25:
+    ) > config.arrival.position_tolerance_mm:
         raise ValueError("actual start drifted after proposal")
-    if (
-        a.joint_positions_deg is None or b.joint_positions_deg is None
-        or max(abs(x - y) for x, y in zip(a.joint_positions_deg, b.joint_positions_deg)) > 0.1
-    ):
-        raise ValueError("actual joints changed after proposal")
     orientation_a = Rotation.from_quat(a.actual_pose_robot_base.quaternion_xyzw)
     orientation_b = Rotation.from_quat(b.actual_pose_robot_base.quaternion_xyzw)
-    if math.degrees((orientation_a.inv() * orientation_b).magnitude()) > 0.1:
+    if (
+        math.degrees((orientation_a.inv() * orientation_b).magnitude())
+        > config.arrival.orientation_tolerance_deg
+    ):
         raise ValueError("actual flange orientation changed after proposal")

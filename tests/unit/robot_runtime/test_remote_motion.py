@@ -91,6 +91,7 @@ def enabled_provider():
             ucs_name="Base",
             max_speed_mm_s=5,
             max_step_mm=10,
+            max_absolute_displacement_mm=10,
         ),
     )
     return sessions, provider, session_id

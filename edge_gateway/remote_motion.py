@@ -54,7 +54,10 @@ class RemoteMotionExecutor:
     def execute(
         self, envelope: RobotCommandEnvelope, fingerprint: str,
     ) -> RobotCommandResult:
-        if envelope.command_kind != GatewayCommandKind.MOVE_RELATIVE:
+        if envelope.command_kind not in {
+            GatewayCommandKind.MOVE_RELATIVE,
+            GatewayCommandKind.MOVE_TO_ENTRY,
+        }:
             return self._failure(envelope, ErrorCode.OPERATION_NOT_ENABLED)
         if command_fingerprint(envelope) != fingerprint:
             return self._failure(envelope, ErrorCode.COMMAND_CONFLICT)

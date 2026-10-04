@@ -147,20 +147,22 @@ import sys
 c = load_real_config(sys.argv[1])
 print(str(c.joint_mapping.sign is not None and c.base_to_sofa.translation_mm is not None).lower())
 ' "$REAL_CONFIG_PATH")" || fail "could not inspect Step 8 calibration fields."
-    read -r REAL_COMMAND_SPEED REAL_MAX_SPEED <<<"$(
+    read -r REAL_COMMAND_SPEED REAL_MAX_SPEED REAL_MAX_STEP <<<"$(
         PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
             "$CONFIG_PYTHON" -c '
 from robot_runtime.real_config import load_real_config
 import sys
 c = load_real_config(sys.argv[1])
-print(c.motion.speed_mm_s, c.limits.max_speed_mm_s)
+print(c.motion.speed_mm_s, c.limits.max_speed_mm_s, c.limits.max_step_mm)
 ' "$REAL_CONFIG_PATH"
     )" || fail "could not read real motion speed settings."
     # In real mode the checked-in robot YAML is the single source of truth for
     # both the speed displayed in the web proposal and the Mac-side cap.
     ROBOT_MOVE_SPEED_MM_S="$REAL_COMMAND_SPEED"
     MAX_ROBOT_SPEED_MM_S="$REAL_MAX_SPEED"
-    export REAL_CONFIG_PATH ROBOT_MOVE_SPEED_MM_S MAX_ROBOT_SPEED_MM_S
+    MAX_TRANSLATION_PER_COMMAND_MM="$REAL_MAX_STEP"
+    export REAL_CONFIG_PATH ROBOT_MOVE_SPEED_MM_S MAX_ROBOT_SPEED_MM_S \
+        MAX_TRANSLATION_PER_COMMAND_MM
     if ! $CHECK_CONFIG || [[ -n "${GATEWAY_AUTH_SECRET_FILE:-}" || -n "${GATEWAY_EXPECTED_ID:-}" ]]; then
         [[ -n "${GATEWAY_AUTH_SECRET_FILE:-}" && -n "${GATEWAY_EXPECTED_ID:-}" ]] \
             || fail "real mode requires both GATEWAY_AUTH_SECRET_FILE and GATEWAY_EXPECTED_ID."

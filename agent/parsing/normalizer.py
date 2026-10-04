@@ -33,6 +33,7 @@ MODEL_RELATIVE_FIELD_MAP = {
     "relative_distance_mm": "distance_mm",
     "relative_frame": "frame",
     "relative_distance_source": "distance_source",
+    "relative_delta_mm": "delta_mm",
 }
 TOP_LEVEL_FIELDS = {
     "intent",
@@ -46,7 +47,9 @@ TOP_LEVEL_FIELDS = {
 } | set(MODEL_RELATIVE_FIELD_MAP)
 IGNORED_MODEL_FIELDS = {"command_id", "schema_version"}
 POINT_FIELDS = {"x", "y", "z", "unit", "frame", "source"}
-RELATIVE_FIELDS = {"axis", "direction", "distance_mm", "frame", "distance_source"}
+RELATIVE_FIELDS = {
+    "axis", "direction", "distance_mm", "delta_mm", "frame", "distance_source",
+}
 ALLOWED_MISSING_FIELDS = {
     "intent",
     "entry_point",
@@ -69,6 +72,7 @@ ALLOWED_MISSING_FIELDS = {
     "relative_motion.direction",
     "relative_motion.frame",
     "relative_motion.distance_mm",
+    "relative_motion.delta_mm",
     "entry_point_3d",
     "target_point_3d",
 }
@@ -336,13 +340,39 @@ class CommandNormalizer:
             )
 
         missing: list[str] = []
+        vector_value = value.get("delta_mm")
+        vector: tuple[float, float, float] | None = None
+        if vector_value is not None:
+            if any(value.get(name) is not None for name in ("axis", "direction", "distance_mm")):
+                raise self._invalid(
+                    "relative_motion cannot mix an XYZ vector with axis fields"
+                )
+            if not isinstance(vector_value, (list, tuple)) or len(vector_value) != 3:
+                raise self._invalid("relative_motion.delta_mm must contain [dx, dy, dz]")
+            parsed_vector: list[float] = []
+            for component in vector_value:
+                if isinstance(component, bool):
+                    raise self._invalid("relative_motion.delta_mm must contain finite numbers")
+                try:
+                    number = float(component)
+                except (TypeError, ValueError) as error:
+                    raise self._invalid(
+                        "relative_motion.delta_mm must contain finite numbers"
+                    ) from error
+                if not isfinite(number):
+                    raise self._invalid("relative_motion.delta_mm must contain finite numbers")
+                parsed_vector.append(number)
+            if all(number == 0.0 for number in parsed_vector):
+                raise self._invalid("relative_motion.delta_mm cannot be zero")
+            vector = tuple(parsed_vector)
+
         try:
-            axis = Axis(value.get("axis"))
+            axis = None if vector is not None else Axis(value.get("axis"))
         except (TypeError, ValueError):
             axis = None
             missing.append("relative_motion.axis")
         try:
-            direction = Direction(value.get("direction"))
+            direction = None if vector is not None else Direction(value.get("direction"))
         except (TypeError, ValueError):
             direction = None
             missing.append("relative_motion.direction")
@@ -361,7 +391,10 @@ class CommandNormalizer:
                 frame = None
 
         distance = value.get("distance_mm")
-        if distance is None:
+        if vector is not None:
+            distance_mm = None
+            distance_source = DistanceSource.USER_PROVIDED
+        elif distance is None:
             distance_mm = self.settings.default_relative_step_mm
             distance_source = DistanceSource.CONFIGURED_DEFAULT
         else:
@@ -384,7 +417,17 @@ class CommandNormalizer:
 
         if missing:
             return None, missing
-        assert axis is not None and direction is not None and frame is not None
+        assert frame is not None
+        if vector is not None:
+            return (
+                {
+                    "delta_mm": vector,
+                    "frame": frame,
+                    "distance_source": distance_source,
+                },
+                [],
+            )
+        assert axis is not None and direction is not None
         return (
             {
                 "axis": axis,
@@ -637,9 +680,15 @@ class CommandNormalizer:
         if intent == CommandIntent.PUNCTURE:
             return "解析到入点和靶点；仅准备入点定位及后续路径规划。"
         if intent == CommandIntent.MOVE_TO_ENTRY:
-            return "解析到入点；仅移动针尖到入点。"
+            return "解析到绝对 XYZ 位置；仅移动机械臂到该位置。"
         if intent == CommandIntent.MOVE_RELATIVE:
             motion = payload["relative_motion"]
+            if motion.get("delta_mm") is not None:
+                dx, dy, dz = motion["delta_mm"]
+                return (
+                    f"机械臂沿 {motion['frame'].value} 组合相对移动 "
+                    f"[dX={dx:g}, dY={dy:g}, dZ={dz:g}] 毫米。"
+                )
             sign = "+" if motion["direction"] == Direction.POSITIVE else "-"
             return (
                 f"机械臂沿 {motion['frame'].value} {sign}{motion['axis'].value.upper()} "

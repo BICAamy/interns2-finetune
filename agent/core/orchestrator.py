@@ -49,6 +49,8 @@ class OrchestrationPolicy:
     move_speed_mm_s: float = 5.0
     max_speed_mm_s: float = 10.0
     expected_runtime_mode: RuntimeMode = RuntimeMode.SIMULATION
+    move_tcp_name: str = "needle_tip"
+    entry_orientation_policy: str = "configured_safe_orientation"
 
     def __post_init__(self) -> None:
         if self.entry_tolerance_mm <= 0:
@@ -61,6 +63,8 @@ class OrchestrationPolicy:
             raise ValueError("max_speed_mm_s must be greater than zero")
         if self.move_speed_mm_s > self.max_speed_mm_s:
             raise ValueError("move_speed_mm_s cannot exceed max_speed_mm_s")
+        if not self.move_tcp_name or not self.entry_orientation_policy:
+            raise ValueError("entry motion TCP and orientation policy cannot be empty")
 
 
 @dataclass(frozen=True)
@@ -477,6 +481,8 @@ class SurgicalTaskOrchestrator:
         request = MoveToEntryRequest(
             command_id=command.command_id,
             entry_point=command.entry_point,
+            tcp=self.policy.move_tcp_name,
+            orientation_policy=self.policy.entry_orientation_policy,
             speed_mm_s=self.policy.move_speed_mm_s,
         )
         try:

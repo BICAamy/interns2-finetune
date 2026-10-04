@@ -29,8 +29,9 @@ from robot_runtime.providers.huayan_real import HuayanRealStubProvider
 from robot_runtime.real_config import load_real_config
 from robot_runtime.remote_motion import RemoteMotionPolicy
 from surgical_contracts import (
-    ErrorCode, GatewayCommandKind, RobotCommandResult, SetEnabledRequest,
-    ToolStatus, command_fingerprint,
+    CommandIntent, CoordinateFrame, CoordinateSource, DistanceUnit, ErrorCode,
+    GatewayCommandKind, ParsedCommand, Point3D, RelativeMotion,
+    RobotCommandResult, SetEnabledRequest, ToolStatus, command_fingerprint,
 )
 from tests.fakes.huayan_controller import FakeHuayanController
 from tests.integration.test_agent_web import StubParser, relative_command, settings
@@ -67,7 +68,7 @@ class _ActualFeedbackObserver:
         pass
 
 
-def test_web_confirmation_runs_one_remote_fake_motion_from_actual_feedback(tmp_path: Path) -> None:
+def test_web_confirmation_runs_combined_and_absolute_fake_motion(tmp_path: Path) -> None:
     secret_file = tmp_path / "gateway-auth.local"
     secret_file.write_bytes(SECRET)
     os.chmod(secret_file, 0o600)
@@ -105,6 +106,7 @@ def test_web_confirmation_runs_one_remote_fake_motion_from_actual_feedback(tmp_p
             ucs_name="Base",
             max_speed_mm_s=config.limits.max_speed_mm_s,
             max_step_mm=config.limits.max_step_mm,
+            max_absolute_displacement_mm=config.limits.max_absolute_displacement_mm,
         ),
     )
     robot_port = _free_port()
@@ -200,7 +202,10 @@ def test_web_confirmation_runs_one_remote_fake_motion_from_actual_feedback(tmp_p
             )
 
             def command_handler(envelope, fingerprint):
-                if envelope.command_kind == GatewayCommandKind.MOVE_RELATIVE:
+                if envelope.command_kind in {
+                    GatewayCommandKind.MOVE_RELATIVE,
+                    GatewayCommandKind.MOVE_TO_ENTRY,
+                }:
                     return executor.execute(envelope, fingerprint)
                 if (
                     envelope.command_kind != GatewayCommandKind.SET_ENABLED
@@ -307,49 +312,114 @@ def test_web_confirmation_runs_one_remote_fake_motion_from_actual_feedback(tmp_p
                     time.sleep(0.02)
                 else:
                     raise AssertionError("enabled feedback did not reach robot-runtime")
-                proposal_response = web.post(
-                    f"/api/sessions/{session_id}/commands/text",
-                    json={"prompt": "沿 Base +Z 移动 8 mm"},
-                )
-                assert proposal_response.status_code == 200
-                proposed = proposal_response.json()
-                assert proposed["status"] == "awaiting_confirmation"
-                proposal = proposed["motion_proposal"]
-                assert proposal["executable"] is False
-                assert proposal["web_confirmed"] is False
-                assert len(proposal["fingerprint"]) == 64
-                assert not any(frame.startswith(b"WayPoint,") for frame in fake.received_commands)
+                def execute(command: ParsedCommand, prompt: str, *, reject_bad_fingerprint: bool = False):
+                    runtime.parser = StubParser(command)
+                    proposal_response = web.post(
+                        f"/api/sessions/{session_id}/commands/text",
+                        json={"prompt": prompt},
+                    )
+                    assert proposal_response.status_code == 200
+                    proposed = proposal_response.json()
+                    assert proposed["status"] == "awaiting_confirmation"
+                    proposal = proposed["motion_proposal"]
+                    assert proposal["executable"] is False
+                    assert proposal["web_confirmed"] is False
+                    assert len(proposal["fingerprint"]) == 64
+                    before_count = len([
+                        frame for frame in fake.received_commands
+                        if frame.startswith(b"WayPoint,")
+                    ])
+                    if reject_bad_fingerprint:
+                        mismatch = web.post(
+                            f"/api/sessions/{session_id}/confirm",
+                            json={"fingerprint": "0" * 64},
+                        )
+                        assert mismatch.status_code == 409
+                        assert len([
+                            frame for frame in fake.received_commands
+                            if frame.startswith(b"WayPoint,")
+                        ]) == before_count
+                    confirmed = web.post(
+                        f"/api/sessions/{session_id}/confirm",
+                        json={"fingerprint": proposal["fingerprint"]},
+                    )
+                    assert confirmed.status_code == 202
+                    duplicate = web.post(
+                        f"/api/sessions/{session_id}/confirm",
+                        json={"fingerprint": proposal["fingerprint"]},
+                    )
+                    assert duplicate.status_code == 409
+                    deadline = time.monotonic() + 6
+                    final = None
+                    while time.monotonic() < deadline:
+                        final = web.get(f"/api/sessions/{session_id}").json()
+                        if final["status"] in {"completed", "failed"}:
+                            break
+                        time.sleep(0.03)
+                    assert final is not None and final["status"] == "completed", json.dumps(final, ensure_ascii=False)
+                    assert len([
+                        frame for frame in fake.received_commands
+                        if frame.startswith(b"WayPoint,")
+                    ]) == before_count + 1
+                    return final
 
-                mismatch = web.post(
-                    f"/api/sessions/{session_id}/confirm",
-                    json={"fingerprint": "0" * 64},
+                # Deliberately exceeds the old code-only 20 mm cap. Real mode
+                # must use the checked-in YAML max_step_mm instead.
+                combined_delta = (30.0, -3.0, 5.0)
+                combined = ParsedCommand(
+                    command_id="step12-web-combined",
+                    intent=CommandIntent.MOVE_RELATIVE,
+                    relative_motion=RelativeMotion(
+                        delta_mm=combined_delta,
+                        frame=CoordinateFrame.ROBOT_BASE,
+                    ),
+                    summary="Base 组合相对位移",
                 )
-                assert mismatch.status_code == 409
-                assert not any(frame.startswith(b"WayPoint,") for frame in fake.received_commands)
+                combined_final = execute(
+                    combined,
+                    "Base 坐标系 X+30、Y-3、Z+5 毫米",
+                    reject_bad_fingerprint=True,
+                )
+                after_combined = robot_http.get_telemetry().actual_pose_robot_base
+                assert all(
+                    abs(actual - start - delta) < 0.01
+                    for actual, start, delta in zip(
+                        after_combined.translation_mm, actual_before, combined_delta,
+                    )
+                )
+                assert abs(combined_final["current_tcp"]["z"] - after_combined.translation_mm[2]) < 0.01
 
-                confirmed = web.post(
-                    f"/api/sessions/{session_id}/confirm",
-                    json={"fingerprint": proposal["fingerprint"]},
+                absolute_xyz = tuple(
+                    value + delta
+                    for value, delta in zip(after_combined.translation_mm, (-2.0, 4.0, 1.0))
                 )
-                assert confirmed.status_code == 202
-                duplicate = web.post(
-                    f"/api/sessions/{session_id}/confirm",
-                    json={"fingerprint": proposal["fingerprint"]},
+                absolute = ParsedCommand(
+                    command_id="step12-web-absolute",
+                    intent=CommandIntent.MOVE_TO_ENTRY,
+                    entry_point=Point3D(
+                        x=absolute_xyz[0], y=absolute_xyz[1], z=absolute_xyz[2],
+                        frame=CoordinateFrame.ROBOT_BASE,
+                        unit=DistanceUnit.MILLIMETER,
+                        source=CoordinateSource.USER_TEXT,
+                    ),
+                    summary="移动到 Base 绝对 XYZ，保持当前实际姿态",
                 )
-                assert duplicate.status_code == 409
-
-                deadline = time.monotonic() + 6
-                final = None
-                while time.monotonic() < deadline:
-                    final = web.get(f"/api/sessions/{session_id}").json()
-                    if final["status"] in {"completed", "failed"}:
-                        break
-                    time.sleep(0.03)
-                assert final is not None and final["status"] == "completed", json.dumps(final, ensure_ascii=False)
-                assert len([x for x in fake.received_commands if x.startswith(b"WayPoint,")]) == 1
-                actual_after = robot_http.get_telemetry().actual_pose_robot_base.translation_mm
-                assert abs(actual_after[2] - actual_before[2] - 8.0) < 0.01
-                assert abs(final["current_tcp"]["z"] - actual_after[2]) < 0.01
+                execute(
+                    absolute,
+                    "移动到 Base 绝对 XYZ，保持当前实际姿态",
+                )
+                after_absolute = robot_http.get_telemetry().actual_pose_robot_base
+                assert all(
+                    abs(actual - target) < 0.01
+                    for actual, target in zip(after_absolute.translation_mm, absolute_xyz)
+                )
+                assert all(
+                    abs(actual - expected) < 1e-6
+                    for actual, expected in zip(
+                        after_absolute.quaternion_xyzw,
+                        after_combined.quaternion_xyzw,
+                    )
+                )
                 assert journal.unresolved() == ()
             assert not gateway_errors
     finally:

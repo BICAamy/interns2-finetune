@@ -317,7 +317,14 @@ export default function App() {
   const command = session?.normalized_command;
   const proposal = session?.motion_proposal as {
     fingerprint?: string;
-    envelope?: { expected_start_pose_robot_base?: { translation_mm?: number[] }; payload?: { translation_mm?: number[]; speed_mm_s?: number } };
+    envelope?: {
+      expected_start_pose_robot_base?: { translation_mm?: number[] };
+      payload?: {
+        translation_mm?: number[];
+        entry_point?: Point3D;
+        speed_mm_s?: number;
+      };
+    };
   } | null | undefined;
   const isBusy = session ? busyStatuses.has(session.status) : true;
   const canSubmit = Boolean(
@@ -736,14 +743,28 @@ export default function App() {
               {speechError && <div className="speech-error">{speechError}</div>}
             </div>
             <div className="example-row">
-              <button className="text-button" onClick={() => setPrompt(DEFAULT_PROMPT)}>
-                填入点/靶点示例
-              </button>
+              {runtimeMode !== "real" && (
+                <button className="text-button" onClick={() => setPrompt(DEFAULT_PROMPT)}>
+                  填入点/靶点示例
+                </button>
+              )}
               <button
                 className="text-button"
                 onClick={() => setPrompt("机械臂沿基座坐标系 Z 轴正方向移动 8 毫米")}
               >
-                填相对移动示例
+                填单轴位移示例
+              </button>
+              <button
+                className="text-button"
+                onClick={() => setPrompt("机械臂在 Base 坐标系相对移动：X 加 8 毫米，Y 减 3 毫米，Z 加 5 毫米")}
+              >
+                填组合位移示例
+              </button>
+              <button
+                className="text-button"
+                onClick={() => setPrompt("机械臂移动到 Base 坐标系绝对位置 X=550 毫米，Y=50 毫米，Z=300 毫米，保持当前实际姿态不变")}
+              >
+                填绝对 XYZ 示例
               </button>
             </div>
             <label className="upload-zone">
@@ -789,7 +810,7 @@ export default function App() {
             </div>
             <div className="safety-note">
               <strong>执行边界</strong>
-              <span>{runtimeMode === "real" ? "只允许已生成 proposal 的单轴 move_relative；网页只确认一次 fingerprint，Mac 自动创建 single-use ARM。" : "确认只会移动机械臂并请求不可执行的路径预览，当前版本不会执行穿刺。"}</span>
+              <span>{runtimeMode === "real" ? "允许 Base 单轴/组合相对位移与绝对 XYZ；网页只确认一次 fingerprint，Mac 按真实起点复算并检查 YAML 限制。" : "确认只会移动机械臂并请求不可执行的路径预览，当前版本不会执行穿刺。"}</span>
               {runtimeMode === "real" && proposal?.fingerprint && (
                 <code>fingerprint {proposal.fingerprint}</code>
               )}
@@ -811,8 +832,9 @@ export default function App() {
               <div className="relative-card">
                 <span>相对运动</span>
                 <strong>
-                  {String(command.relative_motion.axis).toUpperCase()} 轴 · {command.relative_motion.direction === "positive" ? "+" : "−"}
-                  {command.relative_motion.distance_mm} mm
+                  {command.relative_motion.delta_mm
+                    ? `ΔX ${command.relative_motion.delta_mm[0]} · ΔY ${command.relative_motion.delta_mm[1]} · ΔZ ${command.relative_motion.delta_mm[2]} mm`
+                    : `${String(command.relative_motion.axis).toUpperCase()} 轴 · ${command.relative_motion.direction === "positive" ? "+" : "−"}${command.relative_motion.distance_mm} mm`}
                 </strong>
               </div>
             )}

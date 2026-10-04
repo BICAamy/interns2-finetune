@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -11,14 +10,6 @@ from edge_gateway import commissioning_runtime as runtime
 from surgical_contracts import RobotTelemetry
 from tests.integration.test_real_motion_fake import readback, telemetry
 from tests.unit.edge_gateway.test_commissioning_cli import config
-
-
-def test_gate_d_stationary_observation_uses_the_declared_positive_duration():
-    assert runtime.STATIONARY_OBSERVATION_S > 0
-    assert (
-        inspect.signature(runtime.observe_stationary).parameters["duration_s"].default
-        == runtime.STATIONARY_OBSERVATION_S
-    )
 
 
 def test_motion_feedback_preserves_raw_sources_and_combines_conservatively(monkeypatch):
@@ -54,33 +45,21 @@ def test_motion_feedback_preserves_raw_sources_and_combines_conservatively(monke
     assert result.telemetry.potentially_moving is True
 
 
-def test_stationary_observation_rejects_joint_motion_even_with_fixed_tcp():
-    def sample(j1):
-        return SimpleNamespace(
-            base_pose=(500.0, 20.0, 240.0, 0.0, 0.0, 0.0),
-            joint_positions_deg=(j1, 0.0, 90.0, 0.0, 90.0, 0.0),
-            auto_mode=False, reduced_mode=False, moving=False, fsm_code=33,
-            enabled=True, in_position=True,
-            free_drive_mode=False, force_control_state=0, paused=False,
-            override=1.0,
-        )
-
-    samples = iter((sample(0.0), sample(0.2)))
-    sampler = SimpleNamespace(snapshot=lambda: SimpleNamespace(sample=next(samples)))
-    with pytest.raises(ValueError, match="moved or changed"):
-        runtime.observe_stationary(sampler, duration_s=0.1, poll_s=0.0)
-
-
-def test_final_guard_requires_new_sample_and_unchanged_joints():
+def test_final_guard_requires_new_sample_and_yaml_pose_tolerance():
     before = runtime.LocalObservation(telemetry(), readback(), None)
     stale = runtime.LocalObservation(telemetry(sequence=10), readback(), None)
     with pytest.raises(ValueError, match="freshness"):
         runtime.validate_final_observation(before, stale, config())
 
-    moved = telemetry(sequence=11).model_copy(update={
-        "joint_positions_deg": (0.2, 0, 90, 0, 90, 0),
-    })
-    with pytest.raises(ValueError, match="joints changed"):
+    moved = telemetry(sequence=11, x=101.0)
+    with pytest.raises(ValueError, match="start drifted"):
         runtime.validate_final_observation(
             before, runtime.LocalObservation(moved, readback(), None), config(),
         )
+
+    within_tolerance = telemetry(sequence=11, x=100.1).model_copy(update={
+        "joint_positions_deg": (0.2, 0, 90, 0, 90, 0),
+    })
+    runtime.validate_final_observation(
+        before, runtime.LocalObservation(within_tolerance, readback(), None), config(),
+    )

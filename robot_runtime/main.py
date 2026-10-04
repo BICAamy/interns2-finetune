@@ -76,6 +76,7 @@ def app_from_environment():
             ucs_name="Base",
             max_speed_mm_s=config.limits.max_speed_mm_s,
             max_step_mm=config.limits.max_step_mm,
+            max_absolute_displacement_mm=config.limits.max_absolute_displacement_mm,
         )
         return create_app(
             provider=HuayanRealProvider(

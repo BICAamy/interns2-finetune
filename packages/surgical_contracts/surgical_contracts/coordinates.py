@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from math import sqrt
 
-from pydantic import Field, FiniteFloat
+from pydantic import Field, FiniteFloat, model_validator
 
 from .base import ContractModel
 
@@ -86,15 +86,32 @@ class Point3D(ContractModel):
 
 
 class RelativeMotion(ContractModel):
-    """A positive distance along one signed Cartesian axis."""
+    """A Cartesian translation, expressed as one axis or a signed XYZ vector."""
 
-    axis: Axis
-    direction: Direction
-    distance_mm: FiniteFloat = Field(gt=0)
+    axis: Axis | None = None
+    direction: Direction | None = None
+    distance_mm: FiniteFloat | None = Field(default=None, gt=0)
+    delta_mm: tuple[FiniteFloat, FiniteFloat, FiniteFloat] | None = None
     frame: CoordinateFrame = CoordinateFrame.ROBOT_BASE
     distance_source: DistanceSource = DistanceSource.USER_PROVIDED
 
+    @model_validator(mode="after")
+    def validate_representation(self) -> "RelativeMotion":
+        legacy = (self.axis, self.direction, self.distance_mm)
+        if self.delta_mm is not None:
+            if any(value is not None for value in legacy):
+                raise ValueError("relative motion cannot mix axis and XYZ vector forms")
+            if all(float(value) == 0.0 for value in self.delta_mm):
+                raise ValueError("relative XYZ vector cannot be zero")
+        elif any(value is None for value in legacy):
+            raise ValueError("relative motion requires either a complete axis move or XYZ vector")
+        return self
+
     def translation_mm(self) -> tuple[float, float, float]:
+        if self.delta_mm is not None:
+            return tuple(float(value) for value in self.delta_mm)
+        assert self.axis is not None and self.direction is not None
+        assert self.distance_mm is not None
         signed_distance = float(self.distance_mm)
         if self.direction == Direction.NEGATIVE:
             signed_distance = -signed_distance

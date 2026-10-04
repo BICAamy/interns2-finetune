@@ -74,6 +74,18 @@ class ParsedCommandTests(unittest.TestCase):
                 relative_motion=relative,
             )
 
+    def test_combined_relative_motion_uses_signed_xyz_vector(self):
+        relative = RelativeMotion(delta_mm=(8, -3, 5))
+        self.assertEqual(relative.translation_mm(), (8.0, -3.0, 5.0))
+
+        with self.assertRaisesRegex(ValidationError, "cannot mix"):
+            RelativeMotion(
+                axis=Axis.X,
+                direction=Direction.POSITIVE,
+                distance_mm=1,
+                delta_mm=(1, 2, 3),
+            )
+
     def test_clarify_can_retain_partial_non_executable_coordinates(self):
         command = ParsedCommand(
             command_id="cmd-clarify",

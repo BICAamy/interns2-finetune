@@ -21,7 +21,7 @@ from .huayan.real_motion_client import LocalRealMotionClient
 from .huayan.motion_codec import LinearWaypoint
 from .preflight import (
     ControllerReadback, LocalArm, MotionApproval, MotionLease,
-    fingerprint, preflight_relative, safety_state_hash,
+    fingerprint, preflight_motion, safety_state_hash,
 )
 
 
@@ -112,7 +112,7 @@ class LocalMotionTrial:
         clock_injected = now_monotonic_ns is not None
         now_monotonic_ns = time.monotonic_ns() if now_monotonic_ns is None else now_monotonic_ns
         try:
-            target = preflight_relative(
+            target = preflight_motion(
                 envelope, snapshot, readback, self.approval, arm, leases,
                 self.path_ik, required_lease_owner=required_lease_owner,
                 now_ms=now_ms, now_monotonic_ns=now_monotonic_ns,

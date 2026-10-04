@@ -221,7 +221,10 @@ class EdgeGateway:
         try:
             if envelope.command_kind == GatewayCommandKind.SET_ENABLED:
                 return self._execute_set_enabled(envelope)
-            if envelope.command_kind == GatewayCommandKind.MOVE_RELATIVE:
+            if envelope.command_kind in {
+                GatewayCommandKind.MOVE_RELATIVE,
+                GatewayCommandKind.MOVE_TO_ENTRY,
+            }:
                 return self._execute_remote_motion(envelope, fingerprint)
             return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
         except Exception as exc:
@@ -334,8 +337,8 @@ class EdgeGateway:
     ) -> RobotCommandResult:
         from .command_journal import CommandJournal
         from .commissioning_runtime import (
-            make_approval, make_path_ik, observe_stationary,
-            read_local_observation, read_motion_feedback,
+            make_approval, make_path_ik, read_local_observation,
+            read_motion_feedback,
         )
         from .fake_motion import LocalMotionTiming, LocalMotionTrial
         from .huayan.adapter import read_current_fsm, read_robot_state
@@ -413,7 +416,6 @@ class EdgeGateway:
             initial = snapshot()
             approval = make_approval(config, package_version=motion_client.package_version)
             path_ik = make_path_ik(config, initial)
-            observe_stationary(sampler)
             timing = LocalMotionTiming(
                 response_ms=config.deadlines.response_ms,
                 start_ms=config.deadlines.startup_ms,

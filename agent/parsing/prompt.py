@@ -30,7 +30,9 @@ def build_system_prompt(settings: AgentSettings) -> str:
 2. 不能把图像中的二维像素坐标当作三维机器人坐标。图片若没有经过三维标定，
    只能用于理解语义；需要三维坐标时返回 clarify。
 3. puncture 表示“准备完整穿刺任务”，必须同时有明确的入点和靶点。
-4. move_to_entry 只将针尖移动到入点，只要求入点，不要求靶点。
+4. move_to_entry 表示移动到一个绝对 XYZ 位置，只要求 entry_point，不要求靶点。
+   用户说“移动到 Base/基座坐标系 X=...、Y=...、Z=...”或“绝对位置”时使用该意图。
+   real 模式下只提取 Base XYZ，实际姿态由 Mac 保持当前反馈值，不生成姿态参数。
 5. move_relative 表示相对移动。用户使用自然方向词时，固定按照 robot_base 坐标系映射：
    “前/向前/前进” = +X，
    “后/向后/后退” = -X，
@@ -40,9 +42,10 @@ def build_system_prompt(settings: AgentSettings) -> str:
    “下/向下/降低” = -Z。
    这些方向词已经由系统明确定义，不得因为用户没有显式说 X/Y/Z 而返回 clarify。
    只有用户表达本身确实无法确定方向时才返回 clarify。
-   相对移动必须使用 relative_axis、relative_direction、relative_distance_mm、
-   relative_frame 和 relative_distance_source 这些扁平函数参数；
-   不要生成 relative_motion 参数。
+   单轴相对移动使用 relative_axis、relative_direction、relative_distance_mm、
+   relative_frame 和 relative_distance_source。用户明确要求两个或三个轴同时移动时，
+   使用 relative_delta_mm=[dX,dY,dZ]，各分量保留正负号，未移动的轴填 0；
+   不要同时填写单轴字段和 relative_delta_mm，也不要生成 relative_motion 参数。
 6. 对 move_relative 的移动距离按以下规则处理：
    - 若用户给出了明确距离，则填写 relative_distance_mm，并将 relative_distance_source 设为 user_provided。
    - 若用户使用“一点/一些/稍微”等明确表示“小幅移动但未给出具体距离”的词语，则省略 relative_distance_mm，并将 relative_distance_source 设为 configured_default；运行时会采用配置值
@@ -173,6 +176,16 @@ def build_submit_surgical_task_tool() -> dict[str, Any]:
                         "enum": ["user_provided", "configured_default"],
                         "description": "Distance source for move_relative; omit otherwise",
                     },
+                    "relative_delta_mm": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "minItems": 3,
+                        "maxItems": 3,
+                        "description": (
+                            "Signed [dX,dY,dZ] millimetres for a combined move_relative; "
+                            "omit for a single-axis move"
+                        ),
+                    },
                     "missing_fields": {
                         "type": "array",
                         "items": {
@@ -199,6 +212,7 @@ def build_submit_surgical_task_tool() -> dict[str, Any]:
                                 "relative_motion.direction",
                                 "relative_motion.frame",
                                 "relative_motion.distance_mm",
+                                "relative_motion.delta_mm",
                                 "entry_point_3d",
                                 "target_point_3d",
                             ],

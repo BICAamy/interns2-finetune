@@ -20,7 +20,7 @@ from edge_gateway.huayan.motion_codec import (
 )
 from edge_gateway.preflight import (
     FakeControllerReadback, FakeExternalWriterGuard, FakeMotionApproval, LocalArm, MotionLease,
-    fingerprint, safety_state_hash,
+    fingerprint, preflight_relative, safety_state_hash,
 )
 from surgical_contracts import (
     CoordinateFrame, DistanceUnit, GatewayCommandKind, LinkState,
@@ -80,7 +80,9 @@ def approval() -> FakeMotionApproval:
         joint_soft_limits_deg=((-170, 170),) * 6, joint_margin_deg=5,
         workspace_low_mm=(0, 0, 0), workspace_high_mm=(500, 500, 500),
         max_speed_mm_s=5, max_acceleration_mm_s2=10, max_step_mm=2,
+        max_absolute_displacement_mm=2,
         max_start_drift_mm=0.25, max_start_rotation_deg=0.5,
+        path_sample_step_mm=0.5,
         state_stale_ms=250, ready_fsm_code=33, controller_override=1.0,
     )
 
@@ -687,6 +689,28 @@ def test_arm_single_use_and_path_ik_fail_closed(tmp_path) -> None:
                              now_ms=BASE_MS, now_monotonic_ns=BASE_NS)
         finally:
             client.close()
+
+
+def test_path_sampling_count_scales_with_distance_and_yaml_tolerance() -> None:
+    command = envelope(translation=(2.0, 0.0, 0.0))
+    points: list[tuple[float, float, float]] = []
+
+    target = preflight_relative(
+        command,
+        telemetry(),
+        readback(),
+        approval(),
+        arm(command),
+        lease(),
+        lambda point: points.append(point) or ik(point),
+        now_ms=BASE_MS,
+        now_monotonic_ns=BASE_NS,
+    )
+
+    assert target.translation_mm == (102.0, 100.0, 100.0)
+    assert len(points) == 5
+    assert points[0] == (100.0, 100.0, 100.0)
+    assert points[-1] == (102.0, 100.0, 100.0)
 
 
 def test_prepared_journal_proves_not_sent_but_send_started_is_unknown(tmp_path) -> None:

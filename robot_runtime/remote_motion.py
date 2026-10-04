@@ -27,6 +27,8 @@ from surgical_contracts import (
     MotionSafetyLimits,
     MoveRelativeRequest,
     MoveRelativeResult,
+    MoveToEntryRequest,
+    MoveToEntryResult,
     Point3D,
     RobotCommandEnvelope,
     RobotCommandKind,
@@ -50,10 +52,15 @@ class RemoteMotionPolicy:
     ucs_name: str
     max_speed_mm_s: float
     max_step_mm: float
+    max_absolute_displacement_mm: float
     proposal_ttl_ms: int = 30_000
 
     def __post_init__(self) -> None:
-        numeric = (self.max_speed_mm_s, self.max_step_mm)
+        numeric = (
+            self.max_speed_mm_s,
+            self.max_step_mm,
+            self.max_absolute_displacement_mm,
+        )
         if not self.tcp_name or self.ucs_name != "Base":
             raise ValueError("remote motion requires an explicit TCP and Base UCS")
         if any(not math.isfinite(value) or value <= 0 for value in numeric):
@@ -83,7 +90,9 @@ class RemoteMotionStore:
         self._dispatched: set[str] = set()
 
     @staticmethod
-    def _request_key(request: MoveRelativeRequest) -> dict[str, object]:
+    def _request_key(
+        request: MoveRelativeRequest | MoveToEntryRequest,
+    ) -> dict[str, object]:
         return request.model_dump(mode="json")
 
     def _require_proposable_state(self) -> RobotTelemetry:
@@ -131,13 +140,6 @@ class RemoteMotionStore:
                 status_code=422,
                 command_id=request.command_id,
             )
-        if sum(abs(value) > 1e-12 for value in translation) != 1:
-            raise RobotRuntimeServiceError(
-                ErrorCode.OPERATION_NOT_ENABLED,
-                "remote move_relative currently allows one Cartesian axis per proposal",
-                status_code=422,
-                command_id=request.command_id,
-            )
         if distance > self.policy.max_step_mm or request.speed_mm_s > self.policy.max_speed_mm_s:
             raise RobotRuntimeServiceError(
                 ErrorCode.OUT_OF_WORKSPACE,
@@ -145,6 +147,50 @@ class RemoteMotionStore:
                 status_code=422,
                 command_id=request.command_id,
             )
+        return self._propose_motion(request, GatewayCommandKind.MOVE_RELATIVE)
+
+    def propose_absolute(
+        self, request: MoveToEntryRequest,
+    ) -> tuple[RobotCommandRecord, bool]:
+        target = request.entry_point
+        if (
+            target.frame != CoordinateFrame.ROBOT_BASE
+            or target.unit != DistanceUnit.MILLIMETER
+        ):
+            raise RobotRuntimeServiceError(
+                ErrorCode.INVALID_COORDINATE_FRAME,
+                "remote absolute XYZ requires robot_base millimetres",
+                status_code=422,
+                command_id=request.command_id,
+            )
+        if request.tcp != self.policy.tcp_name:
+            raise RobotRuntimeServiceError(
+                ErrorCode.OPERATION_NOT_ENABLED,
+                "absolute target TCP does not match the configured real TCP",
+                status_code=422,
+                command_id=request.command_id,
+            )
+        if request.orientation_policy != "hold_current_actual_orientation":
+            raise RobotRuntimeServiceError(
+                ErrorCode.OPERATION_NOT_ENABLED,
+                "real absolute XYZ must hold the current actual orientation",
+                status_code=422,
+                command_id=request.command_id,
+            )
+        if request.speed_mm_s > self.policy.max_speed_mm_s:
+            raise RobotRuntimeServiceError(
+                ErrorCode.OUT_OF_WORKSPACE,
+                "proposal exceeds configured remote motion limits",
+                status_code=422,
+                command_id=request.command_id,
+            )
+        return self._propose_motion(request, GatewayCommandKind.MOVE_TO_ENTRY)
+
+    def _propose_motion(
+        self,
+        request: MoveRelativeRequest | MoveToEntryRequest,
+        kind: GatewayCommandKind,
+    ) -> tuple[RobotCommandRecord, bool]:
         with self._lock:
             existing = self._records.get(request.command_id)
             if existing is not None:
@@ -165,11 +211,35 @@ class RemoteMotionStore:
                 )
 
             state = self._require_proposable_state()
+            if isinstance(request, MoveRelativeRequest):
+                distance = math.dist(
+                    (0.0, 0.0, 0.0),
+                    tuple(float(value) for value in request.translation_mm),
+                )
+            else:
+                distance = math.dist(
+                    state.actual_pose_robot_base.translation_mm,
+                    request.entry_point.as_tuple(),
+                )
+                if distance > self.policy.max_absolute_displacement_mm:
+                    raise RobotRuntimeServiceError(
+                        ErrorCode.OUT_OF_WORKSPACE,
+                        "absolute target exceeds configured displacement limit",
+                        status_code=422,
+                        command_id=request.command_id,
+                    )
+            if distance <= 1e-12 or distance > self.policy.max_step_mm:
+                raise RobotRuntimeServiceError(
+                    ErrorCode.OUT_OF_WORKSPACE,
+                    "proposal exceeds configured remote motion limits",
+                    status_code=422,
+                    command_id=request.command_id,
+                )
             now_ms = time.time_ns() // 1_000_000
             envelope = RobotCommandEnvelope(
                 gateway_session_id=state.gateway_session_id,
                 command_id=request.command_id,
-                command_kind=GatewayCommandKind.MOVE_RELATIVE,
+                command_kind=kind,
                 created_at_ms=now_ms,
                 expires_at_ms=now_ms + self.policy.proposal_ttl_ms,
                 based_on_robot_state_sequence=state.sequence,
@@ -194,7 +264,7 @@ class RemoteMotionStore:
             )
             record = RobotCommandRecord(
                 command_id=request.command_id,
-                kind=RobotCommandKind.MOVE_RELATIVE,
+                kind=RobotCommandKind(kind.value),
                 status=CommandExecutionStatus.QUEUED,
                 submitted_at_ms=now_ms,
                 updated_at_ms=now_ms,
@@ -437,21 +507,35 @@ class RemoteMotionStore:
                         "successful gateway motion result is missing actual final pose",
                         command_id=result.command_id,
                     )
-                payload = MoveRelativeResult(
-                    command_id=result.command_id,
-                    status=ToolStatus.SUCCESS,
-                    completed=True,
-                    final_tcp_position=Point3D(
-                        x=pose.translation_mm[0],
-                        y=pose.translation_mm[1],
-                        z=pose.translation_mm[2],
-                        frame=CoordinateFrame.ROBOT_BASE,
-                        unit=DistanceUnit.MILLIMETER,
-                        source=CoordinateSource.STRUCTURED_DATA,
-                    ),
-                    trajectory_id=result.controller_waypoint_id,
-                    message="Mac confirmed arrival from actual controller feedback",
+                final_point = Point3D(
+                    x=pose.translation_mm[0],
+                    y=pose.translation_mm[1],
+                    z=pose.translation_mm[2],
+                    frame=CoordinateFrame.ROBOT_BASE,
+                    unit=DistanceUnit.MILLIMETER,
+                    source=CoordinateSource.STRUCTURED_DATA,
                 )
+                if result.command_kind == GatewayCommandKind.MOVE_TO_ENTRY:
+                    requested = frame.envelope.payload
+                    assert isinstance(requested, MoveToEntryRequest)
+                    payload = MoveToEntryResult(
+                        command_id=result.command_id,
+                        status=ToolStatus.SUCCESS,
+                        reached=True,
+                        final_tcp_position=final_point,
+                        position_error_mm=final_point.distance_to(requested.entry_point),
+                        trajectory_id=result.controller_waypoint_id,
+                        message="Mac confirmed absolute XYZ arrival from actual controller feedback",
+                    )
+                else:
+                    payload = MoveRelativeResult(
+                        command_id=result.command_id,
+                        status=ToolStatus.SUCCESS,
+                        completed=True,
+                        final_tcp_position=final_point,
+                        trajectory_id=result.controller_waypoint_id,
+                        message="Mac confirmed arrival from actual controller feedback",
+                    )
                 status = CommandExecutionStatus.SUCCEEDED
                 error = None
             else:

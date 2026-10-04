@@ -178,8 +178,23 @@ class RobotRuntimeHTTPController:
         self._validate_record(record, request.command_id, RobotCommandKind.MOVE_RELATIVE)
         return record
 
+    def create_move_to_entry_proposal(
+        self, request: MoveToEntryRequest,
+    ) -> RobotCommandRecord:
+        record = self._model_request(
+            "POST",
+            "/v1/commands/move-to-entry",
+            RobotCommandRecord,
+            json=request.model_dump(mode="json"),
+        )
+        self._validate_record(record, request.command_id, RobotCommandKind.MOVE_TO_ENTRY)
+        return record
+
     def confirm_motion_proposal(
-        self, command_id: str, fingerprint: str,
+        self,
+        command_id: str,
+        fingerprint: str,
+        expected_kind: RobotCommandKind | None = None,
     ) -> RobotCommandRecord:
         record = self._model_request(
             "POST",
@@ -187,7 +202,16 @@ class RobotRuntimeHTTPController:
             RobotCommandRecord,
             json={"fingerprint": fingerprint},
         )
-        self._validate_record(record, command_id, RobotCommandKind.MOVE_RELATIVE)
+        if expected_kind is None:
+            if record.command_id != command_id or record.kind not in {
+                RobotCommandKind.MOVE_RELATIVE,
+                RobotCommandKind.MOVE_TO_ENTRY,
+            }:
+                raise RobotSimulationProtocolError(
+                    "confirmation response is not a motion command"
+                )
+        else:
+            self._validate_record(record, command_id, expected_kind)
         return record
 
     def set_enabled(

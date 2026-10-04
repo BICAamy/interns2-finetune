@@ -246,6 +246,23 @@ class InternS2AgentTests(unittest.TestCase):
         self.assertEqual(command.intent, CommandIntent.MOVE_RELATIVE)
         self.assertEqual(command.relative_motion.translation_mm(), (0.0, 0.0, 8.0))
 
+    def test_model_facing_combined_relative_vector_is_assembled(self):
+        arguments = base_arguments(
+            "move_relative",
+            relative_motion=None,
+            relative_delta_mm=[8, -3, 5],
+            relative_frame="robot_base",
+            relative_distance_source="user_provided",
+        )
+        agent, _client = make_agent(arguments)
+
+        command = agent.parse_command(
+            "机械臂在 Base 坐标系 X 加 8、Y 减 3、Z 加 5 毫米"
+        ).command
+
+        self.assertEqual(command.intent, CommandIntent.MOVE_RELATIVE)
+        self.assertEqual(command.relative_motion.translation_mm(), (8.0, -3.0, 5.0))
+
     def test_flattened_relative_fields_are_rejected_for_other_intents(self):
         arguments = base_arguments("stop", direction="positive")
         agent, _client = make_agent(arguments)

@@ -11,7 +11,7 @@ from typing import Callable, Literal
 
 from surgical_contracts import (
     CoordinateFrame, DistanceUnit, GatewayCommandKind, LinkState,
-    MoveRelativeRequest, Pose6D, RobotCommandEnvelope, RobotTelemetry,
+    MoveRelativeRequest, MoveToEntryRequest, Pose6D, RobotCommandEnvelope, RobotTelemetry,
     RuntimeMode, SourceFreshness, command_fingerprint,
 )
 
@@ -42,8 +42,10 @@ class MotionApproval:
     max_speed_mm_s: float
     max_acceleration_mm_s2: float
     max_step_mm: float
+    max_absolute_displacement_mm: float
     max_start_drift_mm: float
     max_start_rotation_deg: float
+    path_sample_step_mm: float
     state_stale_ms: float
     ready_fsm_code: int
     controller_override: float
@@ -59,15 +61,18 @@ class MotionApproval:
             *(v for pair in self.joint_soft_limits_deg for v in pair),
             self.joint_margin_deg, *self.workspace_low_mm, *self.workspace_high_mm,
             self.max_speed_mm_s, self.max_acceleration_mm_s2, self.max_step_mm,
-            self.max_start_drift_mm, self.max_start_rotation_deg, self.state_stale_ms,
+            self.max_absolute_displacement_mm,
+            self.max_start_drift_mm, self.max_start_rotation_deg,
+            self.path_sample_step_mm, self.state_stale_ms,
             self.controller_override,
         )
         if any(not math.isfinite(value) for value in numeric):
             raise ValueError("local motion limits must be finite")
         if any(value <= 0 for value in (
             self.joint_margin_deg, self.max_speed_mm_s, self.max_acceleration_mm_s2,
-            self.max_step_mm, self.max_start_drift_mm, self.max_start_rotation_deg,
-            self.state_stale_ms,
+            self.max_step_mm, self.max_absolute_displacement_mm,
+            self.max_start_drift_mm, self.max_start_rotation_deg,
+            self.path_sample_step_mm, self.state_stale_ms,
         )) or self.payload_kg < 0:
             raise ValueError("invalid local motion limits")
         if not 0.01 <= self.controller_override <= 1.0:
@@ -195,7 +200,7 @@ def _angle_deg(a: tuple[float, ...], b: tuple[float, ...]) -> float:
     return math.degrees(2 * math.acos(min(1.0, max(-1.0, dot))))
 
 
-def preflight_relative(
+def preflight_motion(
     envelope: RobotCommandEnvelope, snapshot: RobotTelemetry,
     readback: ControllerReadback, approval: MotionApproval,
     arm: LocalArm, leases: tuple[MotionLease, ...],
@@ -206,8 +211,14 @@ def preflight_relative(
     """Return an absolute target without I/O; consume ARM only after every check."""
     now_ms = time.time_ns() // 1_000_000 if now_ms is None else now_ms
     now_monotonic_ns = time.monotonic_ns() if now_monotonic_ns is None else now_monotonic_ns
-    if envelope.command_kind != GatewayCommandKind.MOVE_RELATIVE or not isinstance(envelope.payload, MoveRelativeRequest):
-        raise ValueError("local trial supports only single-axis move_relative")
+    if envelope.command_kind == GatewayCommandKind.MOVE_RELATIVE:
+        if not isinstance(envelope.payload, MoveRelativeRequest):
+            raise ValueError("move_relative envelope has the wrong payload")
+    elif envelope.command_kind == GatewayCommandKind.MOVE_TO_ENTRY:
+        if not isinstance(envelope.payload, MoveToEntryRequest):
+            raise ValueError("absolute motion envelope has the wrong payload")
+    else:
+        raise ValueError("local trial supports relative or absolute Cartesian motion")
     if not envelope.created_at_ms <= now_ms < envelope.expires_at_ms:
         raise ValueError("motion envelope expired or has a future creation time")
     if snapshot.runtime_mode != RuntimeMode.REAL:
@@ -275,15 +286,34 @@ def preflight_relative(
         raise ValueError("actual start drifted from proposal")
     if arm.used or now_monotonic_ns >= arm.expires_monotonic_ns or arm.test_id != envelope.operator_confirmation_id or arm.command_fingerprint != fingerprint(envelope) or arm.session_id != snapshot.gateway_session_id or snapshot.sequence < arm.base_sequence or arm.safety_state_hash != safety_state_hash(snapshot, readback) or _distance(pose.translation_mm, arm.expected_start.translation_mm) > approval.max_start_drift_mm or _angle_deg(pose.quaternion_xyzw, arm.expected_start.quaternion_xyzw) > approval.max_start_rotation_deg:
         raise ValueError("local single-use ARM is missing, stale, or mismatched")
-    translation = tuple(float(value) for value in envelope.payload.translation_mm)
-    if sum(abs(value) > 1e-12 for value in translation) != 1:
-        raise ValueError("first motion supports exactly one Cartesian axis")
-    if _distance((0, 0, 0), translation) > approval.max_step_mm:
-        raise ValueError("relative step exceeds approval")
-    target_xyz = tuple(float(a + b) for a, b in zip(pose.translation_mm, translation))
-    # Both endpoints and intermediate points must pass workspace and IK checks.
-    for index in range(11):
-        ratio = index / 10
+    if isinstance(envelope.payload, MoveRelativeRequest):
+        translation = tuple(float(value) for value in envelope.payload.translation_mm)
+        distance = _distance((0.0, 0.0, 0.0), translation)
+        target_xyz = tuple(float(a + b) for a, b in zip(pose.translation_mm, translation))
+    else:
+        target = envelope.payload.entry_point
+        if (
+            target.frame != CoordinateFrame.ROBOT_BASE
+            or target.unit != DistanceUnit.MILLIMETER
+            or envelope.payload.tcp != approval.tcp_name
+            or envelope.payload.orientation_policy != "hold_current_actual_orientation"
+        ):
+            raise ValueError("absolute target requires Base/mm, approved TCP and held orientation")
+        target_xyz = target.as_tuple()
+        translation = tuple(float(b - a) for a, b in zip(pose.translation_mm, target_xyz))
+        distance = _distance(pose.translation_mm, target_xyz)
+        if distance > approval.max_absolute_displacement_mm:
+            raise ValueError("absolute target displacement exceeds approval")
+    if distance <= 1e-12:
+        raise ValueError("motion target equals the actual start")
+    if distance > approval.max_step_mm:
+        raise ValueError("Cartesian displacement exceeds approval")
+
+    # The YAML arrival position tolerance is also the maximum distance between
+    # adjacent IK/workspace samples. Longer moves therefore receive more checks.
+    segments = max(1, math.ceil(distance / approval.path_sample_step_mm))
+    for index in range(segments + 1):
+        ratio = index / segments
         point = tuple(float(a + ratio * b) for a, b in zip(pose.translation_mm, translation))
         if any(not low <= value <= high for value, low, high in zip(
             point, approval.workspace_low_mm, approval.workspace_high_mm
@@ -299,7 +329,8 @@ def preflight_relative(
     return pose.model_copy(update={"translation_mm": target_xyz})
 
 
-# Keep Step 10 test imports stable while the same checks are reused locally.
+# Keep Step 10 test imports stable while the generalized checks are reused.
 FakeMotionApproval = MotionApproval
 FakeControllerReadback = ControllerReadback
-preflight_fake_relative = preflight_relative
+preflight_relative = preflight_motion
+preflight_fake_relative = preflight_motion
