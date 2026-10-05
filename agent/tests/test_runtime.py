@@ -187,6 +187,57 @@ class InternS2AgentTests(unittest.TestCase):
         # The safety normalizer, rather than string truthiness, forces this true.
         self.assertTrue(command.needs_confirmation)
 
+    def test_blank_missing_fields_is_accepted_as_an_empty_array(self):
+        arguments = base_arguments(
+            "puncture",
+            entry_point=json.dumps(
+                {
+                    "x": 600,
+                    "y": 0,
+                    "z": 500,
+                    "unit": "mm",
+                    "frame": "robot_base",
+                }
+            ),
+            target_point=json.dumps(
+                {
+                    "x": 500,
+                    "y": 0,
+                    "z": 550,
+                    "unit": "mm",
+                    "frame": "robot_base",
+                }
+            ),
+            missing_fields="   ",
+        )
+        agent, _client = make_agent(arguments)
+
+        command = agent.parse_command("请准备穿刺").command
+
+        self.assertEqual(command.intent, CommandIntent.PUNCTURE)
+        self.assertEqual(command.missing_fields, [])
+        self.assertEqual(command.entry_point.as_tuple(), (600.0, 0.0, 500.0))
+        self.assertEqual(command.target_point.as_tuple(), (500.0, 0.0, 550.0))
+
+    def test_blank_embedded_json_is_still_rejected_for_other_fields(self):
+        arguments = base_arguments(
+            "move_to_entry",
+            entry_point="   ",
+        )
+        agent, _client = make_agent(arguments)
+
+        with self.assertRaises(CommandParsingError) as raised:
+            agent.parse_command("移动到入点")
+
+        self.assertEqual(
+            raised.exception.error_code,
+            ErrorCode.MODEL_INVALID_OUTPUT,
+        )
+        self.assertIn(
+            "entry_point must not be an empty JSON value",
+            str(raised.exception),
+        )
+
     def test_lmdeploy_string_false_is_not_treated_as_true(self):
         arguments = base_arguments(
             "move_relative",

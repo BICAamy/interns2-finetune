@@ -68,7 +68,9 @@ class _ActualFeedbackObserver:
         pass
 
 
-def test_web_confirmation_runs_combined_and_absolute_fake_motion(tmp_path: Path) -> None:
+def test_web_confirmation_runs_all_real_task_motion_on_fake(
+    tmp_path: Path,
+) -> None:
     secret_file = tmp_path / "gateway-auth.local"
     secret_file.write_bytes(SECRET)
     os.chmod(secret_file, 0o600)
@@ -312,7 +314,13 @@ def test_web_confirmation_runs_combined_and_absolute_fake_motion(tmp_path: Path)
                     time.sleep(0.02)
                 else:
                     raise AssertionError("enabled feedback did not reach robot-runtime")
-                def execute(command: ParsedCommand, prompt: str, *, reject_bad_fingerprint: bool = False):
+                def execute(
+                    command: ParsedCommand,
+                    prompt: str,
+                    *,
+                    reject_bad_fingerprint: bool = False,
+                    expected_status: str = "completed",
+                ):
                     runtime.parser = StubParser(command)
                     proposal_response = web.post(
                         f"/api/sessions/{session_id}/commands/text",
@@ -353,10 +361,12 @@ def test_web_confirmation_runs_combined_and_absolute_fake_motion(tmp_path: Path)
                     final = None
                     while time.monotonic() < deadline:
                         final = web.get(f"/api/sessions/{session_id}").json()
-                        if final["status"] in {"completed", "failed"}:
+                        if final["status"] in {"completed", "plan_ready", "failed"}:
                             break
                         time.sleep(0.03)
-                    assert final is not None and final["status"] == "completed", json.dumps(final, ensure_ascii=False)
+                    assert (
+                        final is not None and final["status"] == expected_status
+                    ), json.dumps(final, ensure_ascii=False)
                     assert len([
                         frame for frame in fake.received_commands
                         if frame.startswith(b"WayPoint,")
@@ -420,6 +430,51 @@ def test_web_confirmation_runs_combined_and_absolute_fake_motion(tmp_path: Path)
                         after_combined.quaternion_xyzw,
                     )
                 )
+
+                puncture_entry_xyz = tuple(
+                    value + delta
+                    for value, delta in zip(
+                        after_absolute.translation_mm,
+                        (1.0, -2.0, 3.0),
+                    )
+                )
+                puncture = ParsedCommand(
+                    command_id="step12-web-puncture",
+                    intent=CommandIntent.PUNCTURE,
+                    entry_point=Point3D(
+                        x=puncture_entry_xyz[0],
+                        y=puncture_entry_xyz[1],
+                        z=puncture_entry_xyz[2],
+                        frame=CoordinateFrame.ROBOT_BASE,
+                        unit=DistanceUnit.MILLIMETER,
+                        source=CoordinateSource.USER_TEXT,
+                    ),
+                    target_point=Point3D(
+                        x=puncture_entry_xyz[0] - 10.0,
+                        y=puncture_entry_xyz[1],
+                        z=puncture_entry_xyz[2] + 5.0,
+                        frame=CoordinateFrame.ROBOT_BASE,
+                        unit=DistanceUnit.MILLIMETER,
+                        source=CoordinateSource.USER_TEXT,
+                    ),
+                    summary="移动到入点并生成穿刺路径预览",
+                )
+                puncture_final = execute(
+                    puncture,
+                    "给定 Base 入点和靶点，请准备穿刺",
+                    expected_status="plan_ready",
+                )
+                after_puncture = robot_http.get_telemetry().actual_pose_robot_base
+                assert all(
+                    abs(actual - target) < 0.01
+                    for actual, target in zip(
+                        after_puncture.translation_mm,
+                        puncture_entry_xyz,
+                    )
+                )
+                planner_result = puncture_final["orchestration"]["planner_result"]
+                assert planner_result["status"] == "success"
+                assert planner_result["executable"] is False
                 assert journal.unresolved() == ()
             assert not gateway_errors
     finally:

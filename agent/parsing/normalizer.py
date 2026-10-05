@@ -571,6 +571,13 @@ class CommandNormalizer:
 
     @classmethod
     def _missing_fields(cls, value: Any) -> list[str]:
+        # LMDeploy's XML tool parser may serialize an empty array parameter as
+        # an empty string.  A blank value is unambiguous for missing_fields:
+        # it means that the model reported no missing fields.  Keep this
+        # compatibility local to this field so blank point/motion JSON still
+        # fails closed in _embedded_json_parameter().
+        if isinstance(value, str) and not value.strip():
+            return []
         value = cls._embedded_json_parameter(value, "missing_fields")
         if value is None:
             return []

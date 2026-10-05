@@ -1008,12 +1008,17 @@ class WebRuntime:
             if parsed.command.intent not in {
                 CommandIntent.MOVE_RELATIVE,
                 CommandIntent.MOVE_TO_ENTRY,
+                CommandIntent.PUNCTURE,
             }:
                 return self._record_parse_error(
                     session_id,
                     {
                         "code": "OPERATION_NOT_ENABLED",
-                        "message": "真实模式只开放相对位移和 Base 坐标系绝对 XYZ 运动",
+                        "message": (
+                            "真机网页任务支持相对/组合位移、Base 绝对 XYZ，"
+                            "以及移动到入点后生成穿刺路径预览；"
+                            "真机停止请使用现场安全装置"
+                        ),
                         "details": {},
                     },
                     parse_token=parse_token,
@@ -1042,7 +1047,7 @@ class WebRuntime:
                         session_id,
                         {
                             "code": "INVALID_COMMAND_SCHEMA",
-                            "message": "绝对运动缺少 Base XYZ 目标",
+                            "message": "绝对运动或穿刺任务缺少 Base XYZ 入点",
                             "details": {},
                         },
                         parse_token=parse_token,
