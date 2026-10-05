@@ -49,11 +49,11 @@ class BlockingRobot(FakeRobotController):
         self.move_started = Event()
         self.release_move = Event()
 
-    def move_to_entry(self, request):
+    def move_sequence(self, request):
         self.move_started.set()
         if not self.release_move.wait(timeout=3):
             raise TimeoutError("test did not release blocked movement")
-        return super().move_to_entry(request)
+        return super().move_sequence(request)
 
 
 class BlockingPreflightRobot(FakeRobotController):
@@ -98,7 +98,10 @@ class OrchestratorInvariantTests(unittest.TestCase):
 
         self.assertEqual(result.final_state, AgentTaskState.FAILED)
         self.assertEqual(result.error_code, ErrorCode.POSITION_TOLERANCE_EXCEEDED)
-        self.assertEqual(result.robot_result.position_error_mm, 0.0)
+        self.assertEqual(
+            result.robot_result.final_tcp_position.as_tuple(),
+            (10.0, 20.0, 30.0),
+        )
         self.assertEqual(result.verified_position_error_mm, 2.0)
         self.assertEqual(planner.call_count, 0)
 
@@ -110,7 +113,7 @@ class OrchestratorInvariantTests(unittest.TestCase):
 
         self.assertEqual(result.final_state, AgentTaskState.COMPLETED)
         self.assertEqual(planner.call_count, 0)
-        self.assertEqual(len(robot.move_relative_calls), 1)
+        self.assertEqual(len(robot.move_sequence_calls), 1)
         self.assertIn("未执行穿刺", result.message)
 
     def test_relative_motion_over_limit_never_moves(self):
@@ -123,7 +126,7 @@ class OrchestratorInvariantTests(unittest.TestCase):
 
         self.assertEqual(result.final_state, AgentTaskState.FAILED)
         self.assertEqual(result.error_code, ErrorCode.OUT_OF_WORKSPACE)
-        self.assertEqual(robot.move_relative_calls, [])
+        self.assertEqual(robot.move_sequence_calls, [])
         self.assertEqual(planner.call_count, 0)
 
     def test_move_to_entry_never_calls_planner(self):
@@ -140,7 +143,7 @@ class OrchestratorInvariantTests(unittest.TestCase):
         self.assertEqual(result.final_state, AgentTaskState.COMPLETED)
         self.assertEqual(result.verified_position_error_mm, 0.0)
         self.assertEqual(planner.call_count, 0)
-        self.assertEqual(len(robot.move_to_entry_calls), 1)
+        self.assertEqual(len(robot.move_sequence_calls), 1)
         self.assertIn("已到达入点", result.message)
 
     def test_successful_puncture_preparation_calls_planner_once(self):
@@ -195,6 +198,7 @@ class OrchestratorInvariantTests(unittest.TestCase):
         self.assertEqual(result.tool_events, ())
         self.assertEqual(robot.move_to_entry_calls, [])
         self.assertEqual(robot.move_relative_calls, [])
+        self.assertEqual(robot.move_sequence_calls, [])
         self.assertEqual(planner.call_count, 0)
 
     def test_stop_and_estop_never_call_planner(self):
@@ -227,7 +231,7 @@ class OrchestratorInvariantTests(unittest.TestCase):
 
         self.assertEqual(result.final_state, AgentTaskState.ESTOP)
         self.assertEqual(result.error_code, ErrorCode.ESTOP_ACTIVE)
-        self.assertEqual(robot.move_to_entry_calls, [])
+        self.assertEqual(robot.move_sequence_calls, [])
         self.assertEqual(planner.call_count, 0)
 
     def test_duplicate_command_id_returns_cached_result_without_motion(self):
@@ -242,7 +246,7 @@ class OrchestratorInvariantTests(unittest.TestCase):
         self.assertFalse(first.deduplicated)
         self.assertTrue(second.deduplicated)
         self.assertEqual(second.as_dict()["final_state"], "plan_ready")
-        self.assertEqual(len(robot.move_to_entry_calls), 1)
+        self.assertEqual(len(robot.move_sequence_calls), 1)
         self.assertEqual(planner.call_count, 1)
 
     def test_reusing_command_id_for_different_payload_is_rejected(self):
@@ -258,7 +262,7 @@ class OrchestratorInvariantTests(unittest.TestCase):
 
         self.assertEqual(result.final_state, AgentTaskState.FAILED)
         self.assertEqual(result.error_code, ErrorCode.COMMAND_CONFLICT)
-        self.assertEqual(len(robot.move_to_entry_calls), 1)
+        self.assertEqual(len(robot.move_sequence_calls), 1)
         self.assertEqual(planner.call_count, 1)
 
     def test_active_command_rejects_normal_command_and_estop_blocks_planner(self):
@@ -286,7 +290,8 @@ class OrchestratorInvariantTests(unittest.TestCase):
 
         self.assertFalse(worker.is_alive())
         self.assertEqual(conflict.error_code, ErrorCode.COMMAND_CONFLICT)
-        self.assertEqual(robot.move_relative_calls, [])
+        self.assertEqual(len(robot.move_sequence_calls), 1)
+        self.assertEqual(robot.move_sequence_calls[0].command_id, "active")
         self.assertEqual(estop.final_state, AgentTaskState.ESTOP)
         self.assertEqual(holder["result"].final_state, AgentTaskState.ESTOP)
         self.assertEqual(planner.call_count, 0)
@@ -313,7 +318,7 @@ class OrchestratorInvariantTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(stop.final_state, AgentTaskState.STOPPED)
         self.assertEqual(holder["result"].final_state, AgentTaskState.STOPPED)
-        self.assertEqual(robot.move_relative_calls, [])
+        self.assertEqual(robot.move_sequence_calls, [])
         self.assertEqual(planner.call_count, 0)
 
     def test_state_and_tool_events_are_ordered_and_serializable(self):
@@ -332,7 +337,7 @@ class OrchestratorInvariantTests(unittest.TestCase):
             [event.tool for event in result.tool_events[::2]],
             [
                 ToolName.ROBOT_GET_STATE,
-                ToolName.ROBOT_MOVE_TO_ENTRY,
+                ToolName.ROBOT_MOVE_SEQUENCE,
                 ToolName.ROBOT_GET_STATE,
                 ToolName.PLANNER_PLAN_PUNCTURE,
             ],

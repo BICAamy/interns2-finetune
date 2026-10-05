@@ -22,7 +22,7 @@ from .command_client import _private_controller_host
 from .command_codec import CommandFrameDecoder, decode_reply, encode_read
 from .models import CommandReply, ProtocolError, ReadCommand, ResponseUnknown
 from .motion_codec import (
-    LinearWaypoint, decode_write_reply, encode_group_enabled,
+    JointWaypoint, LinearWaypoint, decode_write_reply, encode_group_enabled,
     encode_software_stop, encode_speed_override,
 )
 
@@ -172,20 +172,28 @@ class LocalRealMotionClient:
         except ResponseUnknown as exc:
             raise ResponseUnknown(f"SetOverride outcome unknown: {exc}") from exc
 
-    def waypoint(self, waypoint: LinearWaypoint) -> bool:
+    def waypoint(self, waypoint: LinearWaypoint | JointWaypoint) -> bool:
         if not self._identified or self._write_command is not None:
             raise RuntimeError("real WayPoint requires an identified, single-use local session")
         if waypoint.tcp_name != self.config.tool.tcp_name or waypoint.ucs_name != "Base":
             raise ValueError("WayPoint TCP/UCS disagrees with bare-flange config")
-        if waypoint.speed_mm_s > self.config.limits.max_speed_mm_s or (
-            waypoint.acceleration_mm_s2 > self.config.limits.max_acceleration_mm_s2
-        ):
-            raise ValueError("WayPoint exceeds limits configured in robot-real.local.yaml")
-        low = self.config.limits.workspace_low_mm
-        high = self.config.limits.workspace_high_mm
-        if any(not lo <= value <= hi for value, lo, hi in zip(waypoint.pose_xyzrpy[:3], low, high)):
-            raise ValueError("WayPoint target is outside the approved workspace")
-        joints = waypoint.reference_joints_deg
+        if isinstance(waypoint, LinearWaypoint):
+            if waypoint.speed_mm_s > self.config.limits.max_speed_mm_s or (
+                waypoint.acceleration_mm_s2 > self.config.limits.max_acceleration_mm_s2
+            ):
+                raise ValueError("WayPoint exceeds limits configured in robot-real.local.yaml")
+            low = self.config.limits.workspace_low_mm
+            high = self.config.limits.workspace_high_mm
+            if any(not lo <= value <= hi for value, lo, hi in zip(waypoint.pose_xyzrpy[:3], low, high)):
+                raise ValueError("WayPoint target is outside the approved workspace")
+            joints = waypoint.reference_joints_deg
+        else:
+            if waypoint.speed_deg_s > self.config.motion.joint_speed_deg_s or (
+                waypoint.acceleration_deg_s2
+                > self.config.motion.joint_acceleration_deg_s2
+            ):
+                raise ValueError("joint WayPoint exceeds YAML speed or acceleration")
+            joints = waypoint.target_joints_deg
         margin = self.config.limits.joint_margin_deg
         if any(not lo + margin <= joint <= hi - margin for joint, (lo, hi) in zip(
             joints, self.config.limits.joint_soft_limits_deg,
@@ -205,6 +213,14 @@ class LocalRealMotionClient:
             return decode_write_reply(self._exchange(encode_software_stop()), command="GrpStop")
         except ResponseUnknown as exc:
             raise ResponseUnknown(f"GrpStop outcome unknown: {exc}") from exc
+
+    def prepare_next_waypoint(self, *, stationary_confirmed: bool = False) -> None:
+        """Reuse this identified socket only after actual feedback confirmed arrival."""
+        if not stationary_confirmed:
+            raise PermissionError("next WayPoint requires confirmed stationary feedback")
+        if not self._identified or self._write_command != "WayPoint":
+            raise RuntimeError("no completed WayPoint is available for sequence continuation")
+        self._write_command = None
 
     def set_enabled(
         self, enabled: bool, *, disable_stationary_confirmed: bool = False,

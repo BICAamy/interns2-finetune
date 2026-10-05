@@ -83,7 +83,12 @@ class AgentSettings:
     real_config_path: str | None = None
     default_coordinate_frame: CoordinateFrame = CoordinateFrame.ROBOT_BASE
     default_distance_unit: DistanceUnit = DistanceUnit.MILLIMETER
-    default_relative_step_mm: float = 5.0
+    default_relative_step_mm: float = 15.0
+    default_relative_rotation_deg: float = 15.0
+    default_rotation_joint_index: int = 1
+    joint_move_speed_deg_s: float = 15.0
+    joint_move_acceleration_deg_s2: float = 30.0
+    max_relative_rotation_deg: float = 720.0
     entry_tolerance_mm: float = 1.0
     max_relative_translation_mm: float = 20.0
     robot_move_speed_mm_s: float = 5.0
@@ -131,7 +136,24 @@ class AgentSettings:
                     DistanceUnit.MILLIMETER.value,
                 ).strip()
             ),
-            default_relative_step_mm=_as_float("DEFAULT_RELATIVE_STEP_MM", 5.0),
+            default_relative_step_mm=_as_float("DEFAULT_RELATIVE_STEP_MM", 15.0),
+            default_relative_rotation_deg=_as_float(
+                "DEFAULT_RELATIVE_ROTATION_DEG",
+                15.0,
+            ),
+            default_rotation_joint_index=_as_int(
+                "DEFAULT_ROTATION_JOINT_INDEX",
+                1,
+            ),
+            joint_move_speed_deg_s=_as_float("JOINT_MOVE_SPEED_DEG_S", 15.0),
+            joint_move_acceleration_deg_s2=_as_float(
+                "JOINT_MOVE_ACCELERATION_DEG_S2",
+                30.0,
+            ),
+            max_relative_rotation_deg=_as_float(
+                "MAX_RELATIVE_ROTATION_DEG",
+                720.0,
+            ),
             entry_tolerance_mm=_as_float("ENTRY_TOLERANCE_MM", 1.0),
             max_relative_translation_mm=_as_float(
                 "MAX_TRANSLATION_PER_COMMAND_MM",
@@ -201,6 +223,19 @@ class AgentSettings:
             )
         if self.default_relative_step_mm <= 0:
             raise ValueError("DEFAULT_RELATIVE_STEP_MM must be greater than zero")
+        if self.default_relative_rotation_deg <= 0:
+            raise ValueError("DEFAULT_RELATIVE_ROTATION_DEG must be greater than zero")
+        if (
+            type(self.default_rotation_joint_index) is not int
+            or not 1 <= self.default_rotation_joint_index <= 6
+        ):
+            raise ValueError("DEFAULT_ROTATION_JOINT_INDEX must be from 1 to 6")
+        if self.joint_move_speed_deg_s <= 0:
+            raise ValueError("JOINT_MOVE_SPEED_DEG_S must be greater than zero")
+        if self.joint_move_acceleration_deg_s2 <= 0:
+            raise ValueError("JOINT_MOVE_ACCELERATION_DEG_S2 must be greater than zero")
+        if self.max_relative_rotation_deg <= 0:
+            raise ValueError("MAX_RELATIVE_ROTATION_DEG must be greater than zero")
         if self.entry_tolerance_mm <= 0:
             raise ValueError("ENTRY_TOLERANCE_MM must be greater than zero")
         if self.max_relative_translation_mm <= 0:

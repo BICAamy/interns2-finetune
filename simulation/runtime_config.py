@@ -22,6 +22,12 @@ class SimulationMotionPolicyConfig:
     max_relative_translation_mm: float
     move_speed_mm_s: float
     max_speed_mm_s: float
+    default_relative_step_mm: float
+    default_relative_rotation_deg: float
+    default_rotation_joint_index: int
+    joint_speed_deg_s: float
+    joint_acceleration_deg_s2: float
+    max_rotation_deg: float
 
 
 def load_simulation_motion_policy(
@@ -41,12 +47,24 @@ def load_simulation_motion_policy(
             raise ValueError(f"entry_point_env.{name} must be a finite positive number")
         return value
 
+    def joint_index(name: str) -> int:
+        value = section[name]
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 6:
+            raise ValueError(f"entry_point_env.{name} must be an integer from 1 to 6")
+        return value
+
     policy = SimulationMotionPolicyConfig(
         tcp_name=str(section["tcp_name"]).strip(),
         entry_tolerance_mm=positive("reach_tolerance_mm"),
         max_relative_translation_mm=positive("maximum_relative_distance_mm"),
         move_speed_mm_s=positive("default_speed_mm_s"),
         max_speed_mm_s=positive("maximum_speed_mm_s"),
+        default_relative_step_mm=positive("default_relative_step_mm"),
+        default_relative_rotation_deg=positive("default_relative_rotation_deg"),
+        default_rotation_joint_index=joint_index("default_rotation_joint_index"),
+        joint_speed_deg_s=positive("joint_speed_deg_s"),
+        joint_acceleration_deg_s2=positive("joint_acceleration_deg_s2"),
+        max_rotation_deg=positive("maximum_rotation_deg"),
     )
     if policy.move_speed_mm_s > policy.max_speed_mm_s:
         raise ValueError("simulation default speed cannot exceed its maximum speed")

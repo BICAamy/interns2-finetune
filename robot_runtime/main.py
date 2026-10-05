@@ -77,6 +77,9 @@ def app_from_environment():
             max_speed_mm_s=config.limits.max_speed_mm_s,
             max_step_mm=config.limits.max_step_mm,
             max_absolute_displacement_mm=config.limits.max_absolute_displacement_mm,
+            max_rotation_deg=config.limits.max_rotation_deg,
+            max_joint_speed_deg_s=config.motion.joint_speed_deg_s,
+            max_joint_acceleration_deg_s2=config.motion.joint_acceleration_deg_s2,
         )
         return create_app(
             provider=HuayanRealProvider(

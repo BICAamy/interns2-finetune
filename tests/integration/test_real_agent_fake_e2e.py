@@ -11,6 +11,7 @@ import threading
 import time
 
 from fastapi.testclient import TestClient
+import pytest
 import uvicorn
 
 from agent.tools.puncture_planner import FakePuncturePlannerClient
@@ -31,7 +32,8 @@ from robot_runtime.remote_motion import RemoteMotionPolicy
 from surgical_contracts import (
     CommandIntent, CoordinateFrame, CoordinateSource, DistanceUnit, ErrorCode,
     GatewayCommandKind, ParsedCommand, Point3D, RelativeMotion,
-    RobotCommandResult, SetEnabledRequest, ToolStatus, command_fingerprint,
+    MotionSequence, MotionSequenceStep, MotionStepKind, RobotCommandResult,
+    SetEnabledRequest, ToolStatus, command_fingerprint,
 )
 from tests.fakes.huayan_controller import FakeHuayanController
 from tests.integration.test_agent_web import StubParser, relative_command, settings
@@ -109,6 +111,9 @@ def test_web_confirmation_runs_all_real_task_motion_on_fake(
             max_speed_mm_s=config.limits.max_speed_mm_s,
             max_step_mm=config.limits.max_step_mm,
             max_absolute_displacement_mm=config.limits.max_absolute_displacement_mm,
+            max_rotation_deg=config.limits.max_rotation_deg,
+            max_joint_speed_deg_s=config.motion.joint_speed_deg_s,
+            max_joint_acceleration_deg_s2=config.motion.joint_acceleration_deg_s2,
         ),
     )
     robot_port = _free_port()
@@ -192,7 +197,7 @@ def test_web_confirmation_runs_all_real_task_motion_on_fake(
                     journal=journal,
                     timing=timing,
                     approval=approval,
-                    path_ik=lambda _point: snapshot().joint_positions_deg,
+                    path_ik=lambda _point, *_orientation: snapshot().joint_positions_deg,
                 )
 
             executor = RemoteMotionExecutor(
@@ -207,6 +212,7 @@ def test_web_confirmation_runs_all_real_task_motion_on_fake(
                 if envelope.command_kind in {
                     GatewayCommandKind.MOVE_RELATIVE,
                     GatewayCommandKind.MOVE_TO_ENTRY,
+                    GatewayCommandKind.MOVE_SEQUENCE,
                 }:
                     return executor.execute(envelope, fingerprint)
                 if (
@@ -320,6 +326,7 @@ def test_web_confirmation_runs_all_real_task_motion_on_fake(
                     *,
                     reject_bad_fingerprint: bool = False,
                     expected_status: str = "completed",
+                    expected_waypoint_count: int = 1,
                 ):
                     runtime.parser = StubParser(command)
                     proposal_response = web.post(
@@ -370,7 +377,7 @@ def test_web_confirmation_runs_all_real_task_motion_on_fake(
                     assert len([
                         frame for frame in fake.received_commands
                         if frame.startswith(b"WayPoint,")
-                    ]) == before_count + 1
+                    ]) == before_count + expected_waypoint_count
                     return final
 
                 # Deliberately exceeds the old code-only 20 mm cap. Real mode
@@ -398,6 +405,47 @@ def test_web_confirmation_runs_all_real_task_motion_on_fake(
                     )
                 )
                 assert abs(combined_final["current_tcp"]["z"] - after_combined.translation_mm[2]) < 0.01
+
+                sequence = ParsedCommand(
+                    command_id="step12-web-sequence",
+                    intent=CommandIntent.MOVE_SEQUENCE,
+                    motion_sequence=MotionSequence(steps=(
+                        MotionSequenceStep(
+                            kind=MotionStepKind.CARTESIAN_RELATIVE,
+                            translation_mm=(0.0, 52.0, 0.0),
+                        ),
+                        MotionSequenceStep(
+                            kind=MotionStepKind.CARTESIAN_RELATIVE,
+                            translation_mm=(0.0, 0.0, 15.0),
+                        ),
+                        MotionSequenceStep(
+                            kind=MotionStepKind.CARTESIAN_RELATIVE,
+                            translation_mm=(74.0, 0.0, 0.0),
+                        ),
+                        MotionSequenceStep(
+                            kind=MotionStepKind.JOINT_RELATIVE,
+                            joint_index=1,
+                            rotation_deg=-70.0,
+                        ),
+                    )),
+                    summary="三段 Base 平移后按 J1 向右转 70 度",
+                )
+                before_sequence = robot_http.get_telemetry()
+                execute(
+                    sequence,
+                    "往左52mm之后再往上一点然后再往前74mm，再向右转70度",
+                    expected_waypoint_count=4,
+                )
+                after_sequence = robot_http.get_telemetry()
+                assert after_sequence.actual_pose_robot_base.translation_mm == (
+                    before_sequence.actual_pose_robot_base.translation_mm[0] + 74.0,
+                    before_sequence.actual_pose_robot_base.translation_mm[1] + 52.0,
+                    before_sequence.actual_pose_robot_base.translation_mm[2] + 15.0,
+                )
+                assert after_sequence.joint_positions_deg[0] == pytest.approx(
+                    before_sequence.joint_positions_deg[0] - 70.0,
+                    abs=0.01,
+                )
 
                 absolute_xyz = tuple(
                     value + delta
@@ -429,6 +477,49 @@ def test_web_confirmation_runs_all_real_task_motion_on_fake(
                         after_absolute.quaternion_xyzw,
                         after_combined.quaternion_xyzw,
                     )
+                )
+
+                before_rotations = robot_http.get_telemetry()
+                rotation_sequence = ParsedCommand(
+                    command_id="step12-web-unified-rotations",
+                    intent=CommandIntent.MOVE_SEQUENCE,
+                    motion_sequence=MotionSequence(steps=(
+                        MotionSequenceStep(
+                            kind=MotionStepKind.JOINT_ABSOLUTE,
+                            joint_index=2,
+                            target_angle_deg=(
+                                before_rotations.joint_positions_deg[1] + 2.0
+                            ),
+                        ),
+                        MotionSequenceStep(
+                            kind=MotionStepKind.TCP_ROTATION_RELATIVE,
+                            rotation_axis="z",
+                            rotation_deg=2.0,
+                        ),
+                        MotionSequenceStep(
+                            kind=MotionStepKind.TCP_ROTATION_ABSOLUTE,
+                            rotation_axis="x",
+                            target_angle_deg=(
+                                before_rotations.actual_pose_robot_base.rotation_rpy_deg[0]
+                                - 1.0
+                            ),
+                        ),
+                    )),
+                    summary="J2 绝对角、TCP 相对和绝对姿态统一序列",
+                )
+                execute(
+                    rotation_sequence,
+                    "J2到目标角，然后TCP绕Base Z相对转2度，最后设置Base RPY X",
+                    expected_waypoint_count=3,
+                )
+                after_rotations = robot_http.get_telemetry()
+                assert after_rotations.joint_positions_deg[1] == pytest.approx(
+                    before_rotations.joint_positions_deg[1] + 2.0,
+                    abs=0.01,
+                )
+                assert after_rotations.actual_pose_robot_base.rotation_rpy_deg[0] == pytest.approx(
+                    before_rotations.actual_pose_robot_base.rotation_rpy_deg[0] - 1.0,
+                    abs=0.02,
                 )
 
                 puncture_entry_xyz = tuple(

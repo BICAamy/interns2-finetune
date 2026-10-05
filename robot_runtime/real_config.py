@@ -119,6 +119,11 @@ class MotionCommandConfig(_StrictModel):
 
     speed_mm_s: float | None = Field(default=None, gt=0)
     controller_override: float | None = Field(default=None, ge=0.01, le=1.0)
+    default_relative_step_mm: float | None = Field(default=None, gt=0)
+    default_relative_rotation_deg: float | None = Field(default=None, gt=0)
+    default_rotation_joint_index: int | None = Field(default=None, ge=1, le=6)
+    joint_speed_deg_s: float | None = Field(default=None, gt=0)
+    joint_acceleration_deg_s2: float | None = Field(default=None, gt=0)
 
 
 class Deadlines(_StrictModel):
@@ -164,7 +169,10 @@ class RealRobotConfig(_StrictModel):
             "limits.max_speed_mm_s", "limits.max_acceleration_mm_s2",
             "limits.max_step_mm", "limits.max_rotation_deg",
             "limits.max_absolute_displacement_mm", "motion.speed_mm_s",
-            "motion.controller_override", "deadlines.state_stale_ms",
+            "motion.controller_override", "motion.default_relative_step_mm",
+            "motion.default_relative_rotation_deg",
+            "motion.default_rotation_joint_index", "motion.joint_speed_deg_s",
+            "motion.joint_acceleration_deg_s2", "deadlines.state_stale_ms",
             "deadlines.real_mode_fallback_ms",
             "deadlines.response_ms", "deadlines.startup_ms",
             "deadlines.motion_ms", "deadlines.stop_delivery_ms",

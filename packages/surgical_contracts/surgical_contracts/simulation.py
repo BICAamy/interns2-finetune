@@ -16,6 +16,7 @@ class RobotCommandKind(str, Enum):
     RESET = "reset"
     MOVE_TO_ENTRY = "move_to_entry"
     MOVE_RELATIVE = "move_relative"
+    MOVE_SEQUENCE = "move_sequence"
     STOP = "stop"
     ESTOP = "estop"
     SET_ENABLED = "set_enabled"

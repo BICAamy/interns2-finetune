@@ -11,7 +11,9 @@ from typing import Callable, Literal
 
 from surgical_contracts import (
     CoordinateFrame, DistanceUnit, GatewayCommandKind, LinkState,
-    MoveRelativeRequest, MoveToEntryRequest, Pose6D, RobotCommandEnvelope, RobotTelemetry,
+    MoveCartesianPoseRequest, MoveJointRelativeRequest, MoveRelativeRequest,
+    MoveToEntryRequest, Pose6D,
+    RobotCommandEnvelope, RobotTelemetry,
     RuntimeMode, SourceFreshness, command_fingerprint,
 )
 
@@ -43,6 +45,9 @@ class MotionApproval:
     max_acceleration_mm_s2: float
     max_step_mm: float
     max_absolute_displacement_mm: float
+    max_rotation_deg: float
+    max_joint_speed_deg_s: float
+    max_joint_acceleration_deg_s2: float
     max_start_drift_mm: float
     max_start_rotation_deg: float
     path_sample_step_mm: float
@@ -62,6 +67,8 @@ class MotionApproval:
             self.joint_margin_deg, *self.workspace_low_mm, *self.workspace_high_mm,
             self.max_speed_mm_s, self.max_acceleration_mm_s2, self.max_step_mm,
             self.max_absolute_displacement_mm,
+            self.max_rotation_deg, self.max_joint_speed_deg_s,
+            self.max_joint_acceleration_deg_s2,
             self.max_start_drift_mm, self.max_start_rotation_deg,
             self.path_sample_step_mm, self.state_stale_ms,
             self.controller_override,
@@ -71,6 +78,8 @@ class MotionApproval:
         if any(value <= 0 for value in (
             self.joint_margin_deg, self.max_speed_mm_s, self.max_acceleration_mm_s2,
             self.max_step_mm, self.max_absolute_displacement_mm,
+            self.max_rotation_deg, self.max_joint_speed_deg_s,
+            self.max_joint_acceleration_deg_s2,
             self.max_start_drift_mm, self.max_start_rotation_deg,
             self.path_sample_step_mm, self.state_stale_ms,
         )) or self.payload_kg < 0:
@@ -97,6 +106,25 @@ class ControllerReadback:
     active_program: bool
     waypoint_id: str | None
     controller_override: float
+
+
+@dataclass(frozen=True)
+class PreflightTarget:
+    pose: Pose6D
+    joint_positions_deg: tuple[float, float, float, float, float, float]
+    joint_motion: bool = False
+
+    @property
+    def translation_mm(self):
+        return self.pose.translation_mm
+
+    @property
+    def rotation_rpy_deg(self):
+        return self.pose.rotation_rpy_deg
+
+    @property
+    def quaternion_xyzw(self):
+        return self.pose.quaternion_xyzw
 
 
 @dataclass
@@ -204,10 +232,11 @@ def preflight_motion(
     envelope: RobotCommandEnvelope, snapshot: RobotTelemetry,
     readback: ControllerReadback, approval: MotionApproval,
     arm: LocalArm, leases: tuple[MotionLease, ...],
-    path_ik: Callable[[tuple[float, float, float]], tuple[float, ...] | None],
+    path_ik: Callable[..., tuple[float, ...] | None],
+    joint_fk: Callable[[tuple[float, ...]], Pose6D] | None = None,
     required_lease_owner: Literal["local", "remote"] = "local",
     *, now_ms: int | None = None, now_monotonic_ns: int | None = None,
-) -> Pose6D:
+) -> PreflightTarget:
     """Return an absolute target without I/O; consume ARM only after every check."""
     now_ms = time.time_ns() // 1_000_000 if now_ms is None else now_ms
     now_monotonic_ns = time.monotonic_ns() if now_monotonic_ns is None else now_monotonic_ns
@@ -217,8 +246,14 @@ def preflight_motion(
     elif envelope.command_kind == GatewayCommandKind.MOVE_TO_ENTRY:
         if not isinstance(envelope.payload, MoveToEntryRequest):
             raise ValueError("absolute motion envelope has the wrong payload")
+    elif envelope.command_kind == GatewayCommandKind.MOVE_JOINT_RELATIVE:
+        if not isinstance(envelope.payload, MoveJointRelativeRequest):
+            raise ValueError("joint-relative envelope has the wrong payload")
+    elif envelope.command_kind == GatewayCommandKind.MOVE_CARTESIAN_POSE:
+        if not isinstance(envelope.payload, MoveCartesianPoseRequest):
+            raise ValueError("Cartesian-pose envelope has the wrong payload")
     else:
-        raise ValueError("local trial supports relative or absolute Cartesian motion")
+        raise ValueError("local trial supports Cartesian or relative-joint motion")
     if not envelope.created_at_ms <= now_ms < envelope.expires_at_ms:
         raise ValueError("motion envelope expired or has a future creation time")
     if snapshot.runtime_mode != RuntimeMode.REAL:
@@ -265,9 +300,24 @@ def preflight_motion(
         raise ValueError("controller setup differs from approval")
     if envelope.expected_tcp_name != approval.tcp_name or envelope.expected_ucs_name != approval.ucs_name:
         raise ValueError("command TCP/UCS differs from approval")
-    if envelope.safety_limits is None or envelope.safety_limits.max_speed_mm_s > approval.max_speed_mm_s or envelope.safety_limits.max_step_mm > approval.max_step_mm:
+    if (
+        envelope.safety_limits is None
+        or envelope.safety_limits.max_speed_mm_s > approval.max_speed_mm_s
+        or envelope.safety_limits.max_step_mm > approval.max_step_mm
+        or envelope.safety_limits.max_rotation_deg > approval.max_rotation_deg
+        or envelope.safety_limits.max_joint_speed_deg_s > approval.max_joint_speed_deg_s
+        or envelope.safety_limits.max_joint_acceleration_deg_s2
+        > approval.max_joint_acceleration_deg_s2
+    ):
         raise ValueError("command requests unapproved limits")
-    if envelope.payload.speed_mm_s > approval.max_speed_mm_s:
+    if isinstance(envelope.payload, MoveJointRelativeRequest):
+        if (
+            envelope.payload.speed_deg_s > approval.max_joint_speed_deg_s
+            or envelope.payload.acceleration_deg_s2
+            > approval.max_joint_acceleration_deg_s2
+        ):
+            raise ValueError("joint command speed or acceleration exceeds approval")
+    elif envelope.payload.speed_mm_s > approval.max_speed_mm_s:
         raise ValueError("command speed exceeds approval")
     if len(leases) != 1 or not leases[0].active or leases[0].owner != required_lease_owner or leases[0].session_id != envelope.gateway_session_id or leases[0].expires_monotonic_ns <= now_monotonic_ns:
         raise ValueError(f"exclusive {required_lease_owner} motion lease missing")
@@ -286,11 +336,54 @@ def preflight_motion(
         raise ValueError("actual start drifted from proposal")
     if arm.used or now_monotonic_ns >= arm.expires_monotonic_ns or arm.test_id != envelope.operator_confirmation_id or arm.command_fingerprint != fingerprint(envelope) or arm.session_id != snapshot.gateway_session_id or snapshot.sequence < arm.base_sequence or arm.safety_state_hash != safety_state_hash(snapshot, readback) or _distance(pose.translation_mm, arm.expected_start.translation_mm) > approval.max_start_drift_mm or _angle_deg(pose.quaternion_xyzw, arm.expected_start.quaternion_xyzw) > approval.max_start_rotation_deg:
         raise ValueError("local single-use ARM is missing, stale, or mismatched")
+    if isinstance(envelope.payload, MoveJointRelativeRequest):
+        rotation = float(envelope.payload.rotation_deg)
+        if abs(rotation) > approval.max_rotation_deg:
+            raise ValueError("joint rotation exceeds approval")
+        target_joints = [float(value) for value in snapshot.joint_positions_deg]
+        target_joints[envelope.payload.joint_index - 1] += rotation
+        segments = max(
+            1,
+            math.ceil(abs(rotation) / approval.max_start_rotation_deg),
+        )
+        final_pose = pose
+        for index in range(segments + 1):
+            ratio = index / segments
+            sample_joints = [float(value) for value in snapshot.joint_positions_deg]
+            sample_joints[envelope.payload.joint_index - 1] += rotation * ratio
+            if any(
+                not low + approval.joint_margin_deg
+                <= value
+                <= high - approval.joint_margin_deg
+                for value, (low, high) in zip(
+                    sample_joints, approval.joint_soft_limits_deg
+                )
+            ):
+                raise ValueError("joint path crosses approved margin")
+            if joint_fk is not None:
+                checked_pose = joint_fk(tuple(sample_joints))
+                if any(
+                    not low <= value <= high
+                    for value, low, high in zip(
+                        checked_pose.translation_mm,
+                        approval.workspace_low_mm,
+                        approval.workspace_high_mm,
+                    )
+                ):
+                    raise ValueError("joint path leaves approved workspace")
+                final_pose = checked_pose
+        arm.used = True
+        return PreflightTarget(
+            pose=final_pose,
+            joint_positions_deg=tuple(target_joints),
+            joint_motion=True,
+        )
+    target_pose = pose
     if isinstance(envelope.payload, MoveRelativeRequest):
         translation = tuple(float(value) for value in envelope.payload.translation_mm)
         distance = _distance((0.0, 0.0, 0.0), translation)
         target_xyz = tuple(float(a + b) for a, b in zip(pose.translation_mm, translation))
-    else:
+    elif isinstance(envelope.payload, MoveToEntryRequest):
         target = envelope.payload.entry_point
         if (
             target.frame != CoordinateFrame.ROBOT_BASE
@@ -304,14 +397,42 @@ def preflight_motion(
         distance = _distance(pose.translation_mm, target_xyz)
         if distance > approval.max_absolute_displacement_mm:
             raise ValueError("absolute target displacement exceeds approval")
-    if distance <= 1e-12:
+        target_pose = pose.model_copy(update={"translation_mm": target_xyz})
+    else:
+        assert isinstance(envelope.payload, MoveCartesianPoseRequest)
+        target_pose = envelope.payload.target_pose_robot_base
+        if (
+            target_pose.frame != CoordinateFrame.ROBOT_BASE
+            or target_pose.unit != DistanceUnit.MILLIMETER
+        ):
+            raise ValueError("Cartesian pose target requires Base/mm")
+        target_xyz = tuple(float(value) for value in target_pose.translation_mm)
+        translation = tuple(float(b - a) for a, b in zip(pose.translation_mm, target_xyz))
+        distance = _distance(pose.translation_mm, target_xyz)
+        if distance > approval.max_absolute_displacement_mm:
+            raise ValueError("absolute target displacement exceeds approval")
+    orientation_distance = _angle_deg(
+        pose.quaternion_xyzw,
+        target_pose.quaternion_xyzw,
+    )
+    if orientation_distance > approval.max_rotation_deg:
+        raise ValueError("Cartesian orientation change exceeds approval")
+    if distance <= 1e-12 and orientation_distance <= 1e-12:
         raise ValueError("motion target equals the actual start")
     if distance > approval.max_step_mm:
         raise ValueError("Cartesian displacement exceeds approval")
 
     # The YAML arrival position tolerance is also the maximum distance between
     # adjacent IK/workspace samples. Longer moves therefore receive more checks.
-    segments = max(1, math.ceil(distance / approval.path_sample_step_mm))
+    segments = max(
+        1,
+        math.ceil(distance / approval.path_sample_step_mm),
+        math.ceil(orientation_distance / approval.max_start_rotation_deg),
+    )
+    start_quaternion = tuple(float(value) for value in pose.quaternion_xyzw)
+    end_quaternion = tuple(float(value) for value in target_pose.quaternion_xyzw)
+    if sum(a * b for a, b in zip(start_quaternion, end_quaternion)) < 0:
+        end_quaternion = tuple(-value for value in end_quaternion)
     for index in range(segments + 1):
         ratio = index / segments
         point = tuple(float(a + ratio * b) for a, b in zip(pose.translation_mm, translation))
@@ -319,14 +440,26 @@ def preflight_motion(
             point, approval.workspace_low_mm, approval.workspace_high_mm
         )):
             raise ValueError("path leaves approved workspace")
-        joints = path_ik(point)
+        if orientation_distance <= 1e-12:
+            joints = path_ik(point)
+        else:
+            interpolated = tuple(
+                (1.0 - ratio) * a + ratio * b
+                for a, b in zip(start_quaternion, end_quaternion)
+            )
+            norm = math.sqrt(sum(value * value for value in interpolated))
+            quaternion = tuple(value / norm for value in interpolated)
+            joints = path_ik(point, quaternion)
         if joints is None or len(joints) != 6 or any(not math.isfinite(value) for value in joints):
             raise ValueError("path IK failed")
         if any(not low + approval.joint_margin_deg <= value <= high - approval.joint_margin_deg
                for value, (low, high) in zip(joints, approval.joint_soft_limits_deg)):
             raise ValueError("path crosses joint margin")
     arm.used = True
-    return pose.model_copy(update={"translation_mm": target_xyz})
+    return PreflightTarget(
+        pose=target_pose.model_copy(update={"translation_mm": target_xyz}),
+        joint_positions_deg=tuple(float(value) for value in snapshot.joint_positions_deg),
+    )
 
 
 # Keep Step 10 test imports stable while the generalized checks are reused.

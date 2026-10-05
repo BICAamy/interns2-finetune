@@ -116,6 +116,10 @@ class FakeHuayanController:
         self._base_pose = tuple(
             float(value) for value in initial_document["PosAndVel"]["Actual_PCS_Base"]
         )
+        self._joint_positions = tuple(
+            float(value)
+            for value in initial_document["PosAndVel"]["Actual_Position"][:6]
+        )
         # Keep test diagnostics bounded during long-running gateway soak tests.
         self.received_commands: list[bytes] = []
         self._stop = threading.Event()
@@ -260,11 +264,14 @@ class FakeHuayanController:
                 "WayPoint", "GrpStop", "GrpEnable", "GrpDisable", "SetOverride",
             ) and self.accept_fake_motion and not fast:
                 if name == "WayPoint":
+                    joint_mode = len(fields) == 25 and fields[19:21] == [b"0", b"1"]
+                    linear_mode = len(fields) == 25 and fields[19:21] == [b"1", b"0"]
                     valid = (
                         len(fields) == 25 and fields[1] == b"0"
                         and all(part and part.isascii() for part in fields[8:14])
                         and fields[15] == b"Base"
-                        and fields[19:24] == [b"1", b"0", b"0", b"0", b"0"]
+                        and (linear_mode or joint_mode)
+                        and fields[21:24] == [b"0", b"0", b"0"]
                         and 1 <= len(fields[24]) <= 64
                     )
                     if valid:
@@ -279,6 +286,7 @@ class FakeHuayanController:
                     if valid:
                         self._current_waypoint_id = fields[24].decode("ascii", errors="replace")
                         target_pose = tuple(float(value) for value in fields[2:8])
+                        target_joints = tuple(float(value) for value in fields[8:14])
                 elif name == "GrpStop":
                     valid = fields == [b"GrpStop", b"0"]
                 elif name == "SetOverride":
@@ -320,7 +328,7 @@ class FakeHuayanController:
                             self._moving = True
                             threading.Thread(
                                 target=self._finish_waypoint,
-                                args=(target_pose,),
+                                args=(target_pose, target_joints, joint_mode),
                                 daemon=True,
                             ).start()
                 if pipelined:
@@ -366,6 +374,12 @@ class FakeHuayanController:
                     with self._state_lock:
                         override = self._override
                     reply = f"ReadOverride,OK,{override},;".encode("ascii")
+                elif command == ReadCommand.ACTUAL_POSITION and self.accept_fake_motion:
+                    with self._state_lock:
+                        joints = self._joint_positions
+                        base_pose = self._base_pose
+                    values = ",".join(str(value) for value in (*joints, *base_pose, *(0.0,) * 12))
+                    reply = f"ReadActPos,OK,{values},;".encode("ascii")
                 else:
                     reply = (
                         f"ReadFastCmdPort,OK,{self.fast_port},;".encode("ascii")
@@ -404,11 +418,15 @@ class FakeHuayanController:
                 with self._state_lock:
                     enabled, moving, override = self._enabled, self._moving, self._override
                     base_pose = self._base_pose
+                    joints = self._joint_positions
                 document["PosAndVel"]["Actual_Override"] = str(override)
                 document["PosAndVel"]["Actual_PCS_Base"] = [str(value) for value in base_pose]
                 document["PosAndVel"]["Actual_PCS_TCP"] = [str(value) for value in base_pose]
                 document["PosAndVel"]["Actual_Position"][6:12] = [
                     str(value) for value in base_pose
+                ]
+                document["PosAndVel"]["Actual_Position"][:6] = [
+                    str(value) for value in joints
                 ]
                 state = document["StateAndError"]
                 state["robotEnabled"] = int(enabled)
@@ -425,9 +443,16 @@ class FakeHuayanController:
             if self._stop.wait(self._data_interval_s):
                 return
 
-    def _finish_waypoint(self, target_pose: tuple[float, ...]) -> None:
+    def _finish_waypoint(
+        self,
+        target_pose: tuple[float, ...],
+        target_joints: tuple[float, ...],
+        joint_mode: bool,
+    ) -> None:
         if self._stop.wait(self._waypoint_motion_s):
             return
         with self._state_lock:
+            if joint_mode:
+                self._joint_positions = target_joints
             self._base_pose = target_pose
             self._moving = False

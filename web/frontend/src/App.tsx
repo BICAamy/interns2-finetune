@@ -72,6 +72,27 @@ function CoordinateCard({ title, point }: { title: string; point: any }) {
   );
 }
 
+function describeMotionStep(step: Record<string, any>): string {
+  const vector = (values: unknown) =>
+    Array.isArray(values) ? values.map((value) => Number(value).toFixed(2)).join(", ") : "—";
+  switch (step.kind) {
+    case "cartesian_relative":
+      return `Base ΔXYZ [${vector(step.translation_mm)}] mm`;
+    case "cartesian_absolute":
+      return `Base XYZ [${vector(step.target_position_mm)}] mm（保持实际姿态）`;
+    case "joint_relative":
+      return `J${step.joint_index} ${Number(step.rotation_deg) >= 0 ? "+" : ""}${Number(step.rotation_deg)}°`;
+    case "joint_absolute":
+      return `J${step.joint_index} 到 ${Number(step.target_angle_deg)}°`;
+    case "tcp_rotation_relative":
+      return `TCP 绕 Base ${String(step.rotation_axis).toUpperCase()} 相对旋转 ${Number(step.rotation_deg) >= 0 ? "+" : ""}${Number(step.rotation_deg)}°`;
+    case "tcp_rotation_absolute":
+      return `TCP 的 Base RPY ${String(step.rotation_axis).toUpperCase()} 分量设为 ${Number(step.target_angle_deg)}°`;
+    default:
+      return String(step.kind ?? "未知运动步骤");
+  }
+}
+
 function stateLabel(value: boolean | null | undefined): string {
   if (value == null) return "未知";
   return value ? "是" : "否";
@@ -849,7 +870,7 @@ export default function App() {
                 disabled={!session?.pending_confirmation || (runtimeMode === "real" && (telemetry?.enabled !== true || realStale))}
                 onClick={() => session && run(() => api.confirm(session.session_id, proposal?.fingerprint))}
               >
-                {runtimeMode === "real" ? (telemetry?.enabled ? "确认此 fingerprint 并执行" : "请先使能机械臂") : "确认并执行"}
+                {runtimeMode === "real" ? (telemetry?.enabled ? "确认执行" : "请先使能机械臂") : "确认并执行"}
               </button>
               <button
                 className="button secondary"
@@ -868,7 +889,7 @@ export default function App() {
             </div>
             <div className="safety-note">
               <strong>执行边界</strong>
-              <span>{runtimeMode === "real" ? "允许 Base 单轴/组合相对位移与绝对 XYZ；网页只确认一次 fingerprint，Mac 按真实起点复算并检查 YAML 限制。" : "确认只会移动机械臂并请求不可执行的路径预览，当前版本不会执行穿刺。"}</span>
+              <span>{runtimeMode === "real" ? "所有移动与旋转统一为 MotionSequence；网页只确认一次 fingerprint，Mac 按每一步真实起点复算并检查 YAML 限制。" : "所有移动与旋转统一为 MotionSequence；穿刺任务只移动到入点并请求不可执行的路径预览。"}</span>
               {runtimeMode === "real" && proposal?.fingerprint && (
                 <code>fingerprint {proposal.fingerprint}</code>
               )}
@@ -886,6 +907,13 @@ export default function App() {
             <CoordinateCard title="入点" point={entry} />
             <CoordinateCard title="靶点" point={target} />
             <CoordinateCard title={runtimeMode === "real" ? "控制器实际 TCP（工具未标定）" : "当前针尖 TCP"} point={currentTcp} />
+            {Array.isArray(command?.motion_sequence?.steps) &&
+              command.motion_sequence.steps.map((step: Record<string, any>, index: number) => (
+                <div className="relative-card" key={`${step.kind}-${index}`}>
+                  <span>步骤 {index + 1}</span>
+                  <strong>{describeMotionStep(step)}</strong>
+                </div>
+              ))}
             {command?.relative_motion && (
               <div className="relative-card">
                 <span>相对运动</span>

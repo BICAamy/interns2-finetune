@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 
 from edge_gateway.huayan.models import ProtocolError
-from edge_gateway.huayan.motion_codec import decode_write_reply, encode_group_enabled
+from edge_gateway.huayan.motion_codec import (
+    JointWaypoint,
+    decode_write_reply,
+    encode_group_enabled,
+)
 
 
 def test_group_enable_disable_frames_are_exact() -> None:
@@ -13,6 +17,23 @@ def test_group_enable_disable_frames_are_exact() -> None:
     assert encode_group_enabled(False) == b"GrpDisable,0,;"
     with pytest.raises(TypeError):
         encode_group_enabled(1)  # type: ignore[arg-type]
+
+
+def test_joint_waypoint_uses_movej_and_joint_target_fields() -> None:
+    frame = JointWaypoint(
+        pose_xyzrpy=(1, 2, 3, 4, 5, 6),
+        target_joints_deg=(10, 20, 30, 40, 50, 60),
+        tcp_name="TCP",
+        ucs_name="Base",
+        speed_deg_s=15,
+        acceleration_deg_s2=30,
+        waypoint_id="joint-step-01",
+    ).encode()
+
+    assert frame == (
+        b"WayPoint,0,1,2,3,4,5,6,10,20,30,40,50,60,"
+        b"TCP,Base,15,30,0,0,1,0,0,0,joint-step-01,;"
+    )
 
 
 @pytest.mark.parametrize("command", ["GrpEnable", "GrpDisable"])

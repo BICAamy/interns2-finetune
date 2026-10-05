@@ -16,6 +16,8 @@ from surgical_contracts import (
     MotionState,
     MoveRelativeRequest,
     MoveRelativeResult,
+    MoveSequenceRequest,
+    MoveSequenceResult,
     MoveToEntryRequest,
     MoveToEntryResult,
     ResetSimulationRequest,
@@ -190,6 +192,18 @@ class RobotRuntimeHTTPController:
         self._validate_record(record, request.command_id, RobotCommandKind.MOVE_TO_ENTRY)
         return record
 
+    def create_move_sequence_proposal(
+        self, request: MoveSequenceRequest,
+    ) -> RobotCommandRecord:
+        record = self._model_request(
+            "POST",
+            "/v1/commands/move-sequence",
+            RobotCommandRecord,
+            json=request.model_dump(mode="json"),
+        )
+        self._validate_record(record, request.command_id, RobotCommandKind.MOVE_SEQUENCE)
+        return record
+
     def confirm_motion_proposal(
         self,
         command_id: str,
@@ -206,6 +220,7 @@ class RobotRuntimeHTTPController:
             if record.command_id != command_id or record.kind not in {
                 RobotCommandKind.MOVE_RELATIVE,
                 RobotCommandKind.MOVE_TO_ENTRY,
+                RobotCommandKind.MOVE_SEQUENCE,
             }:
                 raise RobotSimulationProtocolError(
                     "confirmation response is not a motion command"
@@ -271,6 +286,33 @@ class RobotRuntimeHTTPController:
             status=status,
             completed=False,
             final_tcp_position=state.tcp_position,
+            message=message,
+            error_code=error_code,
+        )
+
+    def move_sequence(self, request: MoveSequenceRequest) -> MoveSequenceResult:
+        record = self._submit_and_wait(
+            "/v1/commands/move-sequence",
+            RobotCommandKind.MOVE_SEQUENCE,
+            request,
+        )
+        if record.status == CommandExecutionStatus.SUCCEEDED:
+            return self._result_model(record, MoveSequenceResult)
+        self._reject_unavailable_real_command(record)
+        state = self.get_state()
+        telemetry = self.get_telemetry()
+        joints = getattr(telemetry, "joint_positions_deg", None) or (
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        )
+        error_code, message, status = self._record_failure(record)
+        return MoveSequenceResult(
+            command_id=request.command_id,
+            status=status,
+            completed=False,
+            completed_steps=0,
+            total_steps=len(request.steps),
+            final_tcp_position=state.tcp_position,
+            final_joint_positions_deg=joints,
             message=message,
             error_code=error_code,
         )

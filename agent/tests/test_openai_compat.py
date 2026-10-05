@@ -99,10 +99,13 @@ class OpenAICompatibilityTests(unittest.TestCase):
         finally:
             http_client.close()
 
-        self.assertEqual(result.command.intent, CommandIntent.MOVE_RELATIVE)
+        self.assertEqual(result.command.intent, CommandIntent.MOVE_SEQUENCE)
         self.assertEqual(result.command.command_id, "cmd-openai-sdk")
-        self.assertEqual(result.command.relative_motion.distance_mm, 5.0)
-        self.assertFalse(result.command.needs_confirmation)
+        self.assertEqual(
+            result.command.motion_sequence.steps[0].translation_mm,
+            (0.0, 0.0, 15.0),
+        )
+        self.assertTrue(result.command.needs_confirmation)
         self.assertEqual(
             requests[0]["tools"][0]["function"]["name"],
             "submit_surgical_task",

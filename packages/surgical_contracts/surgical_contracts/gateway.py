@@ -14,10 +14,13 @@ from typing import Literal
 from pydantic import Field, FiniteFloat, model_validator
 
 from .base import SCHEMA_VERSION, ContractModel, SchemaVersion
-from .coordinates import CoordinateFrame
+from .coordinates import CoordinateFrame, MotionStepKind
 from .errors import ErrorCode
 from .robot import (
+    MoveCartesianPoseRequest,
+    MoveJointRelativeRequest,
     MoveRelativeRequest,
+    MoveSequenceRequest,
     MoveToEntryRequest,
     Pose6D,
     SetEnabledRequest,
@@ -37,6 +40,9 @@ class GatewayHandshake(ContractModel):
 class GatewayCommandKind(str, Enum):
     MOVE_TO_ENTRY = "move_to_entry"
     MOVE_RELATIVE = "move_relative"
+    MOVE_JOINT_RELATIVE = "move_joint_relative"
+    MOVE_CARTESIAN_POSE = "move_cartesian_pose"
+    MOVE_SEQUENCE = "move_sequence"
     SOFTWARE_STOP_REQUEST = "software_stop_request"
     SET_ENABLED = "set_enabled"
 
@@ -49,6 +55,9 @@ class SoftwareStopRequest(ContractModel):
 class MotionSafetyLimits(ContractModel):
     max_speed_mm_s: FiniteFloat = Field(gt=0)
     max_step_mm: FiniteFloat = Field(gt=0)
+    max_rotation_deg: FiniteFloat = Field(gt=0)
+    max_joint_speed_deg_s: FiniteFloat = Field(gt=0)
+    max_joint_acceleration_deg_s2: FiniteFloat = Field(gt=0)
 
 
 class RobotCommandEnvelope(ContractModel):
@@ -64,7 +73,15 @@ class RobotCommandEnvelope(ContractModel):
     expected_start_pose_robot_base: Pose6D | None = None
     expected_tcp_name: str | None = Field(default=None, min_length=1, max_length=128)
     expected_ucs_name: str | None = Field(default=None, min_length=1, max_length=128)
-    payload: MoveToEntryRequest | MoveRelativeRequest | SoftwareStopRequest | SetEnabledRequest
+    payload: (
+        MoveToEntryRequest
+        | MoveRelativeRequest
+        | MoveCartesianPoseRequest
+        | MoveJointRelativeRequest
+        | MoveSequenceRequest
+        | SoftwareStopRequest
+        | SetEnabledRequest
+    )
     safety_limits: MotionSafetyLimits | None = None
     operator_confirmation_id: str | None = Field(default=None, min_length=1, max_length=128)
 
@@ -77,6 +94,9 @@ class RobotCommandEnvelope(ContractModel):
         expected_payload = {
             GatewayCommandKind.MOVE_TO_ENTRY: MoveToEntryRequest,
             GatewayCommandKind.MOVE_RELATIVE: MoveRelativeRequest,
+            GatewayCommandKind.MOVE_CARTESIAN_POSE: MoveCartesianPoseRequest,
+            GatewayCommandKind.MOVE_JOINT_RELATIVE: MoveJointRelativeRequest,
+            GatewayCommandKind.MOVE_SEQUENCE: MoveSequenceRequest,
             GatewayCommandKind.SOFTWARE_STOP_REQUEST: SoftwareStopRequest,
             GatewayCommandKind.SET_ENABLED: SetEnabledRequest,
         }[self.command_kind]
@@ -107,6 +127,48 @@ class RobotCommandEnvelope(ContractModel):
                 raise ValueError("motion requires expected TCP and UCS names")
             if self.safety_limits is None or not self.operator_confirmation_id:
                 raise ValueError("motion requires safety limits and confirmation")
+            if isinstance(self.payload, MoveSequenceRequest):
+                if (
+                    self.payload.translation_speed_mm_s
+                    > self.safety_limits.max_speed_mm_s
+                    or self.payload.joint_speed_deg_s
+                    > self.safety_limits.max_joint_speed_deg_s
+                    or self.payload.joint_acceleration_deg_s2
+                    > self.safety_limits.max_joint_acceleration_deg_s2
+                ):
+                    raise ValueError("sequence speed exceeds envelope safety limit")
+                for step in self.payload.steps:
+                    if step.kind == MotionStepKind.CARTESIAN_RELATIVE:
+                        assert step.translation_mm is not None
+                        displacement = sqrt(
+                            sum(float(value) ** 2 for value in step.translation_mm)
+                        )
+                        if displacement > self.safety_limits.max_step_mm:
+                            raise ValueError("sequence translation exceeds safety limit")
+                    elif (
+                        step.kind in {
+                            MotionStepKind.JOINT_RELATIVE,
+                            MotionStepKind.TCP_ROTATION_RELATIVE,
+                        }
+                        and abs(float(step.rotation_deg or 0.0))
+                        > self.safety_limits.max_rotation_deg
+                    ):
+                        raise ValueError("sequence rotation exceeds safety limit")
+                return self
+            if isinstance(self.payload, MoveJointRelativeRequest):
+                if (
+                    self.payload.speed_deg_s > self.safety_limits.max_joint_speed_deg_s
+                    or self.payload.acceleration_deg_s2
+                    > self.safety_limits.max_joint_acceleration_deg_s2
+                    or abs(float(self.payload.rotation_deg))
+                    > self.safety_limits.max_rotation_deg
+                ):
+                    raise ValueError("joint move exceeds envelope safety limit")
+                return self
+            if isinstance(self.payload, MoveCartesianPoseRequest):
+                if self.payload.speed_mm_s > self.safety_limits.max_speed_mm_s:
+                    raise ValueError("Cartesian pose speed exceeds envelope safety limit")
+                return self
             if self.payload.speed_mm_s > self.safety_limits.max_speed_mm_s:
                 raise ValueError("requested speed exceeds envelope safety limit")
             if isinstance(self.payload, MoveRelativeRequest):
@@ -214,6 +276,10 @@ class RobotCommandResult(ContractModel):
     vendor_fault: VendorFault | None = None
     software_stop: SoftwareStopResult | None = None
     final_pose_robot_base: Pose6D | None = None
+    final_joint_positions_deg: tuple[
+        FiniteFloat, FiniteFloat, FiniteFloat,
+        FiniteFloat, FiniteFloat, FiniteFloat,
+    ] | None = None
     confirmed_enabled: bool | None = None
 
     @model_validator(mode="after")

@@ -81,6 +81,9 @@ def approval() -> FakeMotionApproval:
         workspace_low_mm=(0, 0, 0), workspace_high_mm=(500, 500, 500),
         max_speed_mm_s=5, max_acceleration_mm_s2=10, max_step_mm=2,
         max_absolute_displacement_mm=2,
+        max_rotation_deg=90,
+        max_joint_speed_deg_s=30,
+        max_joint_acceleration_deg_s2=60,
         max_start_drift_mm=0.25, max_start_rotation_deg=0.5,
         path_sample_step_mm=0.5,
         state_stale_ms=250, ready_fsm_code=33, controller_override=1.0,
@@ -110,7 +113,10 @@ def envelope(command_id: str = "move-1", *, translation=(1.0, 0.0, 0.0)) -> Robo
             command_id=command_id, translation_mm=translation,
             frame=CoordinateFrame.ROBOT_BASE, speed_mm_s=2,
         ),
-        safety_limits=MotionSafetyLimits(max_speed_mm_s=5, max_step_mm=2),
+        safety_limits=MotionSafetyLimits(
+            max_speed_mm_s=5, max_step_mm=2, max_rotation_deg=90,
+            max_joint_speed_deg_s=30, max_joint_acceleration_deg_s2=60,
+        ),
         operator_confirmation_id="local-test-1",
     )
 

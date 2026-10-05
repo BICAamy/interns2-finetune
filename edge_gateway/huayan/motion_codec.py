@@ -55,6 +55,41 @@ class LinearWaypoint:
         return frame
 
 
+@dataclass(frozen=True)
+class JointWaypoint:
+    """A single relative-joint result encoded as an absolute MoveJ target."""
+
+    pose_xyzrpy: tuple[float, float, float, float, float, float]
+    tcp_name: str
+    ucs_name: str
+    speed_deg_s: float
+    acceleration_deg_s2: float
+    waypoint_id: str
+    target_joints_deg: tuple[float, float, float, float, float, float]
+
+    def encode(self) -> bytes:
+        if len(self.pose_xyzrpy) != 6 or len(self.target_joints_deg) != 6:
+            raise ValueError("WayPoint requires six pose and joint-target values")
+        if not _NAME.fullmatch(self.tcp_name) or self.ucs_name != "Base":
+            raise ValueError("WayPoint requires an approved TCP and Base UCS")
+        fields = [
+            "WayPoint", "0", *(_number(value) for value in self.pose_xyzrpy),
+            *(_number(value) for value in self.target_joints_deg),
+            self.tcp_name, self.ucs_name,
+            _number(self.speed_deg_s, positive=True),
+            _number(self.acceleration_deg_s2, positive=True),
+            "0",  # blend radius
+            "0",  # MoveJ
+            "1",  # joint target is authoritative
+            "0", "0", "0",  # no seek or IO trigger
+            validate_identifier(self.waypoint_id),
+        ]
+        frame = (",".join(fields) + ",;").encode("ascii")
+        if len(frame) > 512:
+            raise ValueError("WayPoint exceeds bounded frame limit")
+        return frame
+
+
 def encode_software_stop() -> bytes:
     """Ordinary TCP stop request, never a physical emergency stop."""
     return b"GrpStop,0,;"

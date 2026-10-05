@@ -36,6 +36,38 @@ def evaluate(command: Any, expected: dict[str, Any]) -> list[str]:
         elif not _close(command.target_point.as_tuple(), expected["target_point_mm"]):
             errors.append(f"target_point={command.target_point.as_tuple()}")
 
+    if "motion_steps" in expected:
+        actual_steps = (
+            [] if command.motion_sequence is None
+            else list(command.motion_sequence.steps)
+        )
+        expected_steps = expected["motion_steps"]
+        if len(actual_steps) != len(expected_steps):
+            errors.append(
+                f"motion_steps count={len(actual_steps)}, expected={len(expected_steps)}"
+            )
+        for index, expected_step in enumerate(expected_steps):
+            if index >= len(actual_steps):
+                break
+            actual_step = actual_steps[index]
+            for key, expected_value in expected_step.items():
+                actual_value = getattr(actual_step, key, None)
+                actual_value = getattr(actual_value, "value", actual_value)
+                if isinstance(expected_value, list):
+                    if actual_value is None or not _close(
+                        tuple(float(value) for value in actual_value),
+                        expected_value,
+                    ):
+                        errors.append(
+                            f"motion_steps[{index}].{key}={actual_value}, "
+                            f"expected={expected_value}"
+                        )
+                elif actual_value != expected_value:
+                    errors.append(
+                        f"motion_steps[{index}].{key}={actual_value}, "
+                        f"expected={expected_value}"
+                    )
+
     relative = command.relative_motion
     for key in ("axis", "direction", "distance_source"):
         if key in expected:

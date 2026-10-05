@@ -458,6 +458,9 @@ def make_approval(config: RealRobotConfig, *, package_version: str) -> MotionApp
         max_acceleration_mm_s2=caps["max_acceleration_mm_s2"],
         max_step_mm=caps["max_step_mm"],
         max_absolute_displacement_mm=config.limits.max_absolute_displacement_mm,
+        max_rotation_deg=config.limits.max_rotation_deg,
+        max_joint_speed_deg_s=config.motion.joint_speed_deg_s,
+        max_joint_acceleration_deg_s2=config.motion.joint_acceleration_deg_s2,
         max_start_drift_mm=config.arrival.position_tolerance_mm,
         max_start_rotation_deg=config.arrival.orientation_tolerance_deg,
         path_sample_step_mm=config.arrival.position_tolerance_mm,
@@ -468,7 +471,7 @@ def make_approval(config: RealRobotConfig, *, package_version: str) -> MotionApp
 
 
 def make_path_ik(config: RealRobotConfig, start: RobotTelemetry):
-    """Build the Step 8 calibrated E05-Pro IK checker for one held orientation."""
+    """Build the calibrated E05-Pro IK checker for position/orientation paths."""
     import numpy as np
     from scipy.spatial.transform import Rotation
 
@@ -494,8 +497,10 @@ def make_path_ik(config: RealRobotConfig, start: RobotTelemetry):
     fk = model.forward(seed).flange_transform
     actual_pose = start.actual_pose_robot_base
     position_error = math.dist(fk[:3, 3], actual_pose.translation_mm)
-    orientation = Rotation.from_quat(actual_pose.quaternion_xyzw)
-    angle_error_deg = math.degrees((orientation.inv() * Rotation.from_matrix(fk[:3, :3])).magnitude())
+    actual_orientation = Rotation.from_quat(actual_pose.quaternion_xyzw)
+    angle_error_deg = math.degrees(
+        (actual_orientation.inv() * Rotation.from_matrix(fk[:3, :3])).magnitude()
+    )
     if (
         position_error > config.arrival.position_tolerance_mm
         or angle_error_deg > config.arrival.orientation_tolerance_deg
@@ -503,8 +508,16 @@ def make_path_ik(config: RealRobotConfig, start: RobotTelemetry):
         raise ValueError("current FK disagrees with actual Base flange pose")
     previous = np.asarray(start.joint_positions_deg, dtype=float)
 
-    def solve(point: tuple[float, float, float]) -> tuple[float, ...]:
+    def solve(
+        point: tuple[float, float, float],
+        quaternion_xyzw: tuple[float, float, float, float] | None = None,
+    ) -> tuple[float, ...]:
         nonlocal seed, previous
+        orientation = (
+            actual_orientation
+            if quaternion_xyzw is None
+            else Rotation.from_quat(quaternion_xyzw)
+        )
         solution = model.inverse(point, orientation, seed)
         visual_solved = np.rad2deg(solution.joint_positions_rad)
         robot_solved = np.asarray([
@@ -518,6 +531,54 @@ def make_path_ik(config: RealRobotConfig, start: RobotTelemetry):
         return tuple(float(value) for value in robot_solved)
 
     return solve
+
+
+def make_joint_fk(config: RealRobotConfig, start: RobotTelemetry):
+    """Return calibrated E05-Pro FK for robot-reported joint coordinates."""
+    import numpy as np
+    from scipy.spatial.transform import Rotation
+
+    from simulation.entry_point_env.config import DEFAULT_CONFIG_PATH, EntryPointEnvConfig
+    from simulation.entry_point_env.kinematics import E05ProKinematics
+
+    if start.joint_positions_deg is None or start.actual_pose_robot_base is None:
+        raise ValueError("actual start pose and joints are required for FK")
+    sim = EntryPointEnvConfig.from_yaml(DEFAULT_CONFIG_PATH)
+    signs = config.joint_mapping.sign
+    offsets = config.joint_mapping.zero_offset_deg
+    model = E05ProKinematics(
+        joint_limits_deg=sim.robot.joint_limits_deg,
+        force_flange_offset_mm=sim.robot.force_flange_offset_mm,
+        tool_translation_mm=(0.0, 0.0, 0.0),
+        tool_rpy_deg=(0.0, 0.0, 0.0),
+    )
+
+    def forward(joints_deg: tuple[float, ...]) -> Pose6D:
+        visual = tuple(
+            sign * joint + offset
+            for sign, joint, offset in zip(signs, joints_deg, offsets)
+        )
+        transform = model.forward(np.deg2rad(visual)).flange_transform
+        rotation = Rotation.from_matrix(transform[:3, :3])
+        return Pose6D(
+            translation_mm=tuple(float(value) for value in transform[:3, 3]),
+            rotation_rpy_deg=tuple(float(value) for value in rotation.as_euler("xyz", degrees=True)),
+            quaternion_xyzw=tuple(float(value) for value in rotation.as_quat()),
+            frame=start.actual_pose_robot_base.frame,
+            unit=start.actual_pose_robot_base.unit,
+        )
+
+    actual = start.actual_pose_robot_base
+    predicted = forward(tuple(float(value) for value in start.joint_positions_deg))
+    if math.dist(predicted.translation_mm, actual.translation_mm) > config.arrival.position_tolerance_mm:
+        raise ValueError("current FK position disagrees with actual Base flange pose")
+    angle = math.degrees((
+        Rotation.from_quat(actual.quaternion_xyzw).inv()
+        * Rotation.from_quat(predicted.quaternion_xyzw)
+    ).magnitude())
+    if angle > config.arrival.orientation_tolerance_deg:
+        raise ValueError("current FK orientation disagrees with actual Base flange pose")
+    return forward
 
 
 def validate_final_observation(

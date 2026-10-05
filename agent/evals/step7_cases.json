@@ -14,8 +14,13 @@
     "category": "只有入点",
     "prompt": "请把针尖移动到基座坐标系入点(500,0,500)毫米，仅做入点定位，不进行路径规划。",
     "expected": {
-      "intent": "move_to_entry",
-      "entry_point_mm": [500, 0, 500]
+      "intent": "move_sequence",
+      "motion_steps": [
+        {
+          "kind": "cartesian_absolute",
+          "target_position_mm": [500, 0, 500]
+        }
+      ]
     }
   },
   {
@@ -23,11 +28,14 @@
     "category": "方向和明确距离",
     "prompt": "机械臂沿基座坐标系Z轴正方向移动8毫米。",
     "expected": {
-      "intent": "move_relative",
-      "axis": "z",
-      "direction": "positive",
-      "distance_mm": 8,
-      "distance_source": "user_provided"
+      "intent": "move_sequence",
+      "motion_steps": [
+        {
+          "kind": "cartesian_relative",
+          "translation_mm": [0, 0, 8],
+          "value_source": "user_provided"
+        }
+      ]
     }
   },
   {
@@ -35,11 +43,14 @@
     "category": "方向和模糊一点",
     "prompt": "机械臂往上抬一点。",
     "expected": {
-      "intent": "move_relative",
-      "axis": "z",
-      "direction": "positive",
-      "distance_mm": 5,
-      "distance_source": "configured_default"
+      "intent": "move_sequence",
+      "motion_steps": [
+        {
+          "kind": "cartesian_relative",
+          "translation_mm": [0, 0, 15],
+          "value_source": "configured_default"
+        }
+      ]
     }
   },
   {
@@ -47,8 +58,13 @@
     "category": "缺失单位",
     "prompt": "在仿真中移动到基座坐标系入点(500,0,500)。",
     "expected": {
-      "intent": "move_to_entry",
-      "entry_point_mm": [500, 0, 500]
+      "intent": "move_sequence",
+      "motion_steps": [
+        {
+          "kind": "cartesian_absolute",
+          "target_position_mm": [500, 0, 500]
+        }
+      ]
     }
   },
   {
@@ -56,8 +72,13 @@
     "category": "缺失坐标系",
     "prompt": "在仿真中移动到入点(500,0,500)毫米。",
     "expected": {
-      "intent": "move_to_entry",
-      "entry_point_mm": [500, 0, 500]
+      "intent": "move_sequence",
+      "motion_steps": [
+        {
+          "kind": "cartesian_absolute",
+          "target_position_mm": [500, 0, 500]
+        }
+      ]
     }
   },
   {

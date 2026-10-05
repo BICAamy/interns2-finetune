@@ -16,9 +16,12 @@ from surgical_contracts import (
     ErrorCode,
     EventPhase,
     MotionState,
-    MoveRelativeRequest,
     MoveRelativeResult,
-    MoveToEntryRequest,
+    MoveSequenceRequest,
+    MoveSequenceResult,
+    MotionSequence,
+    MotionSequenceStep,
+    MotionStepKind,
     MoveToEntryResult,
     ParsedCommand,
     PlanPunctureRequest,
@@ -48,6 +51,9 @@ class OrchestrationPolicy:
     max_relative_translation_mm: float = 20.0
     move_speed_mm_s: float = 5.0
     max_speed_mm_s: float = 10.0
+    joint_move_speed_deg_s: float = 15.0
+    joint_move_acceleration_deg_s2: float = 30.0
+    max_relative_rotation_deg: float = 720.0
     expected_runtime_mode: RuntimeMode = RuntimeMode.SIMULATION
     move_tcp_name: str = "needle_tip"
     entry_orientation_policy: str = "configured_safe_orientation"
@@ -63,6 +69,12 @@ class OrchestrationPolicy:
             raise ValueError("max_speed_mm_s must be greater than zero")
         if self.move_speed_mm_s > self.max_speed_mm_s:
             raise ValueError("move_speed_mm_s cannot exceed max_speed_mm_s")
+        if self.joint_move_speed_deg_s <= 0:
+            raise ValueError("joint_move_speed_deg_s must be greater than zero")
+        if self.joint_move_acceleration_deg_s2 <= 0:
+            raise ValueError("joint_move_acceleration_deg_s2 must be greater than zero")
+        if self.max_relative_rotation_deg <= 0:
+            raise ValueError("max_relative_rotation_deg must be greater than zero")
         if not self.move_tcp_name or not self.entry_orientation_policy:
             raise ValueError("entry motion TCP and orientation policy cannot be empty")
 
@@ -74,7 +86,7 @@ class OrchestrationResult:
     state_history: tuple[AgentTaskState, ...]
     state_events: tuple[StateTransitionEvent, ...] = ()
     tool_events: tuple[ToolEvent, ...] = ()
-    robot_result: MoveToEntryResult | MoveRelativeResult | None = None
+    robot_result: MoveToEntryResult | MoveRelativeResult | MoveSequenceResult | None = None
     robot_state: RobotState | None = None
     planner_result: PlanPunctureResult | None = None
     verified_position_error_mm: float | None = None
@@ -232,7 +244,21 @@ class SurgicalTaskOrchestrator:
             return interrupted
 
         if command.intent == CommandIntent.MOVE_RELATIVE:
-            return self._execute_relative(command, machine, tool_events)
+            assert command.relative_motion is not None
+            command = command.model_copy(update={
+                "intent": CommandIntent.MOVE_SEQUENCE,
+                "relative_motion": None,
+                "motion_sequence": MotionSequence(steps=(MotionSequenceStep(
+                    kind=MotionStepKind.CARTESIAN_RELATIVE,
+                    translation_mm=command.relative_motion.translation_mm(),
+                    frame=command.relative_motion.frame,
+                    value_source=command.relative_motion.distance_source,
+                ),)),
+            })
+            return self._execute_sequence(command, machine, tool_events)
+
+        if command.intent == CommandIntent.MOVE_SEQUENCE:
+            return self._execute_sequence(command, machine, tool_events)
 
         if command.intent in {CommandIntent.MOVE_TO_ENTRY, CommandIntent.PUNCTURE}:
             return self._execute_entry_task(command, machine, tool_events)
@@ -386,41 +412,61 @@ class SurgicalTaskOrchestrator:
             )
         return state
 
-    def _execute_relative(
+    def _execute_sequence(
         self,
         command: ParsedCommand,
         machine: TaskStateMachine,
         tool_events: list[ToolEvent],
     ) -> OrchestrationResult:
-        assert command.relative_motion is not None
-        translation = command.relative_motion.translation_mm()
-        magnitude = sqrt(sum(float(value) ** 2 for value in translation))
-        if magnitude > self.policy.max_relative_translation_mm:
-            machine.transition(AgentTaskState.FAILED)
-            return self._result(
-                machine,
-                command,
-                tool_events,
-                error_code=ErrorCode.OUT_OF_WORKSPACE,
-                message=(
-                    f"相对位移 {magnitude:.3f} mm 超过单次安全上限 "
-                    f"{self.policy.max_relative_translation_mm:.3f} mm。"
-                ),
-            )
+        assert command.motion_sequence is not None
+        for step in command.motion_sequence.steps:
+            if step.kind == MotionStepKind.CARTESIAN_RELATIVE:
+                assert step.translation_mm is not None
+                magnitude = sqrt(sum(float(value) ** 2 for value in step.translation_mm))
+                if magnitude > self.policy.max_relative_translation_mm:
+                    machine.transition(AgentTaskState.FAILED)
+                    return self._result(
+                        machine,
+                        command,
+                        tool_events,
+                        error_code=ErrorCode.OUT_OF_WORKSPACE,
+                        message=(
+                            f"序列中的位移 {magnitude:.3f} mm 超过 YAML 上限 "
+                            f"{self.policy.max_relative_translation_mm:.3f} mm。"
+                        ),
+                    )
+            elif step.kind in {
+                MotionStepKind.JOINT_RELATIVE,
+                MotionStepKind.TCP_ROTATION_RELATIVE,
+            }:
+                assert step.rotation_deg is not None
+                if abs(float(step.rotation_deg)) > self.policy.max_relative_rotation_deg:
+                    machine.transition(AgentTaskState.FAILED)
+                    return self._result(
+                        machine,
+                        command,
+                        tool_events,
+                        error_code=ErrorCode.OUT_OF_WORKSPACE,
+                        message=(
+                            f"序列中的转动 {abs(float(step.rotation_deg)):.3f}° 超过 "
+                            f"YAML 上限 {self.policy.max_relative_rotation_deg:.3f}°。"
+                        ),
+                    )
 
-        machine.transition(AgentTaskState.EXECUTING_RELATIVE)
-        request = MoveRelativeRequest(
+        machine.transition(AgentTaskState.EXECUTING_SEQUENCE)
+        request = MoveSequenceRequest(
             command_id=command.command_id,
-            translation_mm=translation,
-            frame=command.relative_motion.frame,
-            speed_mm_s=self.policy.move_speed_mm_s,
+            steps=command.motion_sequence.steps,
+            translation_speed_mm_s=self.policy.move_speed_mm_s,
+            joint_speed_deg_s=self.policy.joint_move_speed_deg_s,
+            joint_acceleration_deg_s2=self.policy.joint_move_acceleration_deg_s2,
         )
         try:
             result = self._call_tool(
                 command.command_id,
-                ToolName.ROBOT_MOVE_RELATIVE,
+                ToolName.ROBOT_MOVE_SEQUENCE,
                 request,
-                lambda: self.robot.move_relative(request),
+                lambda: self.robot.move_sequence(request),
                 tool_events,
             )
         except Exception as exc:
@@ -430,28 +476,13 @@ class SurgicalTaskOrchestrator:
                 command,
                 tool_events,
                 error_code=_robot_exception_code(exc),
-                message=f"相对运动工具调用失败：{type(exc).__name__}",
+                message=f"组合运动工具调用失败：{type(exc).__name__}",
             )
-
-        interrupted = self._interrupted_result(
-            command,
-            machine,
-            tool_events,
-            robot_result=result,
-        )
-        if interrupted is not None:
-            return interrupted
-        if result.command_id != command.command_id:
-            machine.transition(AgentTaskState.FAILED)
-            return self._result(
-                machine,
-                command,
-                tool_events,
-                robot_result=result,
-                error_code=ErrorCode.INTERNAL_ERROR,
-                message="相对运动工具返回了不匹配的 command_id。",
-            )
-        if result.status != ToolStatus.SUCCESS or not result.completed:
+        if (
+            result.command_id != command.command_id
+            or result.status != ToolStatus.SUCCESS
+            or not result.completed
+        ):
             machine.transition(AgentTaskState.FAILED)
             return self._result(
                 machine,
@@ -467,7 +498,10 @@ class SurgicalTaskOrchestrator:
             command,
             tool_events,
             robot_result=result,
-            message="相对运动已完成；未调用路径规划，未执行穿刺。",
+            message=(
+                f"按顺序完成 {result.completed_steps} 个运动步骤；"
+                "未执行穿刺。"
+            ),
         )
 
     def _execute_entry_task(
@@ -478,19 +512,24 @@ class SurgicalTaskOrchestrator:
     ) -> OrchestrationResult:
         assert command.entry_point is not None
         machine.transition(AgentTaskState.MOVING_TO_ENTRY)
-        request = MoveToEntryRequest(
+        request = MoveSequenceRequest(
             command_id=command.command_id,
-            entry_point=command.entry_point,
-            tcp=self.policy.move_tcp_name,
-            orientation_policy=self.policy.entry_orientation_policy,
-            speed_mm_s=self.policy.move_speed_mm_s,
+            steps=(MotionSequenceStep(
+                kind=MotionStepKind.CARTESIAN_ABSOLUTE,
+                target_position_mm=command.entry_point.as_tuple(),
+                frame=command.entry_point.frame,
+            ),),
+            translation_speed_mm_s=self.policy.move_speed_mm_s,
+            joint_speed_deg_s=self.policy.joint_move_speed_deg_s,
+            joint_acceleration_deg_s2=self.policy.joint_move_acceleration_deg_s2,
         )
+
         try:
             move_result = self._call_tool(
                 command.command_id,
-                ToolName.ROBOT_MOVE_TO_ENTRY,
+                ToolName.ROBOT_MOVE_SEQUENCE,
                 request,
-                lambda: self.robot.move_to_entry(request),
+                lambda: self.robot.move_sequence(request),
                 tool_events,
             )
         except Exception as exc:
@@ -521,7 +560,7 @@ class SurgicalTaskOrchestrator:
                 error_code=ErrorCode.INTERNAL_ERROR,
                 message="入点运动工具返回了不匹配的 command_id；未调用路径规划。",
             )
-        if move_result.status != ToolStatus.SUCCESS or not move_result.reached:
+        if move_result.status != ToolStatus.SUCCESS or not move_result.completed:
             machine.transition(AgentTaskState.FAILED)
             return self._result(
                 machine,
@@ -760,7 +799,9 @@ class SurgicalTaskOrchestrator:
         machine: TaskStateMachine,
         tool_events: list[ToolEvent],
         *,
-        robot_result: MoveToEntryResult | MoveRelativeResult | None = None,
+        robot_result: (
+            MoveToEntryResult | MoveRelativeResult | MoveSequenceResult | None
+        ) = None,
         robot_state: RobotState | None = None,
         planner_result: PlanPunctureResult | None = None,
         verified_position_error_mm: float | None = None,
@@ -919,7 +960,9 @@ class SurgicalTaskOrchestrator:
         command: ParsedCommand,
         tool_events: list[ToolEvent],
         *,
-        robot_result: MoveToEntryResult | MoveRelativeResult | None = None,
+        robot_result: (
+            MoveToEntryResult | MoveRelativeResult | MoveSequenceResult | None
+        ) = None,
         robot_state: RobotState | None = None,
         planner_result: PlanPunctureResult | None = None,
         verified_position_error_mm: float | None = None,

@@ -137,6 +137,11 @@ class HuayanRealProvider:
             return self.remote_motion.propose_absolute(request)
         if (
             self.remote_motion is not None
+            and kind == RobotCommandKind.MOVE_SEQUENCE
+        ):
+            return self.remote_motion.propose_sequence(request)
+        if (
+            self.remote_motion is not None
             and kind == RobotCommandKind.SET_ENABLED
         ):
             return self.remote_motion.set_enabled(request)

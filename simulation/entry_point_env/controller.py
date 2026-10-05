@@ -11,6 +11,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from surgical_contracts import (
+    Axis,
     CoordinateSource,
     MotionState,
     Point3D,
@@ -37,6 +38,8 @@ class UnreachableTargetError(InvalidMotionCommand):
 class MotionCommandKind(str, Enum):
     ENTRY_POINT = "entry_point"
     RELATIVE = "relative"
+    JOINT_RELATIVE = "joint_relative"
+    CARTESIAN_POSE = "cartesian_pose"
 
 
 @dataclass(frozen=True)
@@ -102,7 +105,10 @@ class ContinuousTrajectoryController:
 
         self._entry_point_mm: tuple[float, float, float] | None = None
         self._target_position_mm: tuple[float, float, float] | None = None
+        self._target_joint_positions_rad: np.ndarray | None = None
+        self._target_tcp_orientation: Rotation | None = None
         self._speed_mm_s = self.config.default_speed_mm_s
+        self._joint_speed_deg_s = self.config.joint_speed_deg_s
         self._motion_state = MotionState.IDLE
         self._estop = False
         self._active_command_id: str | None = None
@@ -201,6 +207,146 @@ class ContinuousTrajectoryController:
         speed = self._validated_speed(speed_mm_s)
         return self._start_motion(target, speed, MotionCommandKind.RELATIVE, "relative")
 
+    def move_joint_relative(
+        self,
+        joint_index: int,
+        rotation_deg: float,
+        speed_deg_s: float | None = None,
+    ) -> str:
+        self._ensure_motion_can_start()
+        if type(joint_index) is not int or not 1 <= joint_index <= 6:
+            raise InvalidMotionCommand("joint_index must be within 1..6")
+        rotation = float(rotation_deg)
+        if not isfinite(rotation) or rotation == 0.0:
+            raise InvalidMotionCommand("rotation_deg must be finite and non-zero")
+        if abs(rotation) > self.config.maximum_rotation_deg:
+            raise InvalidMotionCommand("joint rotation exceeds maximum_rotation_deg")
+        speed = self.config.joint_speed_deg_s if speed_deg_s is None else float(speed_deg_s)
+        if not isfinite(speed) or speed <= 0.0:
+            raise InvalidMotionCommand("speed_deg_s must be finite and positive")
+        maximum = self.config.robot.joint_max_speeds_deg_s[joint_index - 1]
+        if speed > maximum:
+            raise InvalidMotionCommand(f"joint speed cannot exceed {maximum}")
+        target = self._joint_positions_rad.copy()
+        target[joint_index - 1] += np.deg2rad(rotation)
+        low, high = self.config.robot.joint_limits_deg[joint_index - 1]
+        target_deg = float(np.rad2deg(target[joint_index - 1]))
+        if not low <= target_deg <= high:
+            raise InvalidMotionCommand("joint target exceeds configured joint limit")
+        snapshot = self.kinematics.forward(target)
+        target_position = self._position_from_snapshot(snapshot)
+        if not self.config.workspace.contains(target_position):
+            raise WorkspaceViolationError("joint path target leaves the workspace")
+        command_id = self._next_command_id("joint")
+        self._target_joint_positions_rad = target
+        self._target_position_mm = target_position
+        self._joint_speed_deg_s = speed
+        self._command_kind = MotionCommandKind.JOINT_RELATIVE
+        self._active_command_id = command_id
+        self._last_command_id = command_id
+        self._motion_state = MotionState.MOVING
+        return command_id
+
+    def move_joint_absolute(
+        self,
+        joint_index: int,
+        target_angle_deg: float,
+        speed_deg_s: float | None = None,
+    ) -> str:
+        self._ensure_motion_can_start()
+        if type(joint_index) is not int or not 1 <= joint_index <= 6:
+            raise InvalidMotionCommand("joint_index must be within 1..6")
+        target = float(target_angle_deg)
+        if not isfinite(target):
+            raise InvalidMotionCommand("target_angle_deg must be finite")
+        current = float(np.rad2deg(self._joint_positions_rad[joint_index - 1]))
+        delta = target - current
+        if abs(delta) <= 1e-12:
+            command_id = self._next_command_id("joint-absolute")
+            self._last_command_id = command_id
+            return command_id
+        return self.move_joint_relative(joint_index, delta, speed_deg_s)
+
+    def move_cartesian_absolute(
+        self,
+        target_position_mm: Sequence[float],
+        speed_mm_s: float | None = None,
+    ) -> str:
+        target = self._vector(target_position_mm, name="target_position_mm")
+        current_orientation = Rotation.from_matrix(
+            self.kinematic_snapshot.tcp_transform[:3, :3]
+        )
+        return self._move_cartesian_pose(
+            target,
+            current_orientation,
+            speed_mm_s=speed_mm_s,
+            prefix="absolute",
+        )
+
+    def move_tcp_rotation(
+        self,
+        axis: Axis,
+        angle_deg: float,
+        *,
+        absolute: bool,
+        speed_mm_s: float | None = None,
+    ) -> str:
+        try:
+            selected_axis = Axis(axis)
+        except (TypeError, ValueError) as error:
+            raise InvalidMotionCommand("TCP rotation axis must be x, y, or z") from error
+        angle = float(angle_deg)
+        if not isfinite(angle):
+            raise InvalidMotionCommand("TCP rotation angle must be finite")
+        current = Rotation.from_matrix(self.kinematic_snapshot.tcp_transform[:3, :3])
+        rpy = current.as_euler("xyz", degrees=True)
+        index = {Axis.X: 0, Axis.Y: 1, Axis.Z: 2}[selected_axis]
+        delta = angle - float(rpy[index]) if absolute else angle
+        if abs(delta) > self.config.maximum_rotation_deg:
+            raise InvalidMotionCommand("TCP rotation exceeds maximum_rotation_deg")
+        rpy[index] = angle if absolute else rpy[index] + angle
+        return self._move_cartesian_pose(
+            self._position_mm,
+            Rotation.from_euler("xyz", rpy, degrees=True),
+            speed_mm_s=speed_mm_s,
+            prefix="tcp-rotation",
+        )
+
+    def _move_cartesian_pose(
+        self,
+        target_position_mm: Sequence[float],
+        target_orientation: Rotation,
+        *,
+        speed_mm_s: float | None,
+        prefix: str,
+    ) -> str:
+        self._ensure_motion_can_start()
+        target = self._vector(target_position_mm, name="target_position_mm")
+        if not self.config.workspace.contains(target):
+            raise WorkspaceViolationError(f"target {target} mm is outside the workspace")
+        self._validated_speed(speed_mm_s)
+        try:
+            solution = self.kinematics.inverse(
+                target,
+                target_orientation,
+                self._joint_positions_rad,
+            )
+        except InverseKinematicsError as error:
+            raise UnreachableTargetError(str(error)) from error
+        command_id = self._next_command_id(prefix)
+        self._target_joint_positions_rad = np.asarray(
+            solution.joint_positions_rad,
+            dtype=np.float64,
+        )
+        self._target_position_mm = target
+        self._target_tcp_orientation = target_orientation
+        self._joint_speed_deg_s = self.config.joint_speed_deg_s
+        self._command_kind = MotionCommandKind.CARTESIAN_POSE
+        self._active_command_id = command_id
+        self._last_command_id = command_id
+        self._motion_state = MotionState.MOVING
+        return command_id
+
     def _ensure_motion_can_start(self) -> None:
         if self._estop:
             raise InvalidMotionCommand("emergency stop is active")
@@ -216,6 +362,8 @@ class ContinuousTrajectoryController:
     ) -> str:
         command_id = self._next_command_id(prefix)
         self._target_position_mm = target
+        self._target_joint_positions_rad = None
+        self._target_tcp_orientation = None
         self._speed_mm_s = speed_mm_s
         self._command_kind = kind
         self._active_command_id = command_id
@@ -234,6 +382,15 @@ class ContinuousTrajectoryController:
             del self._trajectory_mm[:overflow]
 
     def _finish_motion(self) -> None:
+        if self._command_kind in {
+            MotionCommandKind.JOINT_RELATIVE,
+            MotionCommandKind.CARTESIAN_POSE,
+        }:
+            self._fixed_tcp_orientation = Rotation.from_matrix(
+                self.kinematic_snapshot.tcp_transform[:3, :3]
+            )
+        self._target_joint_positions_rad = None
+        self._target_tcp_orientation = None
         if self._command_kind == MotionCommandKind.ENTRY_POINT:
             self._motion_state = MotionState.AT_ENTRY
         else:
@@ -279,7 +436,32 @@ class ContinuousTrajectoryController:
     def step(self) -> SimulationStep:
         self._step_sequence += 1
         if self._motion_state == MotionState.MOVING:
-            if self._target_position_mm is None:
+            if self._command_kind in {
+                MotionCommandKind.JOINT_RELATIVE,
+                MotionCommandKind.CARTESIAN_POSE,
+            }:
+                if self._target_joint_positions_rad is None:
+                    self.mark_failed()
+                else:
+                    delta = self._target_joint_positions_rad - self._joint_positions_rad
+                    maximum_step = np.deg2rad(self._joint_speed_deg_s) * self.config.time_step_s
+                    if np.max(np.abs(delta)) <= maximum_step:
+                        candidate = self._target_joint_positions_rad.copy()
+                    else:
+                        candidate = self._joint_positions_rad + np.clip(
+                            delta, -maximum_step, maximum_step
+                        )
+                    snapshot = self.kinematics.forward(candidate)
+                    actual_position = self._position_from_snapshot(snapshot)
+                    if not self.config.workspace.contains(actual_position):
+                        self.mark_failed()
+                        raise WorkspaceViolationError("joint path leaves the workspace")
+                    self._joint_positions_rad = candidate
+                    self._position_mm = actual_position
+                    self._append_trajectory(actual_position)
+                    if np.max(np.abs(delta)) <= maximum_step:
+                        self._finish_motion()
+            elif self._target_position_mm is None:
                 self.mark_failed()
             else:
                 remaining = dist(self._position_mm, self._target_position_mm)
@@ -347,6 +529,8 @@ class ContinuousTrajectoryController:
 
     def stop(self) -> RobotState:
         self._target_position_mm = None
+        self._target_joint_positions_rad = None
+        self._target_tcp_orientation = None
         self._command_kind = None
         self._active_command_id = None
         self._motion_state = MotionState.ESTOP if self._estop else MotionState.STOPPED
@@ -356,6 +540,8 @@ class ContinuousTrajectoryController:
         """Latch the simulation emergency stop and cancel active motion."""
 
         self._target_position_mm = None
+        self._target_joint_positions_rad = None
+        self._target_tcp_orientation = None
         self._command_kind = None
         self._active_command_id = None
         self._estop = True

@@ -13,7 +13,7 @@ from .adapter import read_override, read_waypoint_id
 from .command_codec import CommandFrameDecoder, decode_reply, encode_read
 from .models import ProtocolError, ReadCommand, ResponseUnknown
 from .motion_codec import (
-    LinearWaypoint, decode_write_reply, encode_group_enabled,
+    JointWaypoint, LinearWaypoint, decode_write_reply, encode_group_enabled,
     encode_software_stop, encode_speed_override,
 )
 
@@ -84,7 +84,7 @@ class FakeMotionClient:
         finally:
             self._lock.release()
 
-    def waypoint(self, waypoint: LinearWaypoint) -> bool:
+    def waypoint(self, waypoint: LinearWaypoint | JointWaypoint) -> bool:
         return decode_write_reply(self._exchange(waypoint.encode()), command="WayPoint")
 
     def software_stop(self) -> bool:
@@ -108,6 +108,10 @@ class FakeMotionClient:
         return decode_write_reply(
             self._exchange(encode_group_enabled(enabled)), command=command,
         )
+
+    def prepare_next_waypoint(self, *, stationary_confirmed: bool = False) -> None:
+        if not stationary_confirmed:
+            raise PermissionError("next fake WayPoint requires stationary feedback")
 
     def __enter__(self) -> "FakeMotionClient":
         self.connect()

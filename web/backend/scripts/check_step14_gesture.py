@@ -113,8 +113,8 @@ def main() -> None:
             command = latest.get("mapped_command") or {}
             if not snapshot.get("pending_confirmation"):
                 raise SystemExit("FAIL: ordinary gesture did not require confirmation")
-            if command.get("intent") != "move_relative":
-                raise SystemExit("FAIL: ordinary gesture did not map to move_relative")
+            if command.get("intent") != "move_sequence":
+                raise SystemExit("FAIL: ordinary gesture did not map to MotionSequence")
             print(f"mapped_command={command}")
 
         print("STEP14_GESTURE_SMOKE_OK")

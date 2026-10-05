@@ -6,6 +6,12 @@ entry_point_env:
   maximum_speed_mm_s: 2000.0 # 与真机 limits.max_speed_mm_s 一致
   reach_tolerance_mm: 0.5 # 距目标 ≤ 0.5 mm 时，可以认为“到点”
   maximum_relative_distance_mm: 1000.0 # 与真机 limits.max_step_mm 一致
+  default_relative_step_mm: 15.0 # “移动一点”时采用的距离
+  default_relative_rotation_deg: 15.0 # “转动一点”时采用的角度
+  default_rotation_joint_index: 1 # 未指定关节时转动 J1，可填 1～6
+  joint_speed_deg_s: 15.0 # 关节相对旋转速度
+  joint_acceleration_deg_s2: 30.0 # 关节相对旋转加速度
+  maximum_rotation_deg: 720.0 # 与真机 limits.max_rotation_deg 一致
   trajectory_history_limit: 2048 # 最多保留 2048 个历史轨迹点
 
   # workspace是一个长方体，对应xyz三个方向；与当前真机配置保持一致

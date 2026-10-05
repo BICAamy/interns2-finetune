@@ -14,6 +14,7 @@ class AgentTaskState(str, Enum):
     VALIDATING = "validating"
     CLARIFICATION_REQUIRED = "clarification_required"
     EXECUTING_RELATIVE = "executing_relative"
+    EXECUTING_SEQUENCE = "executing_sequence"
     MOVING_TO_ENTRY = "moving_to_entry"
     AT_ENTRY = "at_entry"
     PATH_PLANNING = "path_planning"
@@ -59,6 +60,7 @@ _ALLOWED_TRANSITIONS: dict[AgentTaskState, set[AgentTaskState]] = {
     AgentTaskState.VALIDATING: {
         AgentTaskState.CLARIFICATION_REQUIRED,
         AgentTaskState.EXECUTING_RELATIVE,
+        AgentTaskState.EXECUTING_SEQUENCE,
         AgentTaskState.MOVING_TO_ENTRY,
         AgentTaskState.STOPPED,
         AgentTaskState.ESTOP,
@@ -66,6 +68,12 @@ _ALLOWED_TRANSITIONS: dict[AgentTaskState, set[AgentTaskState]] = {
     },
     AgentTaskState.CLARIFICATION_REQUIRED: set(),
     AgentTaskState.EXECUTING_RELATIVE: {
+        AgentTaskState.COMPLETED,
+        AgentTaskState.FAILED,
+        AgentTaskState.STOPPED,
+        AgentTaskState.ESTOP,
+    },
+    AgentTaskState.EXECUTING_SEQUENCE: {
         AgentTaskState.COMPLETED,
         AgentTaskState.FAILED,
         AgentTaskState.STOPPED,

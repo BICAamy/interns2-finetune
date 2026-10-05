@@ -14,8 +14,10 @@ from surgical_contracts import (
     CoordinateFrame,
     Direction,
     DistanceSource,
+    MotionSequence,
+    MotionSequenceStep,
+    MotionStepKind,
     ParsedCommand,
-    RelativeMotion,
 )
 
 from agent.config import AgentSettings
@@ -311,18 +313,24 @@ def gesture_to_command(
     if selected is None:
         return None
     axis, direction = selected
-    motion = RelativeMotion(
-        axis=axis,
-        direction=direction,
-        distance_mm=distance_mm,
-        frame=CoordinateFrame.ROBOT_BASE,
-        distance_source=DistanceSource.CONFIGURED_DEFAULT,
+    signed_distance = distance_mm * (
+        1.0 if direction == Direction.POSITIVE else -1.0
     )
+    translation = {
+        Axis.X: (signed_distance, 0.0, 0.0),
+        Axis.Y: (0.0, signed_distance, 0.0),
+        Axis.Z: (0.0, 0.0, signed_distance),
+    }[axis]
     return ParsedCommand(
         command_id=command_id,
-        intent=CommandIntent.MOVE_RELATIVE,
-        relative_motion=motion,
+        intent=CommandIntent.MOVE_SEQUENCE,
+        motion_sequence=MotionSequence(steps=(MotionSequenceStep(
+            kind=MotionStepKind.CARTESIAN_RELATIVE,
+            translation_mm=translation,
+            frame=CoordinateFrame.ROBOT_BASE,
+            value_source=DistanceSource.CONFIGURED_DEFAULT,
+        ),)),
         needs_confirmation=True,
         confidence=1.0,
-        summary=f"手势相对移动：{gesture.value}，{distance_mm:g} mm",
+        summary=f"手势运动序列：{gesture.value}，{distance_mm:g} mm",
     )

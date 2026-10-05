@@ -5,6 +5,8 @@ from typing import Protocol, runtime_checkable
 from surgical_contracts import (
     MoveRelativeRequest,
     MoveRelativeResult,
+    MoveSequenceRequest,
+    MoveSequenceResult,
     MoveToEntryRequest,
     MoveToEntryResult,
     RobotState,
@@ -27,6 +29,11 @@ class RobotController(Protocol):
 
     def move_relative(self, request: MoveRelativeRequest) -> MoveRelativeResult:
         """Move the configured TCP by a Cartesian translation."""
+
+        ...
+
+    def move_sequence(self, request: MoveSequenceRequest) -> MoveSequenceResult:
+        """Execute an ordered sequence of typed Cartesian and joint motions."""
 
         ...
 

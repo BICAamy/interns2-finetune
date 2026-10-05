@@ -337,20 +337,20 @@ def test_puncture_preview_requires_confirmation_and_never_executes_puncture():
         assert payload["pending_confirmation"] is True
         assert payload["raw_model_output"]["tool_call_id"] == "tool-call-web-1"
         assert payload["normalized_command"]["intent"] == "puncture"
-        assert robot.move_to_entry_calls == []
+        assert robot.move_sequence_calls == []
         assert planner.call_count == 0
 
         # A page refresh only reads state; it must never replay execution.
         refreshed = client.get(f"/api/sessions/{session_id}")
         assert refreshed.status_code == 200
         assert refreshed.json()["revision"] == payload["revision"]
-        assert robot.move_to_entry_calls == []
+        assert robot.move_sequence_calls == []
 
         accepted = client.post(f"/api/sessions/{session_id}/confirm")
         assert accepted.status_code == 202
         completed = wait_for_status(client, session_id, {"plan_ready", "failed"})
         assert completed["status"] == "plan_ready"
-        assert len(robot.move_to_entry_calls) == 1
+        assert len(robot.move_sequence_calls) == 1
         assert planner.call_count == 1
         assert completed["orchestration"]["planner_result"]["executable"] is False
         assert "未执行穿刺" in completed["message"]
@@ -390,7 +390,7 @@ def test_relative_motion_cancel_and_image_lifecycle():
         cancelled = client.post(f"/api/sessions/{session_id}/cancel")
         assert cancelled.status_code == 200
         assert cancelled.json()["status"] == "cancelled"
-        assert robot.move_relative_calls == []
+        assert robot.move_sequence_calls == []
         assert planner.call_count == 0
 
         second_confirm = client.post(f"/api/sessions/{session_id}/confirm")
@@ -420,7 +420,7 @@ def test_relative_confirmation_stop_estop_reset_and_websocket():
         completed = wait_for_status(client, session_id, {"completed", "failed"})
         assert completed["status"] == "completed"
         assert completed["current_tcp"]["z"] == 108.0
-        assert len(robot.move_relative_calls) == 1
+        assert len(robot.move_sequence_calls) == 1
         assert planner.call_count == 0
 
         stopped = client.post(f"/api/sessions/{session_id}/stop")
@@ -597,13 +597,13 @@ def test_speech_is_transcribed_deleted_and_reuses_confirmed_text_chain():
         assert transcriber.calls == 1
         assert transcriber.existed_during_call == [True]
         assert not transcriber.paths[0].exists()
-        assert robot.move_relative_calls == []
+        assert robot.move_sequence_calls == []
 
         accepted = client.post(f"/api/sessions/{session_id}/confirm")
         assert accepted.status_code == 202
         completed = wait_for_status(client, session_id, {"completed", "failed"})
         assert completed["status"] == "completed"
-        assert len(robot.move_relative_calls) == 1
+        assert len(robot.move_sequence_calls) == 1
 
 
 def test_low_confidence_speech_never_executes_without_doctor_confirmation():
@@ -629,7 +629,7 @@ def test_low_confidence_speech_never_executes_without_doctor_confirmation():
         assert payload["asr_transcription"]["low_confidence"] is True
         assert "逐字核对" in payload["message"]
         assert parser.calls == 1
-        assert robot.move_relative_calls == []
+        assert robot.move_sequence_calls == []
 
 
 def test_exact_spoken_stop_uses_fast_path_without_interns2():
@@ -704,7 +704,7 @@ def test_speech_upload_validation_happens_before_transcription():
         assert unknown.status_code == 404
         assert transcriber.calls == 0
         assert parser.calls == 0
-        assert robot.move_relative_calls == []
+        assert robot.move_sequence_calls == []
 
 
 def test_spoken_stop_preempts_inflight_interns2_parse_without_stale_overwrite():

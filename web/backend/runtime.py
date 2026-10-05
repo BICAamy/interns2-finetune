@@ -19,8 +19,9 @@ from surgical_contracts import (
     CoordinateSource,
     ParsedCommand,
     Point3D,
-    MoveRelativeRequest,
-    MoveToEntryRequest,
+    MotionSequenceStep,
+    MotionStepKind,
+    MoveSequenceRequest,
     RobotMotionProposal,
     RobotCommandKind,
     RobotTelemetry,
@@ -98,9 +99,9 @@ _IMAGE_SUFFIXES = {
 }
 
 _CURRENT_TOOLS = {
-    SessionStatus.MOVING_TO_ENTRY: "robot.move_to_entry",
+    SessionStatus.MOVING_TO_ENTRY: "robot.move_sequence",
     SessionStatus.VERIFYING_ENTRY: "robot.get_state",
-    SessionStatus.MOVING_RELATIVE: "robot.move_relative",
+    SessionStatus.MOVING_RELATIVE: "robot.move_sequence",
     SessionStatus.PLANNING: "planner.plan_puncture",
     SessionStatus.STOPPING: "robot.stop",
     SessionStatus.ESTOP: "robot.emergency_stop",
@@ -141,6 +142,18 @@ class WebRuntime:
                 ),
                 robot_move_speed_mm_s=simulation_policy.move_speed_mm_s,
                 max_robot_speed_mm_s=simulation_policy.max_speed_mm_s,
+                default_relative_step_mm=simulation_policy.default_relative_step_mm,
+                default_relative_rotation_deg=(
+                    simulation_policy.default_relative_rotation_deg
+                ),
+                default_rotation_joint_index=(
+                    simulation_policy.default_rotation_joint_index
+                ),
+                joint_move_speed_deg_s=simulation_policy.joint_speed_deg_s,
+                joint_move_acceleration_deg_s2=(
+                    simulation_policy.joint_acceleration_deg_s2
+                ),
+                max_relative_rotation_deg=simulation_policy.max_rotation_deg,
             )
             settings.validate()
         self._configured_mode = configured_mode
@@ -151,6 +164,34 @@ class WebRuntime:
             from robot_runtime.real_config import load_real_config
 
             self._real_config = load_real_config(settings.real_config_path)
+            settings = replace(
+                settings,
+                default_relative_step_mm=(
+                    self._real_config.motion.default_relative_step_mm
+                    or settings.default_relative_step_mm
+                ),
+                default_relative_rotation_deg=(
+                    self._real_config.motion.default_relative_rotation_deg
+                    or settings.default_relative_rotation_deg
+                ),
+                default_rotation_joint_index=(
+                    self._real_config.motion.default_rotation_joint_index
+                    or settings.default_rotation_joint_index
+                ),
+                joint_move_speed_deg_s=(
+                    self._real_config.motion.joint_speed_deg_s
+                    or settings.joint_move_speed_deg_s
+                ),
+                joint_move_acceleration_deg_s2=(
+                    self._real_config.motion.joint_acceleration_deg_s2
+                    or settings.joint_move_acceleration_deg_s2
+                ),
+                max_relative_rotation_deg=(
+                    self._real_config.limits.max_rotation_deg
+                    or settings.max_relative_rotation_deg
+                ),
+            )
+            settings.validate()
             fallback_ms = self._real_config.deadlines.real_mode_fallback_ms
             if fallback_ms is None:
                 raise ValueError(
@@ -205,6 +246,11 @@ class WebRuntime:
                     real.limits.max_speed_mm_s or settings.max_robot_speed_mm_s
                     if real is not None else settings.max_robot_speed_mm_s
                 ),
+                joint_move_speed_deg_s=settings.joint_move_speed_deg_s,
+                joint_move_acceleration_deg_s2=(
+                    settings.joint_move_acceleration_deg_s2
+                ),
+                max_relative_rotation_deg=settings.max_relative_rotation_deg,
                 expected_runtime_mode=configured_mode,
                 move_tcp_name=(
                     (real.tool.tcp_name or "needle_tip")
@@ -245,6 +291,18 @@ class WebRuntime:
                 ),
                 robot_move_speed_mm_s=simulation_policy.move_speed_mm_s,
                 max_robot_speed_mm_s=simulation_policy.max_speed_mm_s,
+                default_relative_step_mm=simulation_policy.default_relative_step_mm,
+                default_relative_rotation_deg=(
+                    simulation_policy.default_relative_rotation_deg
+                ),
+                default_rotation_joint_index=(
+                    simulation_policy.default_rotation_joint_index
+                ),
+                joint_move_speed_deg_s=simulation_policy.joint_speed_deg_s,
+                joint_move_acceleration_deg_s2=(
+                    simulation_policy.joint_acceleration_deg_s2
+                ),
+                max_relative_rotation_deg=simulation_policy.max_rotation_deg,
             )
             simulation_settings.validate()
             simulation_robot = RobotSimulationHTTPController(
@@ -272,6 +330,15 @@ class WebRuntime:
                     ),
                     move_speed_mm_s=simulation_settings.robot_move_speed_mm_s,
                     max_speed_mm_s=simulation_settings.max_robot_speed_mm_s,
+                    joint_move_speed_deg_s=(
+                        simulation_settings.joint_move_speed_deg_s
+                    ),
+                    joint_move_acceleration_deg_s2=(
+                        simulation_settings.joint_move_acceleration_deg_s2
+                    ),
+                    max_relative_rotation_deg=(
+                        simulation_settings.max_relative_rotation_deg
+                    ),
                     expected_runtime_mode=RuntimeMode.SIMULATION,
                     move_tcp_name=simulation_policy.tcp_name,
                 ),
@@ -1007,6 +1074,7 @@ class WebRuntime:
         if selected_mode == RuntimeMode.REAL and parsed.command.intent != CommandIntent.CLARIFY:
             if parsed.command.intent not in {
                 CommandIntent.MOVE_RELATIVE,
+                CommandIntent.MOVE_SEQUENCE,
                 CommandIntent.MOVE_TO_ENTRY,
                 CommandIntent.PUNCTURE,
             }:
@@ -1034,13 +1102,23 @@ class WebRuntime:
                         },
                         parse_token=parse_token,
                     )
-                proposal_request = MoveRelativeRequest(
-                    command_id=parsed.command.command_id,
+                steps = (MotionSequenceStep(
+                    kind=MotionStepKind.CARTESIAN_RELATIVE,
                     translation_mm=parsed.command.relative_motion.translation_mm(),
                     frame=parsed.command.relative_motion.frame,
-                    speed_mm_s=orchestrator.policy.move_speed_mm_s,
-                )
-                proposal_method = robot.create_move_relative_proposal
+                ),)
+            elif parsed.command.intent == CommandIntent.MOVE_SEQUENCE:
+                if parsed.command.motion_sequence is None:
+                    return self._record_parse_error(
+                        session_id,
+                        {
+                            "code": "INVALID_COMMAND_SCHEMA",
+                            "message": "组合运动缺少按顺序执行的步骤",
+                            "details": {},
+                        },
+                        parse_token=parse_token,
+                    )
+                steps = parsed.command.motion_sequence.steps
             else:
                 if parsed.command.entry_point is None or self._real_config is None:
                     return self._record_parse_error(
@@ -1052,14 +1130,21 @@ class WebRuntime:
                         },
                         parse_token=parse_token,
                     )
-                proposal_request = MoveToEntryRequest(
-                    command_id=parsed.command.command_id,
-                    entry_point=parsed.command.entry_point,
-                    tcp=self._real_config.tool.tcp_name,
-                    orientation_policy="hold_current_actual_orientation",
-                    speed_mm_s=orchestrator.policy.move_speed_mm_s,
-                )
-                proposal_method = robot.create_move_to_entry_proposal
+                steps = (MotionSequenceStep(
+                    kind=MotionStepKind.CARTESIAN_ABSOLUTE,
+                    target_position_mm=parsed.command.entry_point.as_tuple(),
+                    frame=parsed.command.entry_point.frame,
+                ),)
+            proposal_request = MoveSequenceRequest(
+                command_id=parsed.command.command_id,
+                steps=steps,
+                translation_speed_mm_s=orchestrator.policy.move_speed_mm_s,
+                joint_speed_deg_s=orchestrator.policy.joint_move_speed_deg_s,
+                joint_acceleration_deg_s2=(
+                    orchestrator.policy.joint_move_acceleration_deg_s2
+                ),
+            )
+            proposal_method = robot.create_move_sequence_proposal
             try:
                 proposal_record = await asyncio.to_thread(
                     proposal_method,
@@ -1232,8 +1317,8 @@ class WebRuntime:
         )
         if selected_mode == RuntimeMode.REAL:
             raise SessionConflict(
-                "Step 12 真实模式仅开放已确认的 move_relative；"
-                "网页不能发送停止或急停，请使用现场物理装置"
+                "真实模式的所有运动都通过网页确认的 MotionSequence 执行；"
+                "网页暂不发送停止或急停，请使用现场物理装置"
             )
         command = ParsedCommand(
             command_id=f"web-{'estop' if emergency else 'stop'}-{uuid4().hex}",

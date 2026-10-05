@@ -19,6 +19,9 @@ from surgical_contracts import (
     MotionState,
     MoveRelativeRequest,
     MoveRelativeResult,
+    MoveSequenceRequest,
+    MoveSequenceResult,
+    MotionStepKind,
     MoveToEntryRequest,
     MoveToEntryResult,
     ResetSimulationRequest,
@@ -70,6 +73,19 @@ class SimulationEnvironment(Protocol):
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None) -> Any: ...
     def move_to_entry(self, point: Any, speed_mm_s: float | None = None) -> str: ...
     def move_relative(self, delta_mm: tuple[float, float, float], speed_mm_s: float | None = None) -> str: ...
+    def move_joint_relative(
+        self, joint_index: int, rotation_deg: float, speed_deg_s: float | None = None,
+    ) -> str: ...
+    def move_joint_absolute(
+        self, joint_index: int, target_angle_deg: float, speed_deg_s: float | None = None,
+    ) -> str: ...
+    def move_cartesian_absolute(
+        self, target_position_mm: tuple[float, float, float], speed_mm_s: float | None = None,
+    ) -> str: ...
+    def move_tcp_rotation(
+        self, axis: Any, angle_deg: float, *, absolute: bool,
+        speed_mm_s: float | None = None,
+    ) -> str: ...
     def step(self) -> Any: ...
     def get_state(self) -> RobotState: ...
     def stop(self) -> RobotState: ...
@@ -137,6 +153,7 @@ class SimulationWorker:
         self._latest_frame: Any | None = None
         self._frame_sequence = 0
         self._active_command: QueuedCommand | None = None
+        self._active_sequence_step = 0
         self._initialization_error: str | None = None
         self._last_heartbeat_ms: int | None = None
         self._client_count = 0
@@ -319,6 +336,12 @@ class SimulationWorker:
                         f"received {request.frame.value}"
                     )
                 environment.move_relative(request.translation_mm, request.speed_mm_s)
+            elif command.kind == RobotCommandKind.MOVE_SEQUENCE:
+                request = command.request
+                if not isinstance(request, MoveSequenceRequest):
+                    raise InvalidMotionCommand("move_sequence request is invalid")
+                self._active_sequence_step = 0
+                self._start_sequence_step(environment, request, 0)
             else:
                 raise InvalidMotionCommand(f"unsupported normal command: {command.kind}")
 
@@ -376,7 +399,18 @@ class SimulationWorker:
             with self._lock:
                 self._capture_locked(step)
             if step.state.motion_state != MotionState.MOVING:
-                self._finish_active(environment, command, step)
+                if command.kind == RobotCommandKind.MOVE_SEQUENCE:
+                    request: MoveSequenceRequest = command.request
+                    next_index = self._active_sequence_step + 1
+                    if next_index < len(request.steps):
+                        self._active_sequence_step = next_index
+                        self._start_sequence_step(environment, request, next_index)
+                        with self._lock:
+                            self._capture_locked(environment.controller.snapshot())
+                    else:
+                        self._finish_active(environment, command, step)
+                else:
+                    self._finish_active(environment, command, step)
         except Exception as error:
             with self._lock:
                 self._active_command = None
@@ -406,7 +440,7 @@ class SimulationWorker:
                 trajectory_id=f"simulation-{command.command_id}",
                 message="Simulation needle TCP reached the entry point",
             )
-        else:
+        elif command.kind == RobotCommandKind.MOVE_RELATIVE:
             if state.motion_state not in {MotionState.IDLE, MotionState.AT_ENTRY}:
                 self._fail(command, RuntimeError("relative motion did not complete"))
                 return
@@ -418,7 +452,75 @@ class SimulationWorker:
                 trajectory_id=f"simulation-{command.command_id}",
                 message="Simulation relative movement completed",
             )
+        else:
+            request: MoveSequenceRequest = command.request
+            if state.motion_state not in {MotionState.IDLE, MotionState.AT_ENTRY}:
+                self._fail(command, RuntimeError("motion sequence did not complete"))
+                return
+            result = MoveSequenceResult(
+                command_id=command.command_id,
+                status=ToolStatus.SUCCESS,
+                completed=True,
+                completed_steps=len(request.steps),
+                total_steps=len(request.steps),
+                final_tcp_position=state.tcp_position,
+                final_joint_positions_deg=environment.controller.joint_positions_deg,
+                message="Simulation completed the ordered motion sequence",
+            )
         self._complete(command, result)
+
+    @staticmethod
+    def _start_sequence_step(
+        environment: SimulationEnvironment,
+        request: MoveSequenceRequest,
+        index: int,
+    ) -> None:
+        step = request.steps[index]
+        if step.kind == MotionStepKind.CARTESIAN_RELATIVE:
+            assert step.translation_mm is not None
+            if step.frame != environment.config.coordinate_frame:
+                raise InvalidMotionCommand("sequence translation frame is unsupported")
+            environment.move_relative(
+                step.translation_mm,
+                request.translation_speed_mm_s,
+            )
+            return
+        if step.kind == MotionStepKind.CARTESIAN_ABSOLUTE:
+            assert step.target_position_mm is not None
+            environment.move_cartesian_absolute(
+                step.target_position_mm,
+                request.translation_speed_mm_s,
+            )
+            return
+        if step.kind == MotionStepKind.JOINT_RELATIVE:
+            assert step.joint_index is not None and step.rotation_deg is not None
+            environment.move_joint_relative(
+                step.joint_index,
+                float(step.rotation_deg),
+                request.joint_speed_deg_s,
+            )
+            return
+        if step.kind == MotionStepKind.JOINT_ABSOLUTE:
+            assert step.joint_index is not None and step.target_angle_deg is not None
+            environment.move_joint_absolute(
+                step.joint_index,
+                float(step.target_angle_deg),
+                request.joint_speed_deg_s,
+            )
+            return
+        assert step.rotation_axis is not None
+        angle = (
+            step.rotation_deg
+            if step.kind == MotionStepKind.TCP_ROTATION_RELATIVE
+            else step.target_angle_deg
+        )
+        assert angle is not None
+        environment.move_tcp_rotation(
+            step.rotation_axis,
+            float(angle),
+            absolute=step.kind == MotionStepKind.TCP_ROTATION_ABSOLUTE,
+            speed_mm_s=request.translation_speed_mm_s,
+        )
 
     def _mark_running(self, command: QueuedCommand) -> None:
         with self._lock:

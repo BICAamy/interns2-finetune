@@ -27,6 +27,9 @@ from surgical_contracts import (
     MotionSafetyLimits,
     MoveRelativeRequest,
     MoveRelativeResult,
+    MoveSequenceRequest,
+    MoveSequenceResult,
+    MotionStepKind,
     MoveToEntryRequest,
     MoveToEntryResult,
     Point3D,
@@ -53,6 +56,9 @@ class RemoteMotionPolicy:
     max_speed_mm_s: float
     max_step_mm: float
     max_absolute_displacement_mm: float
+    max_rotation_deg: float
+    max_joint_speed_deg_s: float
+    max_joint_acceleration_deg_s2: float
     proposal_ttl_ms: int = 30_000
 
     def __post_init__(self) -> None:
@@ -60,6 +66,9 @@ class RemoteMotionPolicy:
             self.max_speed_mm_s,
             self.max_step_mm,
             self.max_absolute_displacement_mm,
+            self.max_rotation_deg,
+            self.max_joint_speed_deg_s,
+            self.max_joint_acceleration_deg_s2,
         )
         if not self.tcp_name or self.ucs_name != "Base":
             raise ValueError("remote motion requires an explicit TCP and Base UCS")
@@ -91,7 +100,7 @@ class RemoteMotionStore:
 
     @staticmethod
     def _request_key(
-        request: MoveRelativeRequest | MoveToEntryRequest,
+        request: MoveRelativeRequest | MoveToEntryRequest | MoveSequenceRequest,
     ) -> dict[str, object]:
         return request.model_dump(mode="json")
 
@@ -186,9 +195,56 @@ class RemoteMotionStore:
             )
         return self._propose_motion(request, GatewayCommandKind.MOVE_TO_ENTRY)
 
+    def propose_sequence(
+        self, request: MoveSequenceRequest,
+    ) -> tuple[RobotCommandRecord, bool]:
+        if request.translation_speed_mm_s > self.policy.max_speed_mm_s:
+            raise RobotRuntimeServiceError(
+                ErrorCode.OUT_OF_WORKSPACE,
+                "sequence translation speed exceeds configured limit",
+                status_code=422,
+                command_id=request.command_id,
+            )
+        if (
+            request.joint_speed_deg_s > self.policy.max_joint_speed_deg_s
+            or request.joint_acceleration_deg_s2
+            > self.policy.max_joint_acceleration_deg_s2
+        ):
+            raise RobotRuntimeServiceError(
+                ErrorCode.OUT_OF_WORKSPACE,
+                "sequence joint speed or acceleration exceeds configured limit",
+                status_code=422,
+                command_id=request.command_id,
+            )
+        for step in request.steps:
+            if step.kind == MotionStepKind.CARTESIAN_RELATIVE:
+                assert step.translation_mm is not None
+                if step.frame != CoordinateFrame.ROBOT_BASE or math.dist(
+                    (0.0, 0.0, 0.0), step.translation_mm
+                ) > self.policy.max_step_mm:
+                    raise RobotRuntimeServiceError(
+                        ErrorCode.OUT_OF_WORKSPACE,
+                        "sequence translation exceeds configured limit",
+                        status_code=422,
+                        command_id=request.command_id,
+                    )
+            elif step.kind in {
+                MotionStepKind.JOINT_RELATIVE,
+                MotionStepKind.TCP_ROTATION_RELATIVE,
+            }:
+                assert step.rotation_deg is not None
+                if abs(float(step.rotation_deg)) > self.policy.max_rotation_deg:
+                    raise RobotRuntimeServiceError(
+                        ErrorCode.OUT_OF_WORKSPACE,
+                        "sequence joint rotation exceeds configured limit",
+                        status_code=422,
+                        command_id=request.command_id,
+                    )
+        return self._propose_motion(request, GatewayCommandKind.MOVE_SEQUENCE)
+
     def _propose_motion(
         self,
-        request: MoveRelativeRequest | MoveToEntryRequest,
+        request: MoveRelativeRequest | MoveToEntryRequest | MoveSequenceRequest,
         kind: GatewayCommandKind,
     ) -> tuple[RobotCommandRecord, bool]:
         with self._lock:
@@ -216,7 +272,7 @@ class RemoteMotionStore:
                     (0.0, 0.0, 0.0),
                     tuple(float(value) for value in request.translation_mm),
                 )
-            else:
+            elif isinstance(request, MoveToEntryRequest):
                 distance = math.dist(
                     state.actual_pose_robot_base.translation_mm,
                     request.entry_point.as_tuple(),
@@ -228,7 +284,13 @@ class RemoteMotionStore:
                         status_code=422,
                         command_id=request.command_id,
                     )
-            if distance <= 1e-12 or distance > self.policy.max_step_mm:
+            else:
+                distance = None
+            if (distance is not None and distance <= 1e-12) or (
+                not isinstance(request, MoveSequenceRequest)
+                and distance is not None
+                and distance > self.policy.max_step_mm
+            ):
                 raise RobotRuntimeServiceError(
                     ErrorCode.OUT_OF_WORKSPACE,
                     "proposal exceeds configured remote motion limits",
@@ -250,6 +312,11 @@ class RemoteMotionStore:
                 safety_limits=MotionSafetyLimits(
                     max_speed_mm_s=self.policy.max_speed_mm_s,
                     max_step_mm=self.policy.max_step_mm,
+                    max_rotation_deg=self.policy.max_rotation_deg,
+                    max_joint_speed_deg_s=self.policy.max_joint_speed_deg_s,
+                    max_joint_acceleration_deg_s2=(
+                        self.policy.max_joint_acceleration_deg_s2
+                    ),
                 ),
                 operator_confirmation_id=(
                     "web-" + request.command_id
@@ -527,7 +594,7 @@ class RemoteMotionStore:
                         trajectory_id=result.controller_waypoint_id,
                         message="Mac confirmed absolute XYZ arrival from actual controller feedback",
                     )
-                else:
+                elif result.command_kind == GatewayCommandKind.MOVE_RELATIVE:
                     payload = MoveRelativeResult(
                         command_id=result.command_id,
                         status=ToolStatus.SUCCESS,
@@ -535,6 +602,25 @@ class RemoteMotionStore:
                         final_tcp_position=final_point,
                         trajectory_id=result.controller_waypoint_id,
                         message="Mac confirmed arrival from actual controller feedback",
+                    )
+                else:
+                    requested = frame.envelope.payload
+                    assert isinstance(requested, MoveSequenceRequest)
+                    if result.final_joint_positions_deg is None:
+                        raise RobotRuntimeServiceError(
+                            ErrorCode.INTERNAL_ERROR,
+                            "successful sequence result is missing actual final joints",
+                            command_id=result.command_id,
+                        )
+                    payload = MoveSequenceResult(
+                        command_id=result.command_id,
+                        status=ToolStatus.SUCCESS,
+                        completed=True,
+                        completed_steps=len(requested.steps),
+                        total_steps=len(requested.steps),
+                        final_tcp_position=final_point,
+                        final_joint_positions_deg=result.final_joint_positions_deg,
+                        message="Mac confirmed every ordered motion step from actual feedback",
                     )
                 status = CommandExecutionStatus.SUCCEEDED
                 error = None

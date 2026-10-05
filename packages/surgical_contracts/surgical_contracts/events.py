@@ -12,6 +12,7 @@ class ToolName(str, Enum):
     ROBOT_GET_STATE = "robot.get_state"
     ROBOT_MOVE_TO_ENTRY = "robot.move_to_entry"
     ROBOT_MOVE_RELATIVE = "robot.move_relative"
+    ROBOT_MOVE_SEQUENCE = "robot.move_sequence"
     ROBOT_STOP = "robot.stop"
     ROBOT_EMERGENCY_STOP = "robot.emergency_stop"
     ROBOT_SOFTWARE_STOP_REQUEST = "robot.software_stop_request"

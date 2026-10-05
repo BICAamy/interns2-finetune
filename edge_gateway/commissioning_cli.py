@@ -264,6 +264,11 @@ def _execute_relative(config: RealRobotConfig, args: argparse.Namespace) -> int:
                     safety_limits=MotionSafetyLimits(
                         max_speed_mm_s=approval.max_speed_mm_s,
                         max_step_mm=approval.max_step_mm,
+                        max_rotation_deg=approval.max_rotation_deg,
+                        max_joint_speed_deg_s=approval.max_joint_speed_deg_s,
+                        max_joint_acceleration_deg_s2=(
+                            approval.max_joint_acceleration_deg_s2
+                        ),
                     ),
                     operator_confirmation_id=test_id,
                 )

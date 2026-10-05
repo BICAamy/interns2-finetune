@@ -56,7 +56,13 @@ def movement(**changes: object) -> RobotCommandEnvelope:
             frame=CoordinateFrame.ROBOT_BASE,
             speed_mm_s=5,
         ),
-        "safety_limits": MotionSafetyLimits(max_speed_mm_s=5, max_step_mm=10),
+        "safety_limits": MotionSafetyLimits(
+            max_speed_mm_s=5,
+            max_step_mm=10,
+            max_rotation_deg=90,
+            max_joint_speed_deg_s=30,
+            max_joint_acceleration_deg_s2=60,
+        ),
         "operator_confirmation_id": "confirm-1",
     }
     values.update(changes)
@@ -123,7 +129,11 @@ class GatewayContractTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValidationError):
                 movement(**change)
         with self.assertRaises(ValidationError):
-            movement(safety_limits=MotionSafetyLimits(max_speed_mm_s=float("inf"), max_step_mm=10))
+            movement(safety_limits=MotionSafetyLimits(
+                max_speed_mm_s=float("inf"), max_step_mm=10,
+                max_rotation_deg=90, max_joint_speed_deg_s=30,
+                max_joint_acceleration_deg_s2=60,
+            ))
 
     def test_entry_motion_requires_explicit_base_point_and_matching_tcp(self) -> None:
         def entry_point(*, frame: CoordinateFrame | None = None, unit: bool = True) -> Point3D:

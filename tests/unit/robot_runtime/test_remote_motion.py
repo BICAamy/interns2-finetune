@@ -92,6 +92,9 @@ def enabled_provider():
             max_speed_mm_s=5,
             max_step_mm=10,
             max_absolute_displacement_mm=10,
+            max_rotation_deg=90,
+            max_joint_speed_deg_s=30,
+            max_joint_acceleration_deg_s2=60,
         ),
     )
     return sessions, provider, session_id

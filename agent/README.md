@@ -15,7 +15,7 @@ InternS2 只看到一个高层函数：
 submit_surgical_task
 ```
 
-函数参数包括任务意图、入点、靶点、相对移动、缺失字段、置信度和摘要。模型不会
+函数参数包括任务意图、入点、靶点、统一运动序列、缺失字段、置信度和摘要。模型不会
 获得 `robot-simulation`、planner 地址或任何底层控制函数。
 
 模型返回的参数还要经过确定性代码处理：
@@ -24,12 +24,13 @@ submit_surgical_task
 - JSON 解码后再用 Pydantic `ParsedCommand` 二次校验；
 - 兼容 LMDeploy 0.14 XML tool parser 将对象、数组、布尔值或 `null` 二次编码为
   JSON 字符串的响应，但不接受 Python 字面量或任意文本；
-- 模型侧使用 LMDeploy XML parser 稳定支持的扁平 `relative_*` 参数，运行时再组装
-  为统一 `ParsedCommand.relative_motion`；同时受限兼容已观察到的旧嵌套/提升格式；
+- 所有机械臂运动都规范化为 `MotionSequence`，单个动作也是只含一个 step
+  的序列；旧 `move_relative` / `move_to_entry` 输出只作为输入兼容；
 - 明确要求穿刺但缺靶点时，即使模型误判为 `move_to_entry`，运行时也会强制降级为
   `clarify`；类型错误、未知字段和内外冲突仍会被拒绝；
 - 对外距离统一为 `mm`；仿真模式缺失坐标系时使用 `robot_base`；
-- “往上抬一点”规范化为 `robot_base +Z 5 mm`，5 mm 来自配置；
+- “往上抬一点”的默认距离、“转动一点”的默认角度和未指定关节时使用的
+  J1～J6 均从当前模式 YAML 读取；
 - 完整穿刺缺入点或靶点、三维坐标不完整、坐标顺序含糊时降级为 `clarify`；
 - 其他坐标系在尚无确定性变换时只能澄清，不能直接运动；
 - 无 tool call、多个/未知 tool call、非法 JSON、超时和服务不可用都有稳定错误码；
@@ -45,8 +46,8 @@ submit_surgical_task
 ```text
 IDLE → PARSING → VALIDATING
   ├→ CLARIFICATION_REQUIRED
-  ├→ EXECUTING_RELATIVE → COMPLETED
-  └→ MOVING_TO_ENTRY → AT_ENTRY
+  ├→ EXECUTING_MOTION_SEQUENCE → COMPLETED
+  └→ MOVING_TO_ENTRY_BY_SEQUENCE → AT_ENTRY
        ├→ COMPLETED
        └→ PATH_PLANNING → PLAN_READY / PLAN_FAILED / PLANNER_UNAVAILABLE
 ```
@@ -54,9 +55,10 @@ IDLE → PARSING → VALIDATING
 关键安全规则：
 
 - 普通运动前读取机械臂状态，急停、模式不匹配或已有运动时拒绝执行；
-- 相对运动只能调用 `robot.move_relative`，且受单次位移和速度上限约束；
+- 所有位移和旋转只能调用 `robot.move_sequence`，每个 step 都受当前模式 YAML
+  中的工作空间、关节、距离、速度和加速度上限约束；
 - 到达入点后重新调用 `robot.get_state`，按最终 TCP 独立计算误差，不能只相信
-  `move_to_entry` 返回的 `reached=true`；
+  序列中入点运动返回的 `reached=true`；
 - 完整任务只有在到点复核通过后才能调用 planner；定位失败、误差超限、停止和急停
   都会阻断 planner；
 - planner 返回的数据被固定为 `executable=false`，`PLAN_READY` 只表示规划结果就绪，
@@ -166,17 +168,18 @@ python3 -m agent.main \
   --json
 ```
 
-期望结果包含：
+期望结果包含一个单步序列：
 
 ```json
 {
-  "intent": "move_relative",
-  "relative_motion": {
-    "axis": "z",
-    "direction": "positive",
-    "distance_mm": 5.0,
-    "frame": "robot_base",
-    "distance_source": "configured_default"
+  "intent": "move_sequence",
+  "motion_sequence": {
+    "steps": [{
+      "kind": "cartesian_relative",
+      "translation_mm": [0.0, 0.0, 15.0],
+      "frame": "robot_base",
+      "value_source": "configured_default"
+    }]
   }
 }
 ```
@@ -237,7 +240,7 @@ python3 -m agent.main \
   --json
 ```
 
-期望终态为 `completed`，只出现 `robot.get_state` 和 `robot.move_relative`，planner
+期望终态为 `completed`，只出现 `robot.get_state` 和 `robot.move_sequence`，planner
 调用次数为零。
 
 ## Step 10 三服务 CLI 端到端验收

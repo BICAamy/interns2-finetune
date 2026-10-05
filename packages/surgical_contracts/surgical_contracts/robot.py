@@ -5,10 +5,10 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal
 
-from pydantic import Field, FiniteFloat, model_validator
+from pydantic import Field, FiniteFloat, field_validator, model_validator
 
 from .base import SCHEMA_VERSION, ContractModel, SchemaVersion
-from .coordinates import CoordinateFrame, DistanceUnit, Point3D
+from .coordinates import CoordinateFrame, DistanceUnit, MotionSequenceStep, Point3D
 from .errors import ErrorCode
 
 
@@ -264,6 +264,46 @@ class MoveRelativeRequest(ContractModel):
         return self
 
 
+class MoveJointRelativeRequest(ContractModel):
+    schema_version: SchemaVersion = SCHEMA_VERSION
+    command_id: str = Field(min_length=1, max_length=128)
+    joint_index: int = Field(default=1, ge=1, le=6)
+    rotation_deg: FiniteFloat
+    speed_deg_s: FiniteFloat = Field(gt=0)
+    acceleration_deg_s2: FiniteFloat = Field(gt=0)
+
+    @field_validator("rotation_deg")
+    @classmethod
+    def reject_zero_rotation(cls, value: float) -> float:
+        if float(value) == 0.0:
+            raise ValueError("rotation_deg cannot be zero")
+        return value
+
+
+class MoveCartesianPoseRequest(ContractModel):
+    """Mac-internal absolute Base pose produced from one sequence step."""
+
+    schema_version: SchemaVersion = SCHEMA_VERSION
+    command_id: str = Field(min_length=1, max_length=128)
+    target_pose_robot_base: Pose6D
+    speed_mm_s: FiniteFloat = Field(gt=0)
+
+    @model_validator(mode="after")
+    def require_base_pose(self) -> "MoveCartesianPoseRequest":
+        if self.target_pose_robot_base.frame != CoordinateFrame.ROBOT_BASE:
+            raise ValueError("Cartesian pose target must use robot_base")
+        return self
+
+
+class MoveSequenceRequest(ContractModel):
+    schema_version: SchemaVersion = SCHEMA_VERSION
+    command_id: str = Field(min_length=1, max_length=128)
+    steps: tuple[MotionSequenceStep, ...] = Field(min_length=1)
+    translation_speed_mm_s: FiniteFloat = Field(gt=0)
+    joint_speed_deg_s: FiniteFloat = Field(gt=0)
+    joint_acceleration_deg_s2: FiniteFloat = Field(gt=0)
+
+
 class SetEnabledRequest(ContractModel):
     schema_version: SchemaVersion = SCHEMA_VERSION
     command_id: str = Field(min_length=1, max_length=128)
@@ -311,4 +351,36 @@ class MoveRelativeResult(ContractModel):
             raise ValueError("failed relative movement cannot have completed=true")
         if self.status != ToolStatus.SUCCESS and self.error_code is None:
             raise ValueError("non-success relative movement requires error_code")
+        return self
+
+
+class MoveSequenceResult(ContractModel):
+    schema_version: SchemaVersion = SCHEMA_VERSION
+    command_id: str = Field(min_length=1, max_length=128)
+    status: ToolStatus
+    completed: bool
+    completed_steps: int = Field(ge=0)
+    total_steps: int = Field(ge=1)
+    final_tcp_position: Point3D
+    final_joint_positions_deg: tuple[
+        FiniteFloat, FiniteFloat, FiniteFloat,
+        FiniteFloat, FiniteFloat, FiniteFloat,
+    ]
+    message: str = Field(min_length=1)
+    error_code: ErrorCode | None = None
+
+    @model_validator(mode="after")
+    def validate_status(self) -> "MoveSequenceResult":
+        if self.completed_steps > self.total_steps:
+            raise ValueError("completed_steps cannot exceed total_steps")
+        if self.status == ToolStatus.SUCCESS:
+            if not self.completed or self.completed_steps != self.total_steps:
+                raise ValueError("successful sequence must complete every step")
+            if self.error_code is not None:
+                raise ValueError("successful sequence cannot contain error_code")
+        else:
+            if self.completed:
+                raise ValueError("failed sequence cannot be completed")
+            if self.error_code is None:
+                raise ValueError("failed sequence requires error_code")
         return self

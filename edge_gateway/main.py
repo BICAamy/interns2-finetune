@@ -224,6 +224,7 @@ class EdgeGateway:
             if envelope.command_kind in {
                 GatewayCommandKind.MOVE_RELATIVE,
                 GatewayCommandKind.MOVE_TO_ENTRY,
+                GatewayCommandKind.MOVE_SEQUENCE,
             }:
                 return self._execute_remote_motion(envelope, fingerprint)
             return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
@@ -337,7 +338,7 @@ class EdgeGateway:
     ) -> RobotCommandResult:
         from .command_journal import CommandJournal
         from .commissioning_runtime import (
-            make_approval, make_path_ik, read_local_observation,
+            make_approval, make_joint_fk, make_path_ik, read_local_observation,
             read_motion_feedback,
         )
         from .fake_motion import LocalMotionTiming, LocalMotionTrial
@@ -415,7 +416,8 @@ class EdgeGateway:
 
             initial = snapshot()
             approval = make_approval(config, package_version=motion_client.package_version)
-            path_ik = make_path_ik(config, initial)
+            make_path_ik(config, initial)
+            make_joint_fk(config, initial)
             timing = LocalMotionTiming(
                 response_ms=config.deadlines.response_ms,
                 start_ms=config.deadlines.startup_ms,
@@ -446,7 +448,14 @@ class EdgeGateway:
                         journal=journal,
                         timing=timing,
                         approval=approval,
-                        path_ik=path_ik,
+                        path_ik=make_path_ik(
+                            config,
+                            observation_holder["value"].telemetry,
+                        ),
+                        joint_fk=make_joint_fk(
+                            config,
+                            observation_holder["value"].telemetry,
+                        ),
                     ),
                     snapshot=snapshot,
                     readback=readback,

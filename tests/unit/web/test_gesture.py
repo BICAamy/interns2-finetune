@@ -84,10 +84,15 @@ class GestureMappingTests(unittest.TestCase):
                     distance_mm=5.0,
                     command_id=f"test-{gesture.value}",
                 )
-                self.assertEqual(command.intent, CommandIntent.MOVE_RELATIVE)
-                self.assertEqual(command.relative_motion.axis, axis)
-                self.assertEqual(command.relative_motion.direction, direction)
-                self.assertEqual(command.relative_motion.distance_mm, 5.0)
+                self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+                step = command.motion_sequence.steps[0]
+                expected_value = 5.0 if direction == Direction.POSITIVE else -5.0
+                expected_translation = {
+                    Axis.X: (expected_value, 0.0, 0.0),
+                    Axis.Y: (0.0, expected_value, 0.0),
+                    Axis.Z: (0.0, 0.0, expected_value),
+                }[axis]
+                self.assertEqual(step.translation_mm, expected_translation)
                 self.assertTrue(command.needs_confirmation)
 
     def test_stop_and_estop_map_to_safety_intents(self):
@@ -139,8 +144,11 @@ class GestureCoordinatorTests(unittest.TestCase):
         self.assertEqual(response.decision, GestureDecision.ACCEPTED)
         self.assertEqual(snapshot.status, SessionStatus.AWAITING_CONFIRMATION)
         self.assertEqual(snapshot.input_source.value, "gesture")
-        self.assertEqual(snapshot.normalized_command["intent"], "move_relative")
-        self.assertEqual(snapshot.normalized_command["relative_motion"]["axis"], "z")
+        self.assertEqual(snapshot.normalized_command["intent"], "move_sequence")
+        self.assertEqual(
+            snapshot.normalized_command["motion_sequence"]["steps"][0]["translation_mm"],
+            [0.0, 0.0, 5.0],
+        )
 
     def test_two_stable_frames_are_required_when_configured(self):
         runtime = StubRuntime()

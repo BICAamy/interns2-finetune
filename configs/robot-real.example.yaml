@@ -42,6 +42,11 @@ limits:
 motion:
   speed_mm_s: null # WayPoint直线运动速度，单位：mm/秒
   controller_override: null # 控制器速度倍率，范围0.01到1.0
+  default_relative_step_mm: 15.0 # “移动一点”时采用的距离，单位：mm
+  default_relative_rotation_deg: 15.0 # “转动一点”时采用的角度，单位：度
+  default_rotation_joint_index: 1 # 未指定关节时转动哪个关节，可填 1～6
+  joint_speed_deg_s: null # 关节相对旋转速度，单位：度/秒
+  joint_acceleration_deg_s2: null # 关节相对旋转加速度，单位：度/秒²
 
 deadlines: # 各环节最多等多久；超时不算成功
   state_stale_ms: null # 状态数据多久没更新就算过期，单位：ms

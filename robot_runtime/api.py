@@ -25,6 +25,7 @@ from surgical_contracts import (
     GatewayHello,
     GatewayStateFrame,
     MoveRelativeRequest,
+    MoveSequenceRequest,
     MoveToEntryRequest,
     SetEnabledRequest,
     ResetSimulationRequest,
@@ -325,6 +326,14 @@ def create_app(
     )
     def move_relative(request: MoveRelativeRequest) -> RobotCommandRecord:
         return runtime_provider.submit(RobotCommandKind.MOVE_RELATIVE, request)[0]
+
+    @router.post(
+        "/v1/commands/move-sequence",
+        response_model=RobotCommandRecord,
+        status_code=202,
+    )
+    def move_sequence(request: MoveSequenceRequest) -> RobotCommandRecord:
+        return runtime_provider.submit(RobotCommandKind.MOVE_SEQUENCE, request)[0]
 
     @router.post(
         "/v1/commands/set-enabled",

@@ -268,7 +268,7 @@ class GestureCoordinator:
             distance_mm=self.runtime.settings.default_relative_step_mm,
             command_id=f"gesture-{uuid4().hex}",
         )
-        if command is None or command.intent != CommandIntent.MOVE_RELATIVE:
+        if command is None or command.intent != CommandIntent.MOVE_SEQUENCE:
             return GestureFrameResponse(
                 recognition=recognition,
                 decision=GestureDecision.IGNORED,
@@ -302,10 +302,9 @@ class GestureCoordinator:
             record.live_tool_events = []
             record.orchestration = None
             record.message = (
-                f"已识别手势 {gesture.value}；将沿 robot_base "
-                f"{command.relative_motion.axis.value.upper()} 轴"
-                f"{'正' if command.relative_motion.direction.value == 'positive' else '负'}方向移动 "
-                f"{command.relative_motion.distance_mm:g} mm。请确认后执行。"
+                f"已识别手势 {gesture.value}；已生成一个 step 的 MotionSequence，"
+                f"将在 robot_base 下移动 "
+                f"{self.runtime.settings.default_relative_step_mm:g} mm。请确认后执行。"
             )
             record.error = None
 

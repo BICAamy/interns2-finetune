@@ -97,6 +97,176 @@ def make_agent(arguments, *, settings=None, name="submit_surgical_task"):
 
 
 class InternS2AgentTests(unittest.TestCase):
+    def test_no_tool_call_parses_the_reported_ordered_motion_phrase(self):
+        client = FakeInternS2Client(calls=[])
+        agent = InternS2Agent(
+            replace(
+                make_settings(),
+                default_relative_step_mm=15.0,
+                default_relative_rotation_deg=15.0,
+            ),
+            client=client,
+            command_id_factory=lambda: "cmd-sequence-fallback",
+        )
+
+        result = agent.parse_command(
+            "往左52mm之后再往上一点然后再往前74mm，再向右转70度"
+        )
+
+        self.assertEqual(result.command.intent, CommandIntent.MOVE_SEQUENCE)
+        steps = result.command.motion_sequence.steps
+        self.assertEqual(steps[0].translation_mm, (0.0, 52.0, 0.0))
+        self.assertEqual(steps[1].translation_mm, (0.0, 0.0, 15.0))
+        self.assertEqual(steps[2].translation_mm, (74.0, 0.0, 0.0))
+        self.assertEqual(steps[3].joint_index, 1)
+        self.assertEqual(steps[3].rotation_deg, -70.0)
+
+    def test_no_tool_call_uses_configured_vague_distance_and_rotation(self):
+        client = FakeInternS2Client(calls=[])
+        agent = InternS2Agent(
+            replace(
+                make_settings(),
+                default_relative_step_mm=15.0,
+                default_relative_rotation_deg=15.0,
+                default_rotation_joint_index=4,
+            ),
+            client=client,
+            command_id_factory=lambda: "cmd-vague-sequence-fallback",
+        )
+
+        command = agent.parse_command("往上一点，然后向右转一点").command
+
+        self.assertEqual(command.motion_sequence.steps[0].translation_mm, (0.0, 0.0, 15.0))
+        self.assertEqual(command.motion_sequence.steps[1].joint_index, 4)
+        self.assertEqual(command.motion_sequence.steps[1].rotation_deg, -15.0)
+
+    def test_one_motion_sequence_can_contain_all_six_step_kinds(self):
+        arguments = base_arguments(
+            "move_sequence",
+            motion_steps=[
+                {
+                    "kind": "cartesian_relative", "delta_mm": [1, -2, 3],
+                    "value_source": "user_provided",
+                },
+                {
+                    "kind": "cartesian_absolute",
+                    "target_position_mm": [500, 10, 300],
+                    "value_source": "user_provided",
+                },
+                {
+                    "kind": "joint_relative", "joint_index": 2,
+                    "direction": "negative", "rotation_deg": 5,
+                    "value_source": "user_provided",
+                },
+                {
+                    "kind": "joint_absolute", "joint_index": 3,
+                    "target_angle_deg": 30,
+                    "value_source": "user_provided",
+                },
+                {
+                    "kind": "tcp_rotation_relative", "axis": "z",
+                    "direction": "positive", "rotation_deg": 10,
+                    "value_source": "user_provided",
+                },
+                {
+                    "kind": "tcp_rotation_absolute", "axis": "x",
+                    "target_angle_deg": -20,
+                    "value_source": "user_provided",
+                },
+            ],
+        )
+        command = make_agent(arguments)[0].parse_command("执行统一运动序列").command
+
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        steps = command.motion_sequence.steps
+        self.assertEqual([step.kind.value for step in steps], [
+            "cartesian_relative", "cartesian_absolute", "joint_relative",
+            "joint_absolute", "tcp_rotation_relative", "tcp_rotation_absolute",
+        ])
+        self.assertEqual(steps[0].translation_mm, (1.0, -2.0, 3.0))
+        self.assertEqual(steps[1].target_position_mm, (500.0, 10.0, 300.0))
+        self.assertEqual(steps[2].rotation_deg, -5.0)
+        self.assertEqual(steps[3].target_angle_deg, 30.0)
+        self.assertEqual(steps[4].rotation_axis, Axis.Z)
+        self.assertEqual(steps[5].target_angle_deg, -20.0)
+
+    def test_tcp_absolute_rotation_without_base_axis_requires_clarification(self):
+        client = FakeInternS2Client(calls=[])
+        agent = InternS2Agent(
+            make_settings(),
+            client=client,
+            command_id_factory=lambda: "cmd-tcp-axis-clarify",
+        )
+
+        command = agent.parse_command("把TCP转到30度").command
+
+        self.assertEqual(command.intent, CommandIntent.CLARIFY)
+        self.assertEqual(command.missing_fields, ["motion_sequence.rotation_axis"])
+
+        relative = agent.parse_command("TCP转动10度").command
+        self.assertEqual(relative.intent, CommandIntent.CLARIFY)
+        self.assertEqual(
+            relative.missing_fields,
+            ["motion_sequence.rotation_axis"],
+        )
+
+    def test_no_tool_call_parses_absolute_joint_and_tcp_rotation(self):
+        client = FakeInternS2Client(calls=[])
+        agent = InternS2Agent(
+            make_settings(),
+            client=client,
+            command_id_factory=lambda: "cmd-absolute-rotation-fallback",
+        )
+
+        command = agent.parse_command(
+            "J3关节旋转到30度，然后TCP绕Base Z轴转到20度"
+        ).command
+
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        self.assertEqual(command.motion_sequence.steps[0].joint_index, 3)
+        self.assertEqual(command.motion_sequence.steps[0].target_angle_deg, 30.0)
+        self.assertEqual(command.motion_sequence.steps[1].rotation_axis, Axis.Z)
+        self.assertEqual(command.motion_sequence.steps[1].target_angle_deg, 20.0)
+
+    def test_no_tool_call_parses_base_absolute_xyz_as_one_step_sequence(self):
+        client = FakeInternS2Client(calls=[])
+        agent = InternS2Agent(
+            make_settings(),
+            client=client,
+            command_id_factory=lambda: "cmd-absolute-xyz-fallback",
+        )
+
+        command = agent.parse_command(
+            "机械臂移动到Base坐标系下(X=500,Y=-10,Z=300)毫米"
+        ).command
+
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        self.assertEqual(
+            command.motion_sequence.steps[0].target_position_mm,
+            (500.0, -10.0, 300.0),
+        )
+
+    def test_no_tool_call_keeps_absolute_xyz_inside_a_mixed_sequence(self):
+        client = FakeInternS2Client(calls=[])
+        agent = InternS2Agent(
+            make_settings(),
+            client=client,
+            command_id_factory=lambda: "cmd-mixed-absolute-fallback",
+        )
+
+        command = agent.parse_command(
+            "移动到Base坐标系下X=500,Y=-10,Z=300毫米，然后J3关节增加5度"
+        ).command
+
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        self.assertEqual(len(command.motion_sequence.steps), 2)
+        self.assertEqual(
+            command.motion_sequence.steps[0].target_position_mm,
+            (500.0, -10.0, 300.0),
+        )
+        self.assertEqual(command.motion_sequence.steps[1].joint_index, 3)
+        self.assertEqual(command.motion_sequence.steps[1].rotation_deg, 5.0)
+
     def test_puncture_tool_call_is_validated_and_model_id_is_ignored(self):
         arguments = base_arguments(
             "puncture",
@@ -124,8 +294,12 @@ class InternS2AgentTests(unittest.TestCase):
             request["tools"][0]["function"]["parameters"]["properties"],
         )
         properties = request["tools"][0]["function"]["parameters"]["properties"]
-        self.assertIn("relative_axis", properties)
-        self.assertIn("relative_direction", properties)
+        self.assertIn("motion_steps", properties)
+        kinds = properties["motion_steps"]["anyOf"][0]["items"]["properties"]["kind"]["enum"]
+        self.assertEqual(kinds, [
+            "cartesian_relative", "cartesian_absolute", "joint_relative",
+            "joint_absolute", "tcp_rotation_relative", "tcp_rotation_absolute",
+        ])
         self.assertNotIn("relative_motion", properties)
 
     def test_asr_coordinate_provenance_cannot_be_overridden_by_model(self):
@@ -147,7 +321,11 @@ class InternS2AgentTests(unittest.TestCase):
             input_source=CoordinateSource.ASR_TEXT,
         ).command
 
-        self.assertEqual(command.entry_point.source, CoordinateSource.ASR_TEXT)
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        self.assertEqual(
+            command.motion_sequence.steps[0].target_position_mm,
+            (20.0, 35.0, 80.0),
+        )
 
     def test_lmdeploy_stringified_nested_parameters_are_decoded(self):
         arguments = base_arguments(
@@ -254,9 +432,12 @@ class InternS2AgentTests(unittest.TestCase):
 
         command = agent.parse_command("机械臂往上抬一点").command
 
-        self.assertEqual(command.intent, CommandIntent.MOVE_RELATIVE)
-        self.assertFalse(command.needs_confirmation)
-        self.assertEqual(command.relative_motion.distance_mm, 5.0)
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        self.assertTrue(command.needs_confirmation)
+        self.assertEqual(
+            command.motion_sequence.steps[0].translation_mm,
+            (0.0, 0.0, 15.0),
+        )
 
     def test_flattened_explicit_relative_fields_are_repaired(self):
         arguments = base_arguments(
@@ -273,10 +454,11 @@ class InternS2AgentTests(unittest.TestCase):
             "机械臂沿基座坐标系Z轴正方向移动8毫米"
         ).command
 
-        self.assertEqual(command.intent, CommandIntent.MOVE_RELATIVE)
-        self.assertEqual(command.relative_motion.translation_mm(), (0.0, 0.0, 8.0))
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        step = command.motion_sequence.steps[0]
+        self.assertEqual(step.translation_mm, (0.0, 0.0, 8.0))
         self.assertEqual(
-            command.relative_motion.distance_source,
+            step.value_source,
             DistanceSource.USER_PROVIDED,
         )
 
@@ -294,8 +476,11 @@ class InternS2AgentTests(unittest.TestCase):
 
         command = agent.parse_command("机械臂沿Z轴正方向移动8毫米").command
 
-        self.assertEqual(command.intent, CommandIntent.MOVE_RELATIVE)
-        self.assertEqual(command.relative_motion.translation_mm(), (0.0, 0.0, 8.0))
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        self.assertEqual(
+            command.motion_sequence.steps[0].translation_mm,
+            (0.0, 0.0, 8.0),
+        )
 
     def test_model_facing_combined_relative_vector_is_assembled(self):
         arguments = base_arguments(
@@ -311,8 +496,11 @@ class InternS2AgentTests(unittest.TestCase):
             "机械臂在 Base 坐标系 X 加 8、Y 减 3、Z 加 5 毫米"
         ).command
 
-        self.assertEqual(command.intent, CommandIntent.MOVE_RELATIVE)
-        self.assertEqual(command.relative_motion.translation_mm(), (8.0, -3.0, 5.0))
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        self.assertEqual(
+            command.motion_sequence.steps[0].translation_mm,
+            (8.0, -3.0, 5.0),
+        )
 
     def test_flattened_relative_fields_are_rejected_for_other_intents(self):
         arguments = base_arguments("stop", direction="positive")
@@ -345,14 +533,50 @@ class InternS2AgentTests(unittest.TestCase):
 
         command = agent.parse_command("机械臂往上抬一点").command
 
-        self.assertEqual(command.intent, CommandIntent.MOVE_RELATIVE)
-        self.assertEqual(command.relative_motion.axis, Axis.Z)
-        self.assertEqual(command.relative_motion.direction, Direction.POSITIVE)
-        self.assertEqual(command.relative_motion.distance_mm, 5.0)
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        step = command.motion_sequence.steps[0]
+        self.assertEqual(step.translation_mm, (0.0, 0.0, 15.0))
         self.assertEqual(
-            command.relative_motion.distance_source,
+            step.value_source,
             DistanceSource.CONFIGURED_DEFAULT,
         )
+
+    def test_ordered_translation_and_j1_rotation_sequence_is_preserved(self):
+        arguments = base_arguments(
+            "move_sequence",
+            motion_steps=[
+                {
+                    "kind": "translation", "axis": "y", "direction": "positive",
+                    "distance_mm": 52, "value_source": "user_provided",
+                },
+                {
+                    "kind": "translation", "axis": "z", "direction": "positive",
+                    "value_source": "configured_default",
+                },
+                {
+                    "kind": "translation", "axis": "x", "direction": "positive",
+                    "distance_mm": 74, "value_source": "user_provided",
+                },
+                {
+                    "kind": "joint_rotation", "direction": "negative",
+                    "rotation_deg": 70, "joint_index": 1,
+                    "value_source": "user_provided",
+                },
+            ],
+        )
+        agent, _client = make_agent(arguments)
+
+        command = agent.parse_command(
+            "往左52mm之后再往上一点然后再往前74mm，再向右转70度"
+        ).command
+
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        steps = command.motion_sequence.steps
+        self.assertEqual(steps[0].translation_mm, (0.0, 52.0, 0.0))
+        self.assertEqual(steps[1].translation_mm, (0.0, 0.0, 15.0))
+        self.assertEqual(steps[2].translation_mm, (74.0, 0.0, 0.0))
+        self.assertEqual(steps[3].joint_index, 1)
+        self.assertEqual(steps[3].rotation_deg, -70.0)
 
     def test_explicit_relative_distance_is_preserved(self):
         arguments = base_arguments(
@@ -368,9 +592,10 @@ class InternS2AgentTests(unittest.TestCase):
 
         command = agent.parse_command("沿基座 X 负方向移动12毫米").command
 
-        self.assertEqual(command.relative_motion.translation_mm(), (-12.0, 0.0, 0.0))
+        step = command.motion_sequence.steps[0]
+        self.assertEqual(step.translation_mm, (-12.0, 0.0, 0.0))
         self.assertEqual(
-            command.relative_motion.distance_source,
+            step.value_source,
             DistanceSource.USER_PROVIDED,
         )
 
@@ -383,9 +608,10 @@ class InternS2AgentTests(unittest.TestCase):
 
         command = agent.parse_command("移动到入点(500,0,500)").command
 
-        self.assertEqual(command.intent, CommandIntent.MOVE_TO_ENTRY)
-        self.assertEqual(command.entry_point.frame, CoordinateFrame.ROBOT_BASE)
-        self.assertEqual(command.entry_point.unit.value, "mm")
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        step = command.motion_sequence.steps[0]
+        self.assertEqual(step.frame, CoordinateFrame.ROBOT_BASE)
+        self.assertEqual(step.target_position_mm, (500.0, 0.0, 500.0))
 
     def test_centimetres_are_normalized_to_millimetres(self):
         arguments = base_arguments(
@@ -402,7 +628,10 @@ class InternS2AgentTests(unittest.TestCase):
 
         command = agent.parse_command("移动到基座坐标(50,0,50)厘米").command
 
-        self.assertEqual(command.entry_point.as_tuple(), (500.0, 0.0, 500.0))
+        self.assertEqual(
+            command.motion_sequence.steps[0].target_position_mm,
+            (500.0, 0.0, 500.0),
+        )
 
     def test_real_mode_missing_unit_or_frame_becomes_clarification(self):
         settings = replace(make_settings(), runtime_mode=RuntimeMode.REAL)
@@ -464,7 +693,11 @@ class InternS2AgentTests(unittest.TestCase):
 
         command = agent.parse_command("不要穿刺，只移动到入点(500,0,500)。").command
 
-        self.assertEqual(command.intent, CommandIntent.MOVE_TO_ENTRY)
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        self.assertEqual(
+            command.motion_sequence.steps[0].target_position_mm,
+            (500.0, 0.0, 500.0),
+        )
 
     def test_non_default_coordinate_frame_cannot_form_executable_motion(self):
         arguments = base_arguments(

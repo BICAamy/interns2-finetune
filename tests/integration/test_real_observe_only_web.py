@@ -195,6 +195,24 @@ def test_real_and_simulation_motion_values_match_but_load_independently() -> Non
         == real_config.limits.max_step_mm
     )
     assert simulation_policy.entry_tolerance_mm == real_config.arrival.position_tolerance_mm
+    assert (
+        simulation_policy.default_relative_step_mm
+        == real_config.motion.default_relative_step_mm
+    )
+    assert (
+        simulation_policy.default_relative_rotation_deg
+        == real_config.motion.default_relative_rotation_deg
+    )
+    assert (
+        simulation_policy.default_rotation_joint_index
+        == real_config.motion.default_rotation_joint_index
+    )
+    assert simulation_policy.joint_speed_deg_s == real_config.motion.joint_speed_deg_s
+    assert (
+        simulation_policy.joint_acceleration_deg_s2
+        == real_config.motion.joint_acceleration_deg_s2
+    )
+    assert simulation_policy.max_rotation_deg == real_config.limits.max_rotation_deg
     assert real_config.deadlines.real_mode_fallback_ms == 5000
 
     simulation_data = yaml.safe_load(
@@ -235,6 +253,23 @@ def test_real_and_simulation_motion_values_match_but_load_independently() -> Non
             == simulation_policy.max_relative_translation_mm
         )
         assert fallback_policy.entry_tolerance_mm == simulation_policy.entry_tolerance_mm
+        assert (
+            runtime.settings.default_relative_step_mm
+            == real_config.motion.default_relative_step_mm
+        )
+        assert (
+            runtime.settings.default_relative_rotation_deg
+            == real_config.motion.default_relative_rotation_deg
+        )
+        assert (
+            runtime.settings.default_rotation_joint_index
+            == real_config.motion.default_rotation_joint_index
+        )
+        assert real_policy.max_relative_rotation_deg == real_config.limits.max_rotation_deg
+        assert (
+            fallback_policy.max_relative_rotation_deg
+            == simulation_policy.max_rotation_deg
+        )
     finally:
         runtime.close()
 

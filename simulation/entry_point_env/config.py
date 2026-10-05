@@ -151,6 +151,12 @@ class EntryPointEnvConfig:
     maximum_speed_mm_s: float = 50.0
     reach_tolerance_mm: float = 0.5
     maximum_relative_distance_mm: float = 50.0
+    default_relative_step_mm: float = 15.0
+    default_relative_rotation_deg: float = 15.0
+    default_rotation_joint_index: int = 1
+    joint_speed_deg_s: float = 15.0
+    joint_acceleration_deg_s2: float = 30.0
+    maximum_rotation_deg: float = 720.0
     image_shape: tuple[int, int] = (600, 600)
     trajectory_history_limit: int = 2048
     tcp_name: str = "needle_tip"
@@ -167,6 +173,11 @@ class EntryPointEnvConfig:
             "maximum_speed_mm_s",
             "reach_tolerance_mm",
             "maximum_relative_distance_mm",
+            "default_relative_step_mm",
+            "default_relative_rotation_deg",
+            "joint_speed_deg_s",
+            "joint_acceleration_deg_s2",
+            "maximum_rotation_deg",
             "ik_orientation_weight_mm_per_rad",
             "ik_position_tolerance_mm",
             "ik_orientation_tolerance_deg",
@@ -177,6 +188,11 @@ class EntryPointEnvConfig:
             object.__setattr__(self, name, value)
         if self.default_speed_mm_s > self.maximum_speed_mm_s:
             raise ValueError("default_speed_mm_s cannot exceed maximum_speed_mm_s")
+        if (
+            type(self.default_rotation_joint_index) is not int
+            or not 1 <= self.default_rotation_joint_index <= 6
+        ):
+            raise ValueError("default_rotation_joint_index must be from 1 to 6")
         if len(self.image_shape) != 2 or any(int(size) <= 0 for size in self.image_shape):
             raise ValueError("image_shape must contain two positive integers")
         object.__setattr__(self, "image_shape", tuple(int(size) for size in self.image_shape))
@@ -255,6 +271,21 @@ class EntryPointEnvConfig:
             maximum_relative_distance_mm=float(
                 section.get("maximum_relative_distance_mm", 50.0)
             ),
+            default_relative_step_mm=float(
+                section.get("default_relative_step_mm", 15.0)
+            ),
+            default_relative_rotation_deg=float(
+                section.get("default_relative_rotation_deg", 15.0)
+            ),
+            default_rotation_joint_index=section.get(
+                "default_rotation_joint_index",
+                1,
+            ),
+            joint_speed_deg_s=float(section.get("joint_speed_deg_s", 15.0)),
+            joint_acceleration_deg_s2=float(
+                section.get("joint_acceleration_deg_s2", 30.0)
+            ),
+            maximum_rotation_deg=float(section.get("maximum_rotation_deg", 720.0)),
             image_shape=(
                 int(image_data.get("height", 600)),
                 int(image_data.get("width", 600)),
@@ -284,4 +315,3 @@ class EntryPointEnvConfig:
         if not isinstance(data, Mapping):
             raise ValueError(f"configuration file must contain a mapping: {config_path}")
         return cls.from_mapping(data)
-

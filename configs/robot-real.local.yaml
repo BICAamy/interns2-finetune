@@ -49,6 +49,11 @@ limits:
 motion:
   speed_mm_s: 70.0 # WayPoint 直线运动速度，单位 mm/s
   controller_override: 1.0 # 控制器速度倍率，1.0就是100%
+  default_relative_step_mm: 15.0 # “移动一点”时采用的距离
+  default_relative_rotation_deg: 15.0 # “转动一点”时采用的角度
+  default_rotation_joint_index: 1 # 未指定关节时转动 J1，可填 1～6
+  joint_speed_deg_s: 15.0 # J1 等关节相对旋转速度
+  joint_acceleration_deg_s2: 30.0 # J1 等关节相对旋转加速度
 
 deadlines:
   state_stale_ms: 300 # 50 ms 一帧，连续约 6 帧未收到即标为过期

@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from surgical_contracts import (
-    LinkState, MotionStopConfirmation, Pose6D, RobotCommandEnvelope,
+    LinkState, MotionStopConfirmation, MoveJointRelativeRequest, Pose6D,
+    RobotCommandEnvelope,
     RobotProvider, RobotTelemetry, RuntimeMode, SoftwareStopResult,
     SourceFreshness, StopDelivery,
 )
@@ -18,9 +19,9 @@ from .command_journal import CommandJournal, JournalError
 from .huayan.command_codec import validate_identifier
 from .huayan.fake_motion_client import FakeMotionClient
 from .huayan.real_motion_client import LocalRealMotionClient
-from .huayan.motion_codec import LinearWaypoint
+from .huayan.motion_codec import JointWaypoint, LinearWaypoint
 from .preflight import (
-    ControllerReadback, LocalArm, MotionApproval, MotionLease,
+    ControllerReadback, LocalArm, MotionApproval, MotionLease, PreflightTarget,
     fingerprint, preflight_motion, safety_state_hash,
 )
 
@@ -51,7 +52,8 @@ class LocalMotionTrial:
     def __init__(
         self, *, client: FakeMotionClient | LocalRealMotionClient, journal: CommandJournal,
         timing: LocalMotionTiming, approval: MotionApproval,
-        path_ik: Callable[[tuple[float, float, float]], tuple[float, ...] | None],
+        path_ik: Callable[..., tuple[float, ...] | None],
+        joint_fk: Callable[[tuple[float, ...]], Pose6D] | None = None,
     ) -> None:
         if not isinstance(client, (FakeMotionClient, LocalRealMotionClient)):
             raise TypeError("local motion trial requires an approved typed client")
@@ -62,9 +64,10 @@ class LocalMotionTrial:
         self.timing = timing
         self.approval = approval
         self.path_ik = path_ik
+        self.joint_fk = joint_fk
         self.command_id: str | None = None
         self.waypoint_id: str | None = None
-        self.target: Pose6D | None = None
+        self.target: PreflightTarget | None = None
         self.session_id: str | None = None
         self.sent_monotonic_ns: int | None = None
         self.last_feedback_monotonic_ns: int | None = None
@@ -114,7 +117,8 @@ class LocalMotionTrial:
         try:
             target = preflight_motion(
                 envelope, snapshot, readback, self.approval, arm, leases,
-                self.path_ik, required_lease_owner=required_lease_owner,
+                self.path_ik, self.joint_fk,
+                required_lease_owner=required_lease_owner,
                 now_ms=now_ms, now_monotonic_ns=now_monotonic_ns,
             )
         except Exception:
@@ -131,14 +135,31 @@ class LocalMotionTrial:
         self._initial_auto_mode = snapshot.auto_mode
         self._initial_reduced_mode = snapshot.reduced_mode
         waypoint_id = "F" + hashlib.sha256(envelope.command_id.encode()).hexdigest()[:16]
-        frame = LinearWaypoint(
-            pose_xyzrpy=(*target.translation_mm, *target.rotation_rpy_deg),
-            tcp_name=self.approval.tcp_name, ucs_name="Base",
-            speed_mm_s=envelope.payload.speed_mm_s,
-            acceleration_mm_s2=self.approval.max_acceleration_mm_s2,
-            waypoint_id=waypoint_id,
-            reference_joints_deg=snapshot.joint_positions_deg,
-        )
+        if isinstance(envelope.payload, MoveJointRelativeRequest):
+            frame = JointWaypoint(
+                pose_xyzrpy=(
+                    *target.pose.translation_mm,
+                    *target.pose.rotation_rpy_deg,
+                ),
+                tcp_name=self.approval.tcp_name,
+                ucs_name="Base",
+                speed_deg_s=envelope.payload.speed_deg_s,
+                acceleration_deg_s2=envelope.payload.acceleration_deg_s2,
+                waypoint_id=waypoint_id,
+                target_joints_deg=target.joint_positions_deg,
+            )
+        else:
+            frame = LinearWaypoint(
+                pose_xyzrpy=(
+                    *target.pose.translation_mm,
+                    *target.pose.rotation_rpy_deg,
+                ),
+                tcp_name=self.approval.tcp_name, ucs_name="Base",
+                speed_mm_s=envelope.payload.speed_mm_s,
+                acceleration_mm_s2=self.approval.max_acceleration_mm_s2,
+                waypoint_id=waypoint_id,
+                reference_joints_deg=snapshot.joint_positions_deg,
+            )
         encoded = frame.encode()
         self.journal.prepare(
             command_id=envelope.command_id, fingerprint=fingerprint(envelope),
@@ -317,10 +338,40 @@ class LocalMotionTrial:
                 now_monotonic_ns=now_monotonic_ns,
             )
             return "stopping" if self.stop_delivery == "sent" else "stop_unconfirmed"
-        position_error = math.dist(pose.translation_mm, self.target.translation_mm)
-        dot = abs(sum(a*b for a, b in zip(pose.quaternion_xyzw, self.target.quaternion_xyzw)))
-        angle_error = math.degrees(2 * math.acos(min(1.0, max(-1.0, dot))))
-        if position_error > self.timing.position_tolerance_mm or angle_error > self.timing.orientation_tolerance_deg:
+        if self.target.joint_motion:
+            if sample.joint_positions_deg is None:
+                self.request_stop(
+                    reason="actual joints became unavailable",
+                    now_monotonic_ns=now_monotonic_ns,
+                )
+                return "stopping" if self.stop_delivery == "sent" else "stop_unconfirmed"
+            arrived = max(
+                abs(float(actual) - float(expected))
+                for actual, expected in zip(
+                    sample.joint_positions_deg,
+                    self.target.joint_positions_deg,
+                )
+            ) <= self.timing.orientation_tolerance_deg
+        else:
+            position_error = math.dist(
+                pose.translation_mm,
+                self.target.pose.translation_mm,
+            )
+            dot = abs(sum(
+                a * b
+                for a, b in zip(
+                    pose.quaternion_xyzw,
+                    self.target.pose.quaternion_xyzw,
+                )
+            ))
+            angle_error = math.degrees(
+                2 * math.acos(min(1.0, max(-1.0, dot)))
+            )
+            arrived = (
+                position_error <= self.timing.position_tolerance_mm
+                and angle_error <= self.timing.orientation_tolerance_deg
+            )
+        if not arrived:
             self.stable_count = 0
             self.stable_since_ns = None
             return "executing"

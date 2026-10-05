@@ -11,6 +11,9 @@ from surgical_contracts import (
     MotionState,
     MoveRelativeRequest,
     MoveRelativeResult,
+    MoveSequenceRequest,
+    MoveSequenceResult,
+    MotionStepKind,
     MoveToEntryRequest,
     MoveToEntryResult,
     Point3D,
@@ -53,6 +56,8 @@ class FakeRobotController:
         self.report_requested_entry_on_success = report_requested_entry_on_success
         self.move_to_entry_calls: list[MoveToEntryRequest] = []
         self.move_relative_calls: list[MoveRelativeRequest] = []
+        self.move_sequence_calls: list[MoveSequenceRequest] = []
+        self._joint_positions_deg = [0.0] * 6
         self.stop_calls = 0
         self.emergency_stop_calls = 0
         self.reset_estop_calls = 0
@@ -220,6 +225,103 @@ class FakeRobotController:
             final_tcp_position=self._position,
             message=message,
             error_code=error_code,
+        )
+
+    def move_sequence(self, request: MoveSequenceRequest) -> MoveSequenceResult:
+        self.move_sequence_calls.append(request.model_copy(deep=True))
+        if self._estop:
+            return MoveSequenceResult(
+                command_id=request.command_id,
+                status=ToolStatus.REJECTED,
+                completed=False,
+                completed_steps=0,
+                total_steps=len(request.steps),
+                final_tcp_position=self._position,
+                final_joint_positions_deg=tuple(self._joint_positions_deg),
+                message="Fake robot rejected sequence because emergency stop is active",
+                error_code=ErrorCode.ESTOP_ACTIVE,
+            )
+        self._motion_state = MotionState.MOVING
+        completed_steps = 0
+        reported_position: Point3D | None = None
+        for step in request.steps:
+            if step.kind == MotionStepKind.CARTESIAN_RELATIVE:
+                assert step.translation_mm is not None
+                if self.move_relative_outcome != FakeRobotOutcome.SUCCESS:
+                    return self._sequence_failure(
+                        request,
+                        completed_steps,
+                        self.move_relative_outcome,
+                        "Fake robot rejected Cartesian-relative sequence step",
+                    )
+                self._position = self._position.translated(step.translation_mm)
+            elif step.kind == MotionStepKind.CARTESIAN_ABSOLUTE:
+                assert step.target_position_mm is not None
+                if self.move_to_entry_outcome != FakeRobotOutcome.SUCCESS:
+                    return self._sequence_failure(
+                        request,
+                        completed_steps,
+                        self.move_to_entry_outcome,
+                        "Fake robot rejected Cartesian-absolute sequence step",
+                    )
+                requested_position = Point3D(
+                    x=step.target_position_mm[0],
+                    y=step.target_position_mm[1],
+                    z=step.target_position_mm[2],
+                    frame=CoordinateFrame.ROBOT_BASE,
+                    source=CoordinateSource.SIMULATION,
+                )
+                self._position = requested_position.translated(
+                    self.post_move_state_offset_mm
+                )
+                reported_position = requested_position
+            elif step.kind == MotionStepKind.JOINT_RELATIVE:
+                assert step.joint_index is not None and step.rotation_deg is not None
+                self._joint_positions_deg[step.joint_index - 1] += float(step.rotation_deg)
+            elif step.kind == MotionStepKind.JOINT_ABSOLUTE:
+                assert step.joint_index is not None and step.target_angle_deg is not None
+                self._joint_positions_deg[step.joint_index - 1] = float(
+                    step.target_angle_deg
+                )
+            completed_steps += 1
+        self._motion_state = MotionState.IDLE
+        return MoveSequenceResult(
+            command_id=request.command_id,
+            status=ToolStatus.SUCCESS,
+            completed=True,
+            completed_steps=len(request.steps),
+            total_steps=len(request.steps),
+            final_tcp_position=(
+                reported_position
+                if self.report_requested_entry_on_success
+                and reported_position is not None
+                else self._position
+            ),
+            final_joint_positions_deg=tuple(self._joint_positions_deg),
+            message="Fake robot completed ordered motion sequence",
+        )
+
+    def _sequence_failure(
+        self,
+        request: MoveSequenceRequest,
+        completed_steps: int,
+        outcome: FakeRobotOutcome,
+        message: str,
+    ) -> MoveSequenceResult:
+        timed_out = outcome == FakeRobotOutcome.TIMEOUT
+        self._motion_state = MotionState.FAILED
+        return MoveSequenceResult(
+            command_id=request.command_id,
+            status=ToolStatus.TIMED_OUT if timed_out else ToolStatus.FAILED,
+            completed=False,
+            completed_steps=completed_steps,
+            total_steps=len(request.steps),
+            final_tcp_position=self._position,
+            final_joint_positions_deg=tuple(self._joint_positions_deg),
+            message=message,
+            error_code=(
+                ErrorCode.ROBOT_TIMEOUT if timed_out else ErrorCode.OUT_OF_WORKSPACE
+            ),
         )
 
     def stop(self, command_id: str | None = None) -> RobotState:

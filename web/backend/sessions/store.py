@@ -147,7 +147,10 @@ class SessionStore:
                     if event.phase.value == "started"
                     else SessionStatus.VERIFYING_ENTRY
                 )
-            elif event.tool == ToolName.ROBOT_MOVE_RELATIVE:
+            elif event.tool in {
+                ToolName.ROBOT_MOVE_RELATIVE,
+                ToolName.ROBOT_MOVE_SEQUENCE,
+            }:
                 record.status = SessionStatus.MOVING_RELATIVE
             elif event.tool == ToolName.PLANNER_PLAN_PUNCTURE:
                 record.status = SessionStatus.PLANNING

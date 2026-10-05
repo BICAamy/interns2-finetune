@@ -20,6 +20,8 @@ from surgical_contracts import (
     MotionState,
     MoveRelativeRequest,
     MoveRelativeResult,
+    MoveSequenceRequest,
+    MoveSequenceResult,
     MoveToEntryRequest,
     MoveToEntryResult,
     ParsedCommand,
@@ -288,22 +290,23 @@ class HTTPToolClientTests(unittest.TestCase):
                     ),
                 )
                 return httpx.Response(200, json=telemetry(state))
-            body = MoveToEntryRequest.model_validate_json(request.read())
+            body = MoveSequenceRequest.model_validate_json(request.read())
             moved[0] = True
-            result = MoveToEntryResult(
+            result = MoveSequenceResult(
                 command_id=body.command_id,
                 status=ToolStatus.SUCCESS,
-                reached=True,
+                completed=True,
+                completed_steps=1,
+                total_steps=1,
                 final_tcp_position=entry,
-                position_error_mm=0,
-                trajectory_id="trajectory-e2e",
+                final_joint_positions_deg=(0, 0, 0, 0, 0, 0),
                 message="reached",
             )
             return httpx.Response(
                 202,
                 json=record(
                     body.command_id,
-                    RobotCommandKind.MOVE_TO_ENTRY,
+                    RobotCommandKind.MOVE_SEQUENCE,
                     CommandExecutionStatus.SUCCEEDED,
                     body.model_dump(mode="json"),
                     result=result.model_dump(mode="json"),
@@ -351,7 +354,7 @@ class HTTPToolClientTests(unittest.TestCase):
             order,
             [
                 "robot:GET:/v1/state",
-                "robot:POST:/v1/commands/move-to-entry",
+                "robot:POST:/v1/commands/move-sequence",
                 "robot:GET:/v1/state",
                 "planner:POST:/v1/plan",
             ],
@@ -367,20 +370,22 @@ class HTTPToolClientTests(unittest.TestCase):
         def robot_handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/v1/state":
                 return httpx.Response(200, json=telemetry(robot_state(initial)))
-            body = MoveRelativeRequest.model_validate_json(request.read())
-            result = MoveRelativeResult(
+            body = MoveSequenceRequest.model_validate_json(request.read())
+            result = MoveSequenceResult(
                 command_id=body.command_id,
                 status=ToolStatus.SUCCESS,
                 completed=True,
+                completed_steps=1,
+                total_steps=1,
                 final_tcp_position=final,
-                trajectory_id="trajectory-relative",
+                final_joint_positions_deg=(0, 0, 0, 0, 0, 0),
                 message="completed",
             )
             return httpx.Response(
                 202,
                 json=record(
                     body.command_id,
-                    RobotCommandKind.MOVE_RELATIVE,
+                    RobotCommandKind.MOVE_SEQUENCE,
                     CommandExecutionStatus.SUCCEEDED,
                     body.model_dump(mode="json"),
                     result=result.model_dump(mode="json"),

@@ -46,7 +46,9 @@ class AgentSettingsTests(unittest.TestCase):
     def test_step7_defaults_are_valid(self):
         value = settings()
         value.validate()
-        self.assertEqual(value.default_relative_step_mm, 5.0)
+        self.assertEqual(value.default_relative_step_mm, 15.0)
+        self.assertEqual(value.default_relative_rotation_deg, 15.0)
+        self.assertEqual(value.default_rotation_joint_index, 1)
         self.assertEqual(value.default_coordinate_frame, CoordinateFrame.ROBOT_BASE)
         self.assertEqual(value.entry_tolerance_mm, 1.0)
         self.assertEqual(value.max_relative_translation_mm, 20.0)
@@ -59,6 +61,10 @@ class AgentSettingsTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "must be robot_base"):
             value.validate()
+
+    def test_default_rotation_joint_must_be_a_physical_joint(self):
+        with self.assertRaisesRegex(ValueError, "from 1 to 6"):
+            replace(settings(), default_rotation_joint_index=7).validate()
 
     def test_move_speed_cannot_exceed_safety_limit(self):
         value = replace(

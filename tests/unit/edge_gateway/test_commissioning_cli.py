@@ -38,9 +38,17 @@ def config(
             "max_step_mm": step, "max_rotation_deg": 1,
             "max_absolute_displacement_mm": 1,
         },
-        "motion": {"speed_mm_s": 2.0, "controller_override": 1.0},
+        "motion": {
+            "speed_mm_s": 2.0, "controller_override": 1.0,
+            "default_relative_step_mm": 15.0,
+            "default_relative_rotation_deg": 15.0,
+            "default_rotation_joint_index": 1,
+            "joint_speed_deg_s": 15.0,
+            "joint_acceleration_deg_s2": 30.0,
+        },
         "deadlines": {
-            "state_stale_ms": 250, "response_ms": 3000, "startup_ms": 5000,
+            "state_stale_ms": 250, "real_mode_fallback_ms": 5000,
+            "response_ms": 3000, "startup_ms": 5000,
             "motion_ms": 120000, "stop_delivery_ms": 500, "stop_ack_ms": 3000,
         },
         "arrival": {

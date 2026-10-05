@@ -7,6 +7,7 @@ import time
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from scipy.spatial.transform import Rotation
 
 from simulation.entry_point_env import (
     ContinuousTrajectoryController,
@@ -67,6 +68,32 @@ class ControllerEnvironment:
         self._owned()
         return self.controller.move_relative(delta_mm, speed_mm_s)
 
+    def move_joint_relative(self, joint_index, rotation_deg, speed_deg_s=None):
+        self._owned()
+        return self.controller.move_joint_relative(
+            joint_index, rotation_deg, speed_deg_s
+        )
+
+    def move_joint_absolute(self, joint_index, target_angle_deg, speed_deg_s=None):
+        self._owned()
+        return self.controller.move_joint_absolute(
+            joint_index, target_angle_deg, speed_deg_s
+        )
+
+    def move_cartesian_absolute(self, target_position_mm, speed_mm_s=None):
+        self._owned()
+        return self.controller.move_cartesian_absolute(
+            target_position_mm, speed_mm_s
+        )
+
+    def move_tcp_rotation(
+        self, axis, angle_deg, *, absolute, speed_mm_s=None,
+    ):
+        self._owned()
+        return self.controller.move_tcp_rotation(
+            axis, angle_deg, absolute=absolute, speed_mm_s=speed_mm_s
+        )
+
     def step(self):
         self._owned()
         return replace(self.controller.step(), rgb=self._frame.copy())
@@ -126,6 +153,100 @@ def wait_for_terminal(client: TestClient, command_id: str, timeout_s: float = 5.
             return record
         time.sleep(0.005)
     raise AssertionError(f"command {command_id} did not finish before timeout")
+
+
+def test_ordered_translation_and_j1_rotation_sequence(service):
+    client, _worker, environment = service
+    expected = ContinuousTrajectoryController(CONFIG)
+    for delta in ((0, 52, 0), (0, 0, 15), (74, 0, 0)):
+        expected.move_relative(delta, 70)
+        while expected.get_state().motion_state == MotionState.MOVING:
+            expected.step()
+    expected.move_joint_relative(1, -70, 15)
+    while expected.get_state().motion_state == MotionState.MOVING:
+        expected.step()
+    response = client.post(
+        "/v1/commands/move-sequence",
+        json={
+            "command_id": "ordered-sequence-001",
+            "steps": [
+                {"kind": "cartesian_relative", "translation_mm": [0, 52, 0]},
+                {"kind": "cartesian_relative", "translation_mm": [0, 0, 15]},
+                {"kind": "cartesian_relative", "translation_mm": [74, 0, 0]},
+                {
+                    "kind": "joint_relative",
+                    "joint_index": 1,
+                    "rotation_deg": -70,
+                },
+            ],
+            "translation_speed_mm_s": 70,
+            "joint_speed_deg_s": 15,
+            "joint_acceleration_deg_s2": 30,
+        },
+    )
+    assert response.status_code == 202, response.text
+    record = wait_for_terminal(client, "ordered-sequence-001", timeout_s=5)
+    assert record["status"] == "succeeded", record
+    result = record["result"]
+    assert result["completed_steps"] == 4
+    assert result["total_steps"] == 4
+    assert result["final_joint_positions_deg"][0] == pytest.approx(
+        expected.joint_positions_deg[0],
+        abs=0.05,
+    )
+
+
+def test_unified_sequence_executes_all_six_motion_step_kinds(service):
+    client, _worker, environment = service
+    initial_state = environment.controller.get_state()
+    initial_xyz = initial_state.tcp_position.as_tuple()
+    initial_joints = environment.controller.joint_positions_deg
+    initial_rpy = Rotation.from_quat(
+        initial_state.orientation_xyzw
+    ).as_euler("xyz", degrees=True)
+    response = client.post(
+        "/v1/commands/move-sequence",
+        json={
+            "command_id": "unified-six-kinds-001",
+            "steps": [
+                {"kind": "cartesian_relative", "translation_mm": [1, 0, 0]},
+                {"kind": "cartesian_absolute", "target_position_mm": initial_xyz},
+                {
+                    "kind": "joint_relative", "joint_index": 1,
+                    "rotation_deg": 1,
+                },
+                {
+                    "kind": "joint_absolute", "joint_index": 1,
+                    "target_angle_deg": initial_joints[0],
+                },
+                {
+                    "kind": "tcp_rotation_relative", "rotation_axis": "z",
+                    "rotation_deg": 1,
+                },
+                {
+                    "kind": "tcp_rotation_absolute", "rotation_axis": "z",
+                    "target_angle_deg": initial_rpy[2],
+                },
+            ],
+            "translation_speed_mm_s": 70,
+            "joint_speed_deg_s": 15,
+            "joint_acceleration_deg_s2": 30,
+        },
+    )
+    assert response.status_code == 202, response.text
+    record = wait_for_terminal(client, "unified-six-kinds-001", timeout_s=10)
+    assert record["status"] == "succeeded", record
+    assert record["result"]["completed_steps"] == 6
+    final = environment.controller.get_state()
+    assert final.tcp_position.as_tuple() == pytest.approx(initial_xyz, abs=0.1)
+    assert environment.controller.joint_positions_deg == pytest.approx(
+        initial_joints,
+        abs=0.2,
+    )
+    assert abs(sum(
+        actual * expected
+        for actual, expected in zip(final.orientation_xyzw, initial_state.orientation_xyzw)
+    )) == pytest.approx(1.0, abs=1e-4)
 
 
 def point_payload(x: float, y: float, z: float):

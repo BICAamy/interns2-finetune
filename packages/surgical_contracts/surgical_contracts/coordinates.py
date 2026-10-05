@@ -48,6 +48,15 @@ class DistanceSource(str, Enum):
     CONFIGURED_DEFAULT = "configured_default"
 
 
+class MotionStepKind(str, Enum):
+    CARTESIAN_RELATIVE = "cartesian_relative"
+    CARTESIAN_ABSOLUTE = "cartesian_absolute"
+    JOINT_RELATIVE = "joint_relative"
+    JOINT_ABSOLUTE = "joint_absolute"
+    TCP_ROTATION_RELATIVE = "tcp_rotation_relative"
+    TCP_ROTATION_ABSOLUTE = "tcp_rotation_absolute"
+
+
 class Point3D(ContractModel):
     """A finite three-dimensional point in an explicit frame."""
 
@@ -118,3 +127,70 @@ class RelativeMotion(ContractModel):
         values = {Axis.X: 0.0, Axis.Y: 0.0, Axis.Z: 0.0}
         values[self.axis] = signed_distance
         return (values[Axis.X], values[Axis.Y], values[Axis.Z])
+
+
+class MotionSequenceStep(ContractModel):
+    """One fully typed movement in a unified ordered motion sequence."""
+
+    kind: MotionStepKind
+    translation_mm: tuple[FiniteFloat, FiniteFloat, FiniteFloat] | None = None
+    target_position_mm: tuple[FiniteFloat, FiniteFloat, FiniteFloat] | None = None
+    frame: CoordinateFrame = CoordinateFrame.ROBOT_BASE
+    joint_index: int | None = Field(default=None, ge=1, le=6)
+    rotation_deg: FiniteFloat | None = None
+    target_angle_deg: FiniteFloat | None = None
+    rotation_axis: Axis | None = None
+    value_source: DistanceSource = DistanceSource.USER_PROVIDED
+
+    @model_validator(mode="after")
+    def validate_step(self) -> "MotionSequenceStep":
+        if self.frame != CoordinateFrame.ROBOT_BASE:
+            raise ValueError("motion sequence steps currently require robot_base")
+        populated = {
+            "translation_mm": self.translation_mm,
+            "target_position_mm": self.target_position_mm,
+            "joint_index": self.joint_index,
+            "rotation_deg": self.rotation_deg,
+            "target_angle_deg": self.target_angle_deg,
+            "rotation_axis": self.rotation_axis,
+        }
+        required: set[str]
+        if self.kind == MotionStepKind.CARTESIAN_RELATIVE:
+            required = {"translation_mm"}
+            if self.translation_mm is None:
+                raise ValueError("cartesian_relative requires translation_mm")
+            if all(float(value) == 0.0 for value in self.translation_mm):
+                raise ValueError("cartesian_relative cannot be zero")
+        elif self.kind == MotionStepKind.CARTESIAN_ABSOLUTE:
+            required = {"target_position_mm"}
+        elif self.kind == MotionStepKind.JOINT_RELATIVE:
+            required = {"joint_index", "rotation_deg"}
+            if self.joint_index is None or self.rotation_deg is None:
+                raise ValueError("joint_relative requires joint_index and rotation_deg")
+            if float(self.rotation_deg) == 0.0:
+                raise ValueError("joint_relative cannot be zero")
+        elif self.kind == MotionStepKind.JOINT_ABSOLUTE:
+            required = {"joint_index", "target_angle_deg"}
+        elif self.kind == MotionStepKind.TCP_ROTATION_RELATIVE:
+            required = {"rotation_axis", "rotation_deg"}
+            if self.rotation_deg is not None and float(self.rotation_deg) == 0.0:
+                raise ValueError("tcp_rotation_relative cannot be zero")
+        else:
+            required = {"rotation_axis", "target_angle_deg"}
+        if any(value is None for name, value in populated.items() if name in required):
+            raise ValueError(f"{self.kind.value} is missing required fields")
+        forbidden = [
+            name for name, value in populated.items()
+            if name not in required and value is not None
+        ]
+        if forbidden:
+            raise ValueError(
+                f"{self.kind.value} cannot contain {', '.join(sorted(forbidden))}"
+            )
+        return self
+
+
+class MotionSequence(ContractModel):
+    """An ordered list executed one step at a time."""
+
+    steps: tuple[MotionSequenceStep, ...] = Field(min_length=1)

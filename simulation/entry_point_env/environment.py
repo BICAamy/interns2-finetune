@@ -14,6 +14,7 @@ from scipy.spatial.transform import Rotation
 from sofa_env.base import RenderFramework, RenderMode, SofaEnv
 
 from surgical_contracts import (
+    Axis,
     Point3D,
     RobotState,
     SimulationCameraControlRequest,
@@ -159,6 +160,51 @@ class EntryPointReachEnv(SofaEnv):
         speed_mm_s: float | None = None,
     ) -> str:
         return self.controller.move_relative(delta_mm, speed_mm_s)
+
+    def move_joint_relative(
+        self,
+        joint_index: int,
+        rotation_deg: float,
+        speed_deg_s: float | None = None,
+    ) -> str:
+        return self.controller.move_joint_relative(joint_index, rotation_deg, speed_deg_s)
+
+    def move_joint_absolute(
+        self,
+        joint_index: int,
+        target_angle_deg: float,
+        speed_deg_s: float | None = None,
+    ) -> str:
+        return self.controller.move_joint_absolute(
+            joint_index,
+            target_angle_deg,
+            speed_deg_s,
+        )
+
+    def move_cartesian_absolute(
+        self,
+        target_position_mm: tuple[float, float, float],
+        speed_mm_s: float | None = None,
+    ) -> str:
+        return self.controller.move_cartesian_absolute(
+            target_position_mm,
+            speed_mm_s,
+        )
+
+    def move_tcp_rotation(
+        self,
+        axis: Axis,
+        angle_deg: float,
+        *,
+        absolute: bool,
+        speed_mm_s: float | None = None,
+    ) -> str:
+        return self.controller.move_tcp_rotation(
+            axis,
+            angle_deg,
+            absolute=absolute,
+            speed_mm_s=speed_mm_s,
+        )
 
     def _do_action(self, _unused_action: Any) -> None:
         self._last_step = self.controller.step()
