@@ -57,18 +57,18 @@ RELATIVE_FIELDS = {
 # Demo-only phrase expansion.  Keep the geometry explicit and deterministic;
 # it is still validated and confirmed like every other MotionSequence.
 DEMO_HEART_DELTAS_MM = (
-    (-50.0, 0.0, 50.0),
-    (-40.0, 0.0, 50.0),
-    (0.0, 0.0, 50.0),
-    (30.0, 0.0, 30.0),
-    (40.0, 0.0, 0.0),
-    (20.0, 0.0, -30.0),
     (20.0, 0.0, 30.0),
     (40.0, 0.0, 0.0),
     (30.0, 0.0, -30.0),
     (0.0, 0.0, -50.0),
     (-40.0, 0.0, -50.0),
     (-50.0, 0.0, -50.0),
+    (-50.0, 0.0, 50.0),
+    (-40.0, 0.0, 50.0),
+    (0.0, 0.0, 50.0),
+    (30.0, 0.0, 30.0),
+    (40.0, 0.0, 0.0),
+    (20.0, 0.0, -30.0),
 )
 DEMO_HEART_PRESET_ID = "heart_180mm_xz"
 DEMO_HEART_PROMPT = re.compile(
