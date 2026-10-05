@@ -16,8 +16,8 @@ entry_point_env:
 
   # workspace是一个长方体，对应xyz三个方向；与当前真机配置保持一致
   workspace:
-    low_mm: [200.0, -1000.0, 100.0]
-    high_mm: [1000.0, 1000.0, 800.0]
+    low_mm: [100.0, -1000.0, 100.0]
+    high_mm: [1000.0, 1000.0, 1500.0]
 
   robot:
     model_name: E05-Pro # 机器人名字

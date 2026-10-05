@@ -110,6 +110,7 @@ _CURRENT_TOOLS = {
 
 _TELEMETRY_TRAJECTORY_LIMIT = 160
 _REAL_CONNECTION_RECOVERY_NOTICE = "真实机械臂连接恢复中"
+_HEART_DEMO_PREVIEW_DELAY_S = 1.5
 
 
 class WebRuntime:
@@ -1055,6 +1056,10 @@ class WebRuntime:
                     else CoordinateSource.USER_TEXT
                 ),
             )
+            if (parsed.raw_arguments or {}).get("demo_preset") == "heart_180mm_xz":
+                # Deliberate presentation pacing for the fixed heart demo only.
+                # The session remains in PARSING and no robot command is sent.
+                await asyncio.sleep(_HEART_DEMO_PREVIEW_DELAY_S)
         except CommandParsingError as error:
             return self._record_parse_error(
                 session_id,

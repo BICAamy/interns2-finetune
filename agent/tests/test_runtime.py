@@ -328,6 +328,11 @@ class InternS2AgentTests(unittest.TestCase):
                 self.assertTrue(command.needs_confirmation)
 
         self.assertEqual(client.chat.completions.requests, [])
+        result = agent.parse_command("画一个爱心")
+        self.assertEqual(
+            result.raw_arguments["demo_preset"],
+            "heart_180mm_xz",
+        )
 
     def test_puncture_tool_call_is_validated_and_model_id_is_ignored(self):
         arguments = base_arguments(

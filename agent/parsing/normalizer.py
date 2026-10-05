@@ -70,6 +70,10 @@ DEMO_HEART_DELTAS_MM = (
     (-40.0, 0.0, -50.0),
     (-50.0, 0.0, -50.0),
 )
+DEMO_HEART_PRESET_ID = "heart_180mm_xz"
+DEMO_HEART_PROMPT = re.compile(
+    r"(?:请)?(?:(?:给我|帮我))?画(?:一个|个|一颗)?爱心[。.!！]?"
+)
 ALLOWED_MISSING_FIELDS = {
     "intent",
     "entry_point",
@@ -105,6 +109,15 @@ MISSING_FIELD_ALIASES = {
     "target_point.coordinate_labels": "coordinate_order",
     "target_point.coordinate_order": "coordinate_order",
 }
+
+
+def identify_demo_motion_preset(text: str) -> str | None:
+    """Return the exact demo preset selected by a narrowly matched phrase."""
+
+    compact_text = re.sub(r"\s+", "", text.strip())
+    if DEMO_HEART_PROMPT.fullmatch(compact_text):
+        return DEMO_HEART_PRESET_ID
+    return None
 MAX_EMBEDDED_JSON_CHARS = 32_768
 MAX_EMBEDDED_JSON_DEPTH = 2
 
@@ -314,10 +327,7 @@ class CommandNormalizer:
         """
 
         compact_text = re.sub(r"\s+", "", text.strip())
-        if re.fullmatch(
-            r"(?:请)?(?:(?:给我|帮我))?画(?:一个|个|一颗)?爱心[。.!！]?",
-            compact_text,
-        ):
+        if identify_demo_motion_preset(compact_text) == DEMO_HEART_PRESET_ID:
             return self.normalize(
                 {
                     "intent": CommandIntent.MOVE_SEQUENCE.value,

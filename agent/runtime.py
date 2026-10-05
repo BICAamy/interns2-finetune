@@ -23,6 +23,7 @@ from .parsing import (
     SUBMIT_SURGICAL_TASK_NAME,
     build_submit_surgical_task_tool,
     build_system_prompt,
+    identify_demo_motion_preset,
 )
 
 
@@ -149,6 +150,7 @@ class InternS2Agent:
             raise ValueError("The user prompt cannot be empty")
 
         if image_path is None:
+            demo_preset = identify_demo_motion_preset(normalized_prompt)
             deterministic = self.normalizer.try_normalize_sequence_text(
                 normalized_prompt,
                 input_source=input_source,
@@ -170,6 +172,11 @@ class InternS2Agent:
                         "motion_steps": deterministic_steps,
                         "missing_fields": deterministic.missing_fields,
                         "parser": "deterministic_motion_parser",
+                        **(
+                            {"demo_preset": demo_preset}
+                            if demo_preset is not None
+                            else {}
+                        ),
                     },
                 )
 

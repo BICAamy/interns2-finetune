@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from threading import Event
 import time
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -29,7 +30,7 @@ from surgical_contracts import (
 from web.backend.main import create_app
 from web.backend.asr import ASRSettings
 from web.backend.asr.service import RawTranscription
-from web.backend.models import TextCommandRequest
+from web.backend.models import SessionStatus, TextCommandRequest
 from web.backend.runtime import WebRuntime
 
 
@@ -376,6 +377,47 @@ def test_puncture_preview_requires_confirmation_and_never_executes_puncture():
         # The web service has no browser-facing planner passthrough.
         blocked = client.post("/api/planner/plan", json={})
         assert blocked.status_code in {404, 405}
+
+
+def test_heart_demo_holds_preview_for_exactly_one_and_a_half_seconds():
+    class HeartDemoParser(StubParser):
+        def parse_command(self, *args, **kwargs) -> ParsedCommandResponse:
+            parsed = super().parse_command(*args, **kwargs)
+            return ParsedCommandResponse(
+                command=parsed.command,
+                model=parsed.model,
+                raw_arguments={
+                    **(parsed.raw_arguments or {}),
+                    "demo_preset": "heart_180mm_xz",
+                },
+            )
+
+    parser = HeartDemoParser(relative_command("heart-demo-delay"))
+    robot = FakeRobotController()
+    runtime = WebRuntime(
+        settings(),
+        parser=parser,
+        robot=robot,
+        planner=FakePuncturePlannerClient(),
+        simulation_observer=StubSimulationObserver(robot),
+    )
+
+    async def scenario():
+        session_id = (await runtime.create_session()).session_id
+        fake_sleep = AsyncMock()
+        with patch("web.backend.runtime.asyncio.sleep", new=fake_sleep):
+            snapshot = await runtime.submit_text(
+                session_id,
+                TextCommandRequest(prompt="请画一个爱心"),
+            )
+        fake_sleep.assert_awaited_once_with(1.5)
+        assert snapshot.status == SessionStatus.AWAITING_CONFIRMATION
+        assert robot.move_sequence_calls == []
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        runtime.close()
 
 
 def test_relative_motion_cancel_and_image_lifecycle():
