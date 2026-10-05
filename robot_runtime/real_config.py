@@ -123,6 +123,7 @@ class MotionCommandConfig(_StrictModel):
 
 class Deadlines(_StrictModel):
     state_stale_ms: int | None = Field(default=None, gt=0)
+    real_mode_fallback_ms: int | None = Field(default=None, gt=0)
     response_ms: int | None = Field(default=None, gt=0)
     startup_ms: int | None = Field(default=None, gt=0)
     motion_ms: int | None = Field(default=None, gt=0)
@@ -164,6 +165,7 @@ class RealRobotConfig(_StrictModel):
             "limits.max_step_mm", "limits.max_rotation_deg",
             "limits.max_absolute_displacement_mm", "motion.speed_mm_s",
             "motion.controller_override", "deadlines.state_stale_ms",
+            "deadlines.real_mode_fallback_ms",
             "deadlines.response_ms", "deadlines.startup_ms",
             "deadlines.motion_ms", "deadlines.stop_delivery_ms",
             "deadlines.stop_ack_ms", "arrival.position_tolerance_mm",

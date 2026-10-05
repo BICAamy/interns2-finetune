@@ -45,6 +45,7 @@ motion:
 
 deadlines: # 各环节最多等多久；超时不算成功
   state_stale_ms: null # 状态数据多久没更新就算过期，单位：ms
+  real_mode_fallback_ms: 5000 # 真实连接连续异常 5 秒后，网页才自动退回仿真
   response_ms: null # 等控制器回复的最长时间，单位：ms
   startup_ms: null # 等机器人开始运动的最长时间，单位：ms
   motion_ms: null # 等运动结束的最长时间，单位：ms

@@ -117,6 +117,17 @@ class RealObserver:
         self.closed = True
 
 
+class FakeMonotonic:
+    def __init__(self) -> None:
+        self.value = 100.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance_ms(self, milliseconds: int) -> None:
+        self.value += milliseconds / 1000.0
+
+
 def _client():
     real_settings = replace(
         settings(),
@@ -135,7 +146,7 @@ def _client():
     return TestClient(create_app(runtime, static_dir="/missing")), observer, robot
 
 
-def _dual_mode_client():
+def _dual_mode_client(*, monotonic_clock=None):
     real_settings = replace(
         settings(),
         runtime_mode=RuntimeMode.REAL,
@@ -149,6 +160,11 @@ def _dual_mode_client():
         robot=real_robot,
         planner=FakePuncturePlannerClient(),
         simulation_observer=real_observer,
+        **(
+            {"monotonic_clock": monotonic_clock}
+            if monotonic_clock is not None
+            else {}
+        ),
     )
     simulation_robot = FakeRobotController()
     simulation_observer = StubSimulationObserver(simulation_robot)
@@ -179,6 +195,7 @@ def test_real_and_simulation_motion_values_match_but_load_independently() -> Non
         == real_config.limits.max_step_mm
     )
     assert simulation_policy.entry_tolerance_mm == real_config.arrival.position_tolerance_mm
+    assert real_config.deadlines.real_mode_fallback_ms == 5000
 
     simulation_data = yaml.safe_load(
         Path("configs/simulation.yaml").read_text(encoding="utf-8")
@@ -277,8 +294,11 @@ def test_real_stale_state_is_disconnected_for_ui_and_keeps_last_pose() -> None:
         assert payload["error"]["code"] == "ROBOT_STALE"
 
 
-def test_web_defaults_to_simulation_switches_to_live_real_and_falls_back() -> None:
-    client, real_observer, _simulation_robot = _dual_mode_client()
+def test_transient_real_disconnect_stays_real_and_clears_recovery_state() -> None:
+    clock = FakeMonotonic()
+    client, real_observer, _simulation_robot = _dual_mode_client(
+        monotonic_clock=clock,
+    )
     with client:
         health = client.get("/health").json()
         assert health["default_robot_mode"] == "simulation"
@@ -321,10 +341,66 @@ def test_web_defaults_to_simulation_switches_to_live_real_and_falls_back() -> No
         telemetry = client.get(
             f"/api/sessions/{session_id}/robot/telemetry"
         ).json()
-        assert telemetry["runtime_mode"] == "simulation"
+        assert telemetry["runtime_mode"] == "real"
+        assert telemetry["connected"] is False
+        recovering = client.get(f"/api/sessions/{session_id}").json()
+        assert recovering["robot_mode"] == "real"
+        assert recovering["mode_notice"] == "真实机械臂连接恢复中"
+
+        clock.advance_ms(4999)
+        assert client.get(
+            f"/api/sessions/{session_id}/robot/telemetry"
+        ).json()["runtime_mode"] == "real"
+
+        real_observer.state = real_telemetry(43).model_copy(
+            update={
+                "connections": RobotConnectionState(
+                    gateway=LinkState.CONNECTED,
+                    datasheet=LinkState.CONNECTED,
+                    command_socket=LinkState.CONNECTED,
+                    controller_box=LinkState.CONNECTED,
+                )
+            }
+        )
+        recovered = client.get(
+            f"/api/sessions/{session_id}/robot/telemetry"
+        ).json()
+        assert recovered["runtime_mode"] == "real"
+        assert recovered["connected"] is True
+        snapshot = client.get(f"/api/sessions/{session_id}").json()
+        assert snapshot["robot_mode"] == "real"
+        assert snapshot["mode_notice"] is None
+        assert snapshot["message"] == "真实机械臂连接已恢复"
+
+
+def test_continuous_real_disconnect_falls_back_after_yaml_grace() -> None:
+    clock = FakeMonotonic()
+    client, real_observer, _simulation_robot = _dual_mode_client(
+        monotonic_clock=clock,
+    )
+    with client:
+        session_id = client.post("/api/sessions").json()["session_id"]
+        selected = client.put(
+            f"/api/sessions/{session_id}/robot/mode",
+            json={"mode": "real"},
+        )
+        assert selected.json()["robot_mode"] == "real"
+
+        real_observer.state = real_observer.state.model_copy(
+            update={"freshness": SourceFreshness.DISCONNECTED}
+        )
+        first = client.get(
+            f"/api/sessions/{session_id}/robot/telemetry"
+        ).json()
+        assert first["runtime_mode"] == "real"
+        clock.advance_ms(5000)
+        expired = client.get(
+            f"/api/sessions/{session_id}/robot/telemetry"
+        ).json()
+        assert expired["runtime_mode"] == "simulation"
         fallback = client.get(f"/api/sessions/{session_id}").json()
         assert fallback["robot_mode"] == "simulation"
-        assert "未连接机械臂，已自动退回仿真模式" in fallback["mode_notice"]
+        assert "真实连接连续异常超过 5000 ms" in fallback["mode_notice"]
 
 
 def test_selecting_unavailable_real_mode_stays_in_simulation_with_notice() -> None:

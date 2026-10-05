@@ -15,7 +15,7 @@ import type {
 
 const SESSION_KEY = "interns2-surgical-session";
 const DEFAULT_PROMPT =
-  "入点为基座坐标系下(X=500,Y=0,Z=500)毫米，靶点为(X=500,Y=0,Z=550)毫米，请准备穿刺";
+  "入点为基座坐标系下(X=600,Y=0,Z=500)毫米，靶点为(X=500,Y=0,Z=550)毫米，请准备穿刺";
 
 const busyStatuses = new Set([
   "parsing",
@@ -346,13 +346,15 @@ export default function App() {
     };
   } | null | undefined;
   const isBusy = session ? busyStatuses.has(session.status) : true;
+  const realStale = runtimeMode === "real" && telemetry?.connected !== true;
   const canSubmit = Boolean(
     session &&
       prompt.trim() &&
       !isBusy &&
       !session.pending_confirmation &&
       !recording &&
-      !speechBusy,
+      !speechBusy &&
+      !realStale,
   );
   const canRecord = Boolean(
     session &&
@@ -365,7 +367,6 @@ export default function App() {
   const videoUrl = session
     ? api.videoUrl(session.session_id, videoAttempt, runtimeMode)
     : "";
-  const realStale = runtimeMode === "real" && telemetry?.freshness !== "fresh";
 
   const statusTone = useMemo(() => {
     if (!session) return "neutral";
@@ -971,7 +972,7 @@ export default function App() {
                     <span>系统将在 2 秒后自动重连；真实模式不会因此向机械臂发送命令。</span>
                   </div>
                 )}
-                {realStale && <div className="stale-overlay"><strong>STALE · 画面已冻结</strong><span>请检查 Mac、10004 DataSheet 和 SSH 隧道</span></div>}
+                {realStale && <div className="stale-overlay"><strong>真实机械臂连接恢复中</strong><span>真实操作已暂停；请检查 Mac、10003、10004 和 SSH 隧道</span></div>}
                 {runtimeMode === "real" && telemetry?.mirror_warning && <div className="calibration-warning">{telemetry.mirror_warning}</div>}
                 {cameraError && <div className="camera-error">{cameraError}</div>}
               </div>

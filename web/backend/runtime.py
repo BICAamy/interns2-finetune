@@ -10,7 +10,7 @@ from pathlib import Path
 import tempfile
 from threading import RLock
 import time
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from uuid import uuid4
 
 from surgical_contracts import (
@@ -107,6 +107,7 @@ _CURRENT_TOOLS = {
 }
 
 _TELEMETRY_TRAJECTORY_LIMIT = 160
+_REAL_CONNECTION_RECOVERY_NOTICE = "真实机械臂连接恢复中"
 
 
 class WebRuntime:
@@ -121,6 +122,7 @@ class WebRuntime:
         simulation_observer: SimulationObserver | None = None,
         asr_settings: ASRSettings | None = None,
         speech_transcriber: SpeechTranscriber | None = None,
+        monotonic_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         settings.validate()
         parser_was_provided = parser is not None
@@ -144,10 +146,17 @@ class WebRuntime:
         self._configured_mode = configured_mode
         self._real_mode = configured_mode == RuntimeMode.REAL
         self._real_config = None
+        self._real_mode_fallback_s: float | None = None
         if self._real_mode:
             from robot_runtime.real_config import load_real_config
 
             self._real_config = load_real_config(settings.real_config_path)
+            fallback_ms = self._real_config.deadlines.real_mode_fallback_ms
+            if fallback_ms is None:
+                raise ValueError(
+                    "real mode requires deadlines.real_mode_fallback_ms"
+                )
+            self._real_mode_fallback_s = fallback_ms / 1000.0
         self.settings = settings
         self.store = store or SessionStore()
         self._model_http: OpenAICompatibleHTTPClient | None = None
@@ -281,7 +290,9 @@ class WebRuntime:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._motion_origins: dict[str, Point3D] = {}
         self._fps_samples: dict[str, tuple[int, float, float]] = {}
+        self._real_feedback_unavailable_since: dict[str, float] = {}
         self._telemetry_lock = RLock()
+        self._monotonic_clock = monotonic_clock
         self.telemetry_interval_s = 0.1
         self.asr = ASRService(
             asr_settings or ASRSettings.from_env(),
@@ -360,17 +371,72 @@ class WebRuntime:
         )
 
     @staticmethod
-    def _real_feedback_available(telemetry: RobotTelemetry) -> bool:
+    def _real_feedback_issue(telemetry: RobotTelemetry) -> str | None:
         connections = telemetry.connections
-        return (
-            telemetry.freshness.value == "fresh"
-            and connections.gateway.value == "connected"
-            and connections.datasheet.value == "connected"
-            and connections.command_socket.value == "connected"
-            and connections.controller_box.value == "connected"
-            and telemetry.actual_pose_robot_base is not None
-            and telemetry.joint_positions_deg is not None
-        )
+        if telemetry.freshness.value != "fresh":
+            age = (
+                f"，状态年龄 {telemetry.state_age_ms:.0f} ms"
+                if telemetry.state_age_ms is not None
+                else ""
+            )
+            return f"真实状态为 {telemetry.freshness.value}{age}"
+        for name in ("gateway", "datasheet", "command_socket", "controller_box"):
+            if getattr(connections, name).value != "connected":
+                return f"{name} 连接为 {getattr(connections, name).value}"
+        if telemetry.actual_pose_robot_base is None:
+            return "真实状态缺少 Base 坐标系位姿"
+        if telemetry.joint_positions_deg is None:
+            return "真实状态缺少关节角"
+        return None
+
+    @classmethod
+    def _real_feedback_available(cls, telemetry: RobotTelemetry) -> bool:
+        return cls._real_feedback_issue(telemetry) is None
+
+    def _clear_real_feedback_outage(self, session_id: str) -> bool:
+        with self._telemetry_lock:
+            return self._real_feedback_unavailable_since.pop(session_id, None) is not None
+
+    def _real_feedback_outage_expired(
+        self,
+        session_id: str,
+        *,
+        detail: str,
+    ) -> bool:
+        fallback_s = self._real_mode_fallback_s
+        if fallback_s is None:
+            return True
+        now = self._monotonic_clock()
+        with self._telemetry_lock:
+            started_at = self._real_feedback_unavailable_since.get(session_id)
+            newly_started = started_at is None
+            if started_at is None:
+                started_at = now
+                self._real_feedback_unavailable_since[session_id] = started_at
+            expired = now - started_at >= fallback_s
+        if newly_started:
+            def mark_recovering(record: Any) -> None:
+                if record.robot_mode != RuntimeMode.REAL:
+                    return
+                record.mode_notice = _REAL_CONNECTION_RECOVERY_NOTICE
+                record.message = f"{_REAL_CONNECTION_RECOVERY_NOTICE}：{detail}"
+
+            self.store.mutate(session_id, mark_recovering)
+        return expired
+
+    def _mark_real_feedback_recovered(self, session_id: str) -> None:
+        if not self._clear_real_feedback_outage(session_id):
+            return
+
+        def mark_recovered(record: Any) -> None:
+            if (
+                record.robot_mode == RuntimeMode.REAL
+                and record.mode_notice == _REAL_CONNECTION_RECOVERY_NOTICE
+            ):
+                record.mode_notice = None
+                record.message = "真实机械臂连接已恢复"
+
+        self.store.mutate(session_id, mark_recovered)
 
     async def set_robot_mode(
         self, session_id: str, *, mode: RuntimeMode,
@@ -405,6 +471,7 @@ class WebRuntime:
                 )
             pose = telemetry.actual_pose_robot_base
             assert pose is not None
+            self._clear_real_feedback_outage(session_id)
             return self.store.mutate(
                 session_id,
                 lambda record: self._apply_mode(
@@ -421,6 +488,7 @@ class WebRuntime:
                 ),
             )
 
+        self._clear_real_feedback_outage(session_id)
         # Entering simulation always resets its single environment owner so the
         # browser starts from the configured default simulation pose.
         simulation_robot = self._robots[RuntimeMode.SIMULATION]
@@ -469,6 +537,7 @@ class WebRuntime:
     def _fallback_to_simulation(
         self, session_id: str, detail: str,
     ) -> SessionSnapshot:
+        self._clear_real_feedback_outage(session_id)
         notice = f"未连接机械臂，已自动退回仿真模式：{detail}"
         current_tcp = None
         simulation_robot = self._robots.get(RuntimeMode.SIMULATION)
@@ -515,18 +584,28 @@ class WebRuntime:
         session = self.store.snapshot(session_id)
         telemetry = observer.get_telemetry()
         if isinstance(telemetry, RobotTelemetry):
-            if not self._real_feedback_available(telemetry):
+            issue = self._real_feedback_issue(telemetry)
+            if issue is not None:
                 if (
                     RuntimeMode.SIMULATION not in self._observers
                     or session.active_command_id is not None
                     or session.status in _BUSY_STATUSES
                 ):
                     return self._real_telemetry_view(session, telemetry, observer)
-                self._fallback_to_simulation(
+                if self._real_feedback_outage_expired(
                     session_id,
-                    "真实机械臂网关、10003 或 10004 连接已断开或状态已过期",
-                )
-                return self.get_robot_telemetry(session_id)
+                    detail=issue,
+                ):
+                    fallback_ms = int((self._real_mode_fallback_s or 0) * 1000)
+                    self._fallback_to_simulation(
+                        session_id,
+                        f"真实连接连续异常超过 {fallback_ms} ms：{issue}",
+                    )
+                    return self.get_robot_telemetry(session_id)
+                session = self.store.snapshot(session_id)
+                return self._real_telemetry_view(session, telemetry, observer)
+            self._mark_real_feedback_recovered(session_id)
+            session = self.store.snapshot(session_id)
             return self._real_telemetry_view(session, telemetry, observer)
         if mode != RuntimeMode.SIMULATION:
             raise SimulationProxyError("真实模式收到了仿真遥测")
@@ -563,8 +642,9 @@ class WebRuntime:
                 for key, value in telemetry.connections.model_dump(mode="python").items()
             },
         }
+        feedback_issue = self._real_feedback_issue(telemetry)
         return SimulationTelemetryView(
-            connected=telemetry.freshness.value == "fresh",
+            connected=feedback_issue is None,
             runtime_mode="real",
             provider=telemetry.provider.value,
             freshness=telemetry.freshness.value,
@@ -606,14 +686,14 @@ class WebRuntime:
                 if mirror and mirror.get("source_sequence") is not None
                 else None
             ),
-            error=(
-                None
-                if telemetry.freshness.value == "fresh"
-                else {
-                    "code": f"ROBOT_{telemetry.freshness.value.upper()}",
-                    "message": "真实状态不新鲜；画面已冻结",
-                }
-            ),
+            error=(None if feedback_issue is None else {
+                "code": (
+                    f"ROBOT_{telemetry.freshness.value.upper()}"
+                    if telemetry.freshness.value != "fresh"
+                    else "ROBOT_CONNECTION_UNAVAILABLE"
+                ),
+                "message": f"{_REAL_CONNECTION_RECOVERY_NOTICE}：{feedback_issue}",
+            }),
         )
 
     def _simulation_telemetry_view(
@@ -686,13 +766,21 @@ class WebRuntime:
             and session.active_command_id is None
             and session.status not in _BUSY_STATUSES
         ):
-            self._fallback_to_simulation(session_id, str(error) or type(error).__name__)
-            try:
-                return self.get_robot_telemetry(session_id)
-            except Exception as fallback_error:
-                error = fallback_error
+            detail = str(error) or type(error).__name__
+            if self._real_feedback_outage_expired(session_id, detail=detail):
+                fallback_ms = int((self._real_mode_fallback_s or 0) * 1000)
+                self._fallback_to_simulation(
+                    session_id,
+                    f"真实连接连续异常超过 {fallback_ms} ms：{detail}",
+                )
+                try:
+                    return self.get_robot_telemetry(session_id)
+                except Exception as fallback_error:
+                    error = fallback_error
+                    session = self.store.snapshot(session_id)
+                    selected_mode = RuntimeMode.SIMULATION
+            else:
                 session = self.store.snapshot(session_id)
-                selected_mode = RuntimeMode.SIMULATION
         command = session.normalized_command or {}
         return SimulationTelemetryView(
             connected=False,

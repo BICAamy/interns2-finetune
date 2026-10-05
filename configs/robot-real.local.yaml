@@ -51,7 +51,8 @@ motion:
   controller_override: 1.0 # 控制器速度倍率，1.0就是100%
 
 deadlines:
-  state_stale_ms: 250 # 50 ms 一帧，连续约 5 帧未收到即标为过期；只读阶段暂用
+  state_stale_ms: 300 # 50 ms 一帧，连续约 6 帧未收到即标为过期
+  real_mode_fallback_ms: 5000 # 真实连接连续异常 5 秒后，网页才自动退回仿真
   response_ms: 3000 # 发送 10003 请求后，控制器回复最多允许等 3000ms
   startup_ms: 5000 # WayPoint 已接受后，最多用5000ms等待机械臂真正开始运动
   motion_ms: 120000 # 一次运动最多等 120000ms
