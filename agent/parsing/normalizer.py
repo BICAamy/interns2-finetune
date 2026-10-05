@@ -54,6 +54,22 @@ POINT_FIELDS = {"x", "y", "z", "unit", "frame", "source"}
 RELATIVE_FIELDS = {
     "axis", "direction", "distance_mm", "delta_mm", "frame", "distance_source",
 }
+# Demo-only phrase expansion.  Keep the geometry explicit and deterministic;
+# it is still validated and confirmed like every other MotionSequence.
+DEMO_HEART_DELTAS_MM = (
+    (-50.0, 0.0, 50.0),
+    (-40.0, 0.0, 50.0),
+    (0.0, 0.0, 50.0),
+    (30.0, 0.0, 30.0),
+    (40.0, 0.0, 0.0),
+    (20.0, 0.0, -30.0),
+    (20.0, 0.0, 30.0),
+    (40.0, 0.0, 0.0),
+    (30.0, 0.0, -30.0),
+    (0.0, 0.0, -50.0),
+    (-40.0, 0.0, -50.0),
+    (-50.0, 0.0, -50.0),
+)
 ALLOWED_MISSING_FIELDS = {
     "intent",
     "entry_point",
@@ -291,13 +307,38 @@ class CommandNormalizer:
         *,
         input_source: CoordinateSource = CoordinateSource.USER_TEXT,
     ) -> ParsedCommand | None:
-        """Deterministic fallback for explicit ordered Chinese motion phrases.
+        """Parse only explicit, unambiguous ordered Chinese motion phrases.
 
-        This path is intentionally narrow: it is used only when InternS2 did
-        not call the tool, and accepts only unambiguous motion clauses.
+        The accepted grammar is deliberately narrow so callers may use this
+        as a fast path before invoking InternS2 without guessing user intent.
         """
 
         compact_text = re.sub(r"\s+", "", text.strip())
+        if re.fullmatch(
+            r"(?:请)?(?:(?:给我|帮我))?画(?:一个|个|一颗)?爱心[。.!！]?",
+            compact_text,
+        ):
+            return self.normalize(
+                {
+                    "intent": CommandIntent.MOVE_SEQUENCE.value,
+                    "motion_steps": [
+                        {
+                            "kind": MotionStepKind.CARTESIAN_RELATIVE.value,
+                            "delta_mm": list(delta),
+                            "frame": CoordinateFrame.ROBOT_BASE.value,
+                            "value_source": DistanceSource.CONFIGURED_DEFAULT.value,
+                        }
+                        for delta in DEMO_HEART_DELTAS_MM
+                    ],
+                    "missing_fields": [],
+                    "needs_confirmation": True,
+                    "confidence": 1.0,
+                    "summary": "演示预设：在 Base X-Z 平面绘制 180×180 mm 爱心轨迹",
+                },
+                input_source=input_source,
+                input_text=text,
+            )
+
         absolute_position = re.fullmatch(
             r"(?:机械臂|TCP)?(?:移动)?(?:到|至)?(?:Base|base|基座)(?:坐标系)?(?:下)?"
             r"[（(]?X[=:：]?(-?\d+(?:\.\d+)?)[,，]"

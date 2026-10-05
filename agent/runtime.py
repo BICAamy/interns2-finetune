@@ -142,11 +142,36 @@ class InternS2Agent:
         *,
         input_source: CoordinateSource = CoordinateSource.USER_TEXT,
     ) -> ParsedCommandResponse:
-        """Call InternS2 once and validate its sole high-level tool call."""
+        """Parse an explicit motion deterministically or call InternS2 once."""
 
         normalized_prompt = prompt.strip()
         if not normalized_prompt:
             raise ValueError("The user prompt cannot be empty")
+
+        if image_path is None:
+            deterministic = self.normalizer.try_normalize_sequence_text(
+                normalized_prompt,
+                input_source=input_source,
+            )
+            if deterministic is not None:
+                deterministic_steps = (
+                    []
+                    if deterministic.motion_sequence is None
+                    else [
+                        step.model_dump(mode="json")
+                        for step in deterministic.motion_sequence.steps
+                    ]
+                )
+                return ParsedCommandResponse(
+                    command=deterministic,
+                    model=self.model,
+                    raw_arguments={
+                        "intent": deterministic.intent.value,
+                        "motion_steps": deterministic_steps,
+                        "missing_fields": deterministic.missing_fields,
+                        "parser": "deterministic_motion_parser",
+                    },
+                )
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": build_system_prompt(self.settings)},
@@ -185,29 +210,6 @@ class InternS2Agent:
         message = getattr(response.choices[0], "message", None)
         tool_calls = getattr(message, "tool_calls", None) if message is not None else None
         if not tool_calls:
-            fallback = self.normalizer.try_normalize_sequence_text(
-                normalized_prompt,
-                input_source=input_source,
-            )
-            if fallback is not None:
-                fallback_steps = (
-                    []
-                    if fallback.motion_sequence is None
-                    else [
-                        step.model_dump(mode="json")
-                        for step in fallback.motion_sequence.steps
-                    ]
-                )
-                return ParsedCommandResponse(
-                    command=fallback,
-                    model=self.model,
-                    raw_arguments={
-                        "intent": fallback.intent.value,
-                        "motion_steps": fallback_steps,
-                        "missing_fields": fallback.missing_fields,
-                        "parser": "deterministic_motion_fallback",
-                    },
-                )
             raise CommandParsingError(
                 ErrorCode.MODEL_NO_TOOL_CALL,
                 "InternS2 没有调用 submit_surgical_task，未生成任何可执行命令。",

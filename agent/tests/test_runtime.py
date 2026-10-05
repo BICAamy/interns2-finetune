@@ -97,7 +97,7 @@ def make_agent(arguments, *, settings=None, name="submit_surgical_task"):
 
 
 class InternS2AgentTests(unittest.TestCase):
-    def test_no_tool_call_parses_the_reported_ordered_motion_phrase(self):
+    def test_explicit_ordered_motion_uses_deterministic_fast_path(self):
         client = FakeInternS2Client(calls=[])
         agent = InternS2Agent(
             replace(
@@ -120,6 +120,7 @@ class InternS2AgentTests(unittest.TestCase):
         self.assertEqual(steps[2].translation_mm, (74.0, 0.0, 0.0))
         self.assertEqual(steps[3].joint_index, 1)
         self.assertEqual(steps[3].rotation_deg, -70.0)
+        self.assertEqual(client.chat.completions.requests, [])
 
     def test_no_tool_call_uses_configured_vague_distance_and_rotation(self):
         client = FakeInternS2Client(calls=[])
@@ -267,7 +268,7 @@ class InternS2AgentTests(unittest.TestCase):
         self.assertEqual(command.motion_sequence.steps[1].joint_index, 3)
         self.assertEqual(command.motion_sequence.steps[1].rotation_deg, 5.0)
 
-    def test_no_tool_call_parses_explicit_heart_polyline(self):
+    def test_explicit_heart_polyline_uses_deterministic_fast_path(self):
         client = FakeInternS2Client(calls=[])
         agent = InternS2Agent(
             make_settings(),
@@ -297,6 +298,36 @@ class InternS2AgentTests(unittest.TestCase):
         assert tuple(sum(vector[axis] for vector in actual) for axis in range(3)) == (
             0.0, 0.0, 0.0,
         )
+        self.assertEqual(client.chat.completions.requests, [])
+
+    def test_heart_demo_phrases_expand_to_fixed_motion_sequence_without_model(self):
+        client = FakeInternS2Client(calls=[])
+        agent = InternS2Agent(
+            make_settings(),
+            client=client,
+            command_id_factory=lambda: "cmd-heart-demo-preset",
+        )
+        expected = (
+            (-50.0, 0.0, 50.0), (-40.0, 0.0, 50.0), (0.0, 0.0, 50.0),
+            (30.0, 0.0, 30.0), (40.0, 0.0, 0.0), (20.0, 0.0, -30.0),
+            (20.0, 0.0, 30.0), (40.0, 0.0, 0.0), (30.0, 0.0, -30.0),
+            (0.0, 0.0, -50.0), (-40.0, 0.0, -50.0), (-50.0, 0.0, -50.0),
+        )
+
+        for prompt in ("画一个爱心", "请画一个爱心", "请帮我画一颗爱心。"):
+            with self.subTest(prompt=prompt):
+                command = agent.parse_command(prompt).command
+                self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+                self.assertEqual(
+                    tuple(
+                        step.translation_mm
+                        for step in command.motion_sequence.steps
+                    ),
+                    expected,
+                )
+                self.assertTrue(command.needs_confirmation)
+
+        self.assertEqual(client.chat.completions.requests, [])
 
     def test_puncture_tool_call_is_validated_and_model_id_is_ignored(self):
         arguments = base_arguments(

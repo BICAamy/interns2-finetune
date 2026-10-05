@@ -14,18 +14,7 @@ import type {
 } from "./types";
 
 const SESSION_KEY = "interns2-surgical-session";
-const DEFAULT_PROMPT = `第1步：沿Base坐标系组合相对移动ΔX=-25,ΔY=0,ΔZ=25毫米；
-第2步：沿Base坐标系组合相对移动ΔX=-20,ΔY=0,ΔZ=25毫米；
-第3步：沿Base坐标系组合相对移动ΔX=0,ΔY=0,ΔZ=25毫米；
-第4步：沿Base坐标系组合相对移动ΔX=15,ΔY=0,ΔZ=15毫米；
-第5步：沿Base坐标系组合相对移动ΔX=20,ΔY=0,ΔZ=0毫米；
-第6步：沿Base坐标系组合相对移动ΔX=10,ΔY=0,ΔZ=-15毫米；
-第7步：沿Base坐标系组合相对移动ΔX=10,ΔY=0,ΔZ=15毫米；
-第8步：沿Base坐标系组合相对移动ΔX=20,ΔY=0,ΔZ=0毫米；
-第9步：沿Base坐标系组合相对移动ΔX=15,ΔY=0,ΔZ=-15毫米；
-第10步：沿Base坐标系组合相对移动ΔX=0,ΔY=0,ΔZ=-25毫米；
-第11步：沿Base坐标系组合相对移动ΔX=-20,ΔY=0,ΔZ=-25毫米；
-第12步：沿Base坐标系组合相对移动ΔX=-25,ΔY=0,ΔZ=-25毫米。`;
+const DEFAULT_PROMPT = "请画一个爱心";
 
 const busyStatuses = new Set([
   "parsing",
