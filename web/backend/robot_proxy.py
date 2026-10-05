@@ -15,6 +15,7 @@ from surgical_contracts import (
     SimulationCameraState,
     SimulationHealth,
     SimulationTelemetry,
+    TrajectoryClearResult,
 )
 
 
@@ -58,6 +59,7 @@ class RobotObserver(Protocol):
     def get_mirror_status(self) -> dict[str, Any] | None: ...
     def get_camera_state(self) -> SimulationCameraState: ...
     def control_camera(self, request: SimulationCameraControlRequest) -> SimulationCameraState: ...
+    def clear_trajectory(self) -> TrajectoryClearResult: ...
     async def open_mjpeg(self) -> MJPEGStream: ...
     def close(self) -> None: ...
 
@@ -140,6 +142,14 @@ class RobotObservabilityHTTPClient:
             return SimulationCameraState.model_validate(response.json())
         except (httpx.HTTPError, ValueError, ValidationError) as error:
             raise RobotProxyError("无法更新 robot-runtime 相机") from error
+
+    def clear_trajectory(self) -> TrajectoryClearResult:
+        try:
+            response = self._client.post("/v1/trajectory/clear")
+            response.raise_for_status()
+            return TrajectoryClearResult.model_validate(response.json())
+        except (httpx.HTTPError, ValueError, ValidationError) as error:
+            raise RobotProxyError("无法清除 robot-runtime 轨迹") from error
 
     async def open_mjpeg(self) -> MJPEGStream:
         client = self._async_client_factory() if self._async_client_factory is not None else httpx.AsyncClient(

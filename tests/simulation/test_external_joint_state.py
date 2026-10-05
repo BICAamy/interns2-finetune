@@ -133,6 +133,20 @@ def test_new_gateway_session_freezes_first_sample_then_accepts_next() -> None:
     assert controller.trajectory_mm == ((502.0, 0.0, 500.0),)
 
 
+def test_clear_trajectory_keeps_only_the_latest_actual_sample() -> None:
+    controller = ExternalJointStateController(CONFIG, stale_ms=250)
+    assert controller.apply_external_joint_state(telemetry(1))
+    assert controller.apply_external_joint_state(telemetry(2))
+    snapshot = controller.snapshot
+    assert snapshot is not None
+    assert len(controller.trajectory_mm) == 2
+
+    assert controller.clear_trajectory() == 1
+
+    assert controller.snapshot is snapshot
+    assert controller.trajectory_mm == (snapshot.actual_tcp_robot_base_mm,)
+
+
 def test_uncalibrated_overlay_has_no_provisional_tcp_marker() -> None:
     frame = np.zeros((64, 128, 3), dtype=np.uint8)
     rendered = TrajectoryRenderer().render(

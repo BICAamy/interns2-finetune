@@ -14,8 +14,18 @@ import type {
 } from "./types";
 
 const SESSION_KEY = "interns2-surgical-session";
-const DEFAULT_PROMPT =
-  "入点为基座坐标系下(X=600,Y=0,Z=500)毫米，靶点为(X=500,Y=0,Z=550)毫米，请准备穿刺";
+const DEFAULT_PROMPT = `第1步：沿Base坐标系组合相对移动ΔX=-25,ΔY=0,ΔZ=25毫米；
+第2步：沿Base坐标系组合相对移动ΔX=-20,ΔY=0,ΔZ=25毫米；
+第3步：沿Base坐标系组合相对移动ΔX=0,ΔY=0,ΔZ=25毫米；
+第4步：沿Base坐标系组合相对移动ΔX=15,ΔY=0,ΔZ=15毫米；
+第5步：沿Base坐标系组合相对移动ΔX=20,ΔY=0,ΔZ=0毫米；
+第6步：沿Base坐标系组合相对移动ΔX=10,ΔY=0,ΔZ=-15毫米；
+第7步：沿Base坐标系组合相对移动ΔX=10,ΔY=0,ΔZ=15毫米；
+第8步：沿Base坐标系组合相对移动ΔX=20,ΔY=0,ΔZ=0毫米；
+第9步：沿Base坐标系组合相对移动ΔX=15,ΔY=0,ΔZ=-15毫米；
+第10步：沿Base坐标系组合相对移动ΔX=0,ΔY=0,ΔZ=-25毫米；
+第11步：沿Base坐标系组合相对移动ΔX=-20,ΔY=0,ΔZ=-25毫米；
+第12步：沿Base坐标系组合相对移动ΔX=-25,ΔY=0,ΔZ=-25毫米。`;
 
 const busyStatuses = new Set([
   "parsing",
@@ -194,6 +204,8 @@ export default function App() {
   const [camera, setCamera] = useState<SimulationCameraState | null>(null);
   const [cameraDragging, setCameraDragging] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [trajectoryBusy, setTrajectoryBusy] = useState(false);
+  const [trajectoryNotice, setTrajectoryNotice] = useState<string | null>(null);
   const [asrStatus, setAsrStatus] = useState<ASRStatus | null>(null);
   const [recording, setRecording] = useState(false);
   const [speechBusy, setSpeechBusy] = useState(false);
@@ -442,6 +454,26 @@ export default function App() {
       setCameraError(error instanceof Error ? error.message : String(error));
     } finally {
       cameraRequestInFlight.current = false;
+    }
+  }
+
+  async function clearTrajectory() {
+    if (!session || trajectoryBusy) return;
+    setTrajectoryBusy(true);
+    setTrajectoryNotice(null);
+    setRequestError(null);
+    try {
+      const result = await api.clearTrajectory(session.session_id);
+      setTelemetry(await api.telemetry(session.session_id));
+      setTrajectoryNotice(
+        result.trajectory_points > 0
+          ? "轨迹已清除；当前 TCP 位置已作为下一条轨迹的起点。"
+          : "轨迹已清除。",
+      );
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTrajectoryBusy(false);
     }
   }
   useEffect(() => {
@@ -1037,6 +1069,19 @@ export default function App() {
                   {telemetry?.error && <div className="telemetry-error">{String(telemetry.error.message ?? "真实遥测不可用")}</div>}
                 </aside>
               ) : <aside className="telemetry-board">
+                <div className="trajectory-toolbar">
+                  <div>
+                    <strong>本次轨迹</strong>
+                    {trajectoryNotice && <span>{trajectoryNotice}</span>}
+                  </div>
+                  <button
+                    className="button secondary"
+                    disabled={!session || trajectoryBusy}
+                    onClick={() => void clearTrajectory()}
+                  >
+                    {trajectoryBusy ? "清除中…" : "清除轨迹"}
+                  </button>
+                </div>
                 <div className="telemetry-stats">
                   <div><span>位置误差</span><strong>{telemetry?.position_error_mm != null ? `${telemetry.position_error_mm.toFixed(3)} mm` : "—"}</strong></div>
                   <div><span>运动状态</span><strong>{telemetry?.motion_state ?? "—"}</strong></div>

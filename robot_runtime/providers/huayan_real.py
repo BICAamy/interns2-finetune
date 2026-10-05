@@ -122,6 +122,13 @@ class HuayanRealProvider:
             raise self._unavailable()
         return self.mirror_worker.control_camera(request)
 
+    def clear_trajectory(self) -> int:
+        """Clear only the passive SOFA path; never contact the controller."""
+
+        if self.mirror_worker is None:
+            raise self._unavailable()
+        return self.mirror_worker.clear_trajectory()
+
     def submit(
         self, kind: RobotCommandKind, request: Any
     ) -> tuple[RobotCommandRecord, bool]:

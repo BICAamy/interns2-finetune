@@ -41,6 +41,7 @@ from surgical_contracts import (
     SimulationCameraState,
     SimulationHealth,
     SimulationTelemetry,
+    TrajectoryClearResult,
     parse_wire_json,
 )
 from simulation.server.video_stream import MJPEG_BOUNDARY, mjpeg_stream
@@ -306,6 +307,16 @@ def create_app(
         request: SimulationCameraControlRequest,
     ) -> SimulationCameraState:
         return runtime_provider.control_camera(request)
+
+    @router.post("/v1/trajectory/clear", response_model=TrajectoryClearResult)
+    def clear_trajectory() -> TrajectoryClearResult:
+        """Clear visualization history only; this is not a robot command."""
+
+        return TrajectoryClearResult(
+            runtime_mode=selected,
+            trajectory_points=runtime_provider.clear_trajectory(),
+            cleared_at_ms=time.time_ns() // 1_000_000,
+        )
 
     @router.post("/v1/reset", response_model=RobotCommandRecord, status_code=202)
     def reset(request: ResetSimulationRequest) -> RobotCommandRecord:

@@ -37,6 +37,7 @@ class MirrorEnvironment(Protocol):
     def reset(self) -> None: ...
     def apply_external_joint_state(self, telemetry: RobotTelemetry) -> Any | None: ...
     def refresh_frozen_frame(self) -> Any | None: ...
+    def clear_trajectory(self) -> Any | None: ...
     def get_camera_state(self) -> SimulationCameraState: ...
     def control_camera(self, request: SimulationCameraControlRequest) -> SimulationCameraState: ...
     def close(self) -> None: ...
@@ -125,6 +126,9 @@ class RealMirrorWorker:
         self._camera_requests: deque[
             tuple[SimulationCameraControlRequest, Event, dict[str, Any]]
         ] = deque()
+        self._trajectory_clear_requests: deque[
+            tuple[Event, dict[str, Any]]
+        ] = deque()
 
     def start(self, *, timeout_s: float = 60.0) -> None:
         with self._lock: # 线程锁：保护共享变量
@@ -141,6 +145,7 @@ class RealMirrorWorker:
             self._reason = "no_actual_joint_sample" # 信息：为什么现在不能正常更新。
             self._camera_state = _default_camera_state()
             self._camera_requests.clear()
+            self._trajectory_clear_requests.clear()
             self._thread = Thread(target=self._run, name="real-sofa-mirror", daemon=True) # 创建运行 SOFA 的后台线程
             self._thread.start() # 启动线程
         if not self._ready.wait(timeout_s): # 主线程进行等待
@@ -189,6 +194,40 @@ class RealMirrorWorker:
                         with self._lock:
                             self._camera_state = state
                         holder["state"] = state
+                    except Exception as error:
+                        holder["error"] = error
+                    finally:
+                        completed.set()
+                while True:
+                    with self._lock:
+                        pending_clear = (
+                            self._trajectory_clear_requests.popleft()
+                            if self._trajectory_clear_requests
+                            else None
+                        )
+                    if pending_clear is None:
+                        break
+                    completed, holder = pending_clear
+                    try:
+                        frame = environment.clear_trajectory()
+                        holder["trajectory_points"] = len(
+                            environment.controller.trajectory_mm
+                        )
+                        if frame is not None:
+                            snapshot = environment.controller.snapshot
+                            self._publish(
+                                frame,
+                                source_sequence=(
+                                    snapshot.source_sequence
+                                    if snapshot is not None
+                                    else None
+                                ),
+                                session_id=(
+                                    snapshot.gateway_session_id
+                                    if snapshot is not None
+                                    else None
+                                ),
+                            )
                     except Exception as error:
                         holder["error"] = error
                     finally:
@@ -288,3 +327,23 @@ class RealMirrorWorker:
         if not isinstance(state, SimulationCameraState):
             raise RuntimeError("real SOFA mirror returned no camera state")
         return state.model_copy(deep=True)
+
+    def clear_trajectory(self, *, timeout_s: float = 2.0) -> int:
+        """Clear only mirror history on the SOFA owner thread."""
+
+        if self._thread is None or not self._thread.is_alive():
+            raise RuntimeError("real SOFA mirror is not running")
+        completed = Event()
+        holder: dict[str, Any] = {}
+        with self._lock:
+            self._trajectory_clear_requests.append((completed, holder))
+        if not completed.wait(timeout_s):
+            raise RuntimeError("real SOFA mirror trajectory clear timed out")
+        if "error" in holder:
+            raise RuntimeError("real SOFA mirror trajectory clear failed") from holder[
+                "error"
+            ]
+        points = holder.get("trajectory_points")
+        if not isinstance(points, int):
+            raise RuntimeError("real SOFA mirror returned no trajectory result")
+        return points

@@ -24,6 +24,7 @@ from surgical_contracts import (
     SimulationCameraControlRequest,
     SimulationCameraState,
     SimulationTelemetry,
+    TrajectoryClearResult,
 )
 from web.backend.main import create_app
 from web.backend.asr import ASRSettings
@@ -187,6 +188,15 @@ class StubSimulationObserver:
             )
         self.camera_state = self.camera_state.model_copy(update=updates)
         return self.camera_state.model_copy(deep=True)
+
+    def clear_trajectory(self) -> TrajectoryClearResult:
+        state = self.robot.get_state()
+        self.trajectory = [state.tcp_position.as_tuple()]
+        return TrajectoryClearResult(
+            runtime_mode="simulation",
+            trajectory_points=1,
+            cleared_at_ms=int(time.time() * 1000),
+        )
 
     def close(self) -> None:
         self.closed = True
@@ -488,6 +498,16 @@ def test_telemetry_is_enriched_and_trajectory_is_downsampled():
         assert len(payload["trajectory_mm"]) == 160
         assert payload["trajectory_mm"][0] == [0.0, 0.0, 100.0]
         assert payload["trajectory_mm"][-1] == [299.0, 0.0, 129.9]
+
+        cleared = client.post(
+            f"/api/sessions/{session_id}/robot/trajectory/clear"
+        )
+        assert cleared.status_code == 200
+        assert cleared.json()["trajectory_points"] == 1
+        after_clear = client.get(
+            f"/api/sessions/{session_id}/robot/telemetry"
+        ).json()
+        assert after_clear["trajectory_total_points"] == 1
 
         assert client.post(f"/api/sessions/{session_id}/confirm").status_code == 202
         completed = wait_for_status(client, session_id, {"plan_ready", "failed"})

@@ -557,6 +557,12 @@ class ContinuousTrajectoryController:
     def trajectory_mm(self) -> tuple[tuple[float, float, float], ...]:
         return tuple(self._trajectory_mm)
 
+    def clear_trajectory(self) -> int:
+        """Forget the rendered path while retaining the current robot state."""
+
+        self._trajectory_mm[:] = [self._position_mm]
+        return len(self._trajectory_mm)
+
     @property
     def entry_point(self) -> Point3D | None:
         return self._point(self._entry_point_mm) if self._entry_point_mm is not None else None

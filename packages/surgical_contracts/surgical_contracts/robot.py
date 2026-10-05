@@ -17,6 +17,16 @@ class RuntimeMode(str, Enum):
     REAL = "real"
 
 
+class TrajectoryClearResult(ContractModel):
+    """Result of clearing visualization history; never a robot command."""
+
+    schema_version: SchemaVersion = SCHEMA_VERSION
+    runtime_mode: RuntimeMode
+    cleared: Literal[True] = True
+    trajectory_points: int = Field(ge=0)
+    cleared_at_ms: int = Field(ge=0)
+
+
 class MotionState(str, Enum):
     IDLE = "idle"
     MOVING = "moving"

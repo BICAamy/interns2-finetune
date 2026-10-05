@@ -47,6 +47,9 @@ class SimulationProvider:
     ) -> SimulationCameraState:
         return self.worker.control_camera(request)
 
+    def clear_trajectory(self) -> int:
+        return self.worker.clear_trajectory()
+
     def submit(
         self, kind: RobotCommandKind, request: Any
     ) -> tuple[RobotCommandRecord, bool]:

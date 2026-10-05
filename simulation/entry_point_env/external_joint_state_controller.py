@@ -112,6 +112,19 @@ class ExternalJointStateController:
     def trajectory_sofa_mm(self) -> tuple[tuple[float, float, float], ...]:
         return tuple(self._trajectory_sofa_mm)
 
+    def clear_trajectory(self) -> int:
+        """Clear passive feedback history without changing the mirrored pose."""
+
+        self._trajectory_mm.clear()
+        self._trajectory_sofa_mm.clear()
+        if self.snapshot is not None:
+            self._trajectory_mm.append(self.snapshot.actual_tcp_robot_base_mm)
+            if self.snapshot.actual_tcp_sofa_world_mm is not None:
+                self._trajectory_sofa_mm.append(
+                    self.snapshot.actual_tcp_sofa_world_mm
+                )
+        return len(self._trajectory_mm)
+
     def freeze(self, freshness: SourceFreshness, reason: str) -> None:
         self.freshness = freshness
         self.reason = reason

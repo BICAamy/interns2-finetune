@@ -139,6 +139,12 @@ class PassiveRealMirrorEnv(SofaEnv):
             return None
         return self._overlay(self._maybe_update_rgb_buffer())
 
+    def clear_trajectory(self) -> np.ndarray | None:
+        """Clear the passive path only; actual feedback and pose are untouched."""
+
+        self.controller.clear_trajectory()
+        return self.refresh_frozen_frame()
+
     def _overlay(self, frame: np.ndarray | None) -> np.ndarray | None:
         if frame is None:
             return None

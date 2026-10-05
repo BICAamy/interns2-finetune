@@ -5,6 +5,7 @@ import type {
   SimulationCameraState,
   SimulationTelemetry,
   TextCommandPayload,
+  TrajectoryClearResult,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -97,6 +98,11 @@ export const api = {
         method: "PUT",
         body: JSON.stringify(payload),
       },
+    ),
+  clearTrajectory: (sessionId: string) =>
+    request<TrajectoryClearResult>(
+      `/api/sessions/${sessionId}/robot/trajectory/clear`,
+      { method: "POST" },
     ),
   videoUrl: (
     sessionId: string,

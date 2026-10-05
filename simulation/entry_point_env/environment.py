@@ -266,6 +266,12 @@ class EntryPointReachEnv(SofaEnv):
 
         return self._observation(self._maybe_update_rgb_buffer())
 
+    def clear_trajectory(self) -> EntryPointObservation:
+        """Clear only the visual path and redraw at the unchanged robot pose."""
+
+        self.controller.clear_trajectory()
+        return self.refresh_observation()
+
     def _apply_camera_pose(self) -> None:
         if not self._initialized:
             return

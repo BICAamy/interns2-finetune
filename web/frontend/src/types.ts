@@ -152,6 +152,14 @@ export interface SimulationCameraState {
   updated_at_ms: number;
 }
 
+export interface TrajectoryClearResult {
+  schema_version: "1.0";
+  runtime_mode: "simulation" | "real";
+  cleared: true;
+  trajectory_points: number;
+  cleared_at_ms: number;
+}
+
 export type CameraControlPayload =
   | {
       action: "orbit";

@@ -10,6 +10,7 @@ from surgical_contracts import (
     SimulationCameraControlRequest,
     SimulationCameraState,
     SimulationTelemetry,
+    TrajectoryClearResult,
 )
 from web.backend.simulation_proxy import (
     RobotSimulationObservabilityHTTPClient,
@@ -46,6 +47,14 @@ def camera_payload() -> dict:
         target_m=(0.35, 0.0, 0.42),
         position_m=(0.35, -1.65, 0.42),
         updated_at_ms=12345,
+    ).model_dump(mode="json")
+
+
+def trajectory_clear_payload() -> dict:
+    return TrajectoryClearResult(
+        runtime_mode="simulation",
+        trajectory_points=1,
+        cleared_at_ms=12345,
     ).model_dump(mode="json")
 
 
@@ -108,6 +117,32 @@ def test_observability_client_gets_and_updates_view_only_camera_endpoint():
         ("PUT", "/v1/camera"),
     ]
     assert requests[1].read()
+    client.close()
+    http.close()
+
+
+def test_observability_client_clears_visual_trajectory_only():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=trajectory_clear_payload())
+
+    http = httpx.Client(
+        base_url="http://simulation.test",
+        transport=httpx.MockTransport(handler),
+    )
+    client = RobotSimulationObservabilityHTTPClient(
+        "http://simulation.test",
+        client=http,
+    )
+
+    result = client.clear_trajectory()
+
+    assert result.trajectory_points == 1
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("POST", "/v1/trajectory/clear"),
+    ]
     client.close()
     http.close()
 

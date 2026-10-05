@@ -126,6 +126,11 @@ class ControllerEnvironment:
             rgb=self._frame.copy(),
         )
 
+    def clear_trajectory(self):
+        self._owned()
+        self.controller.clear_trajectory()
+        return self.refresh_observation()
+
     def close(self):
         self._owned()
         self.closed = True
@@ -364,6 +369,33 @@ def test_normal_commands_are_serialized_and_telemetry_is_updated(service):
     assert telemetry["sequence"] > 1
     assert len(telemetry["trajectory_mm"]) > 2
     assert telemetry["frame_sequence"] > 0
+
+
+def test_clear_trajectory_keeps_pose_and_seeds_the_next_path(service):
+    client, _worker, environment = service
+    response = client.post(
+        "/v1/commands/move-relative",
+        json={
+            "command_id": "trajectory-clear-move",
+            "translation_mm": [5.0, 0.0, 0.0],
+            "frame": "robot_base",
+            "speed_mm_s": 20.0,
+        },
+    )
+    assert response.status_code == 202
+    assert wait_for_terminal(client, "trajectory-clear-move")["status"] == "succeeded"
+    before = client.get("/v1/state").json()
+    assert len(before["trajectory_mm"]) > 1
+
+    cleared = client.post("/v1/trajectory/clear")
+
+    assert cleared.status_code == 200
+    assert cleared.json()["runtime_mode"] == "simulation"
+    assert cleared.json()["trajectory_points"] == 1
+    after = client.get("/v1/state").json()
+    assert after["state"]["tcp_position"] == before["state"]["tcp_position"]
+    assert len(after["trajectory_mm"]) == 1
+    assert environment.owner_thread_ids == {_worker._thread.ident}
 
 
 def test_low_speed_relative_result_preserves_requested_eight_mm(service):

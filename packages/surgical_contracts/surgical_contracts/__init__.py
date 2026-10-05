@@ -75,6 +75,7 @@ from .robot import (
     SetEnabledRequest,
     SetEnabledResult,
     ToolStatus,
+    TrajectoryClearResult,
     VendorFault,
 )
 from .simulation import (
@@ -177,6 +178,7 @@ __all__ = [
     "ToolEvent",
     "ToolName",
     "ToolStatus",
+    "TrajectoryClearResult",
     "VendorFault",
     "hello_auth_tag",
     "load_gateway_secret",

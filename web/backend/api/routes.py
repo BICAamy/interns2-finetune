@@ -12,6 +12,7 @@ from surgical_contracts import (
     SetEnabledResult,
     SimulationCameraControlRequest,
     SimulationCameraState,
+    TrajectoryClearResult,
 )
 
 from ..models import (
@@ -251,6 +252,34 @@ async def control_simulation_camera(
             status_code=502,
             content={
                 "code": "SIMULATION_CAMERA_UNAVAILABLE",
+                "message": str(error),
+                "details": {},
+            },
+        )
+
+
+@router.post(
+    "/api/sessions/{session_id}/robot/trajectory/clear",
+    response_model=TrajectoryClearResult,
+)
+@router.post(
+    "/api/sessions/{session_id}/simulation/trajectory/clear",
+    response_model=TrajectoryClearResult,
+)
+async def clear_robot_trajectory(
+    session_id: str,
+    request: Request,
+):
+    try:
+        return await asyncio.to_thread(
+            _runtime(request).clear_robot_trajectory,
+            session_id,
+        )
+    except SimulationProxyError as error:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "code": "TRAJECTORY_CLEAR_UNAVAILABLE",
                 "message": str(error),
                 "details": {},
             },

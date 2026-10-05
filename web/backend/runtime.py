@@ -29,6 +29,7 @@ from surgical_contracts import (
     SimulationTelemetry,
     SimulationCameraControlRequest,
     SimulationCameraState,
+    TrajectoryClearResult,
     ToolEvent,
     RuntimeMode,
 )
@@ -917,6 +918,20 @@ class WebRuntime:
         self, session_id: str, request: SimulationCameraControlRequest
     ) -> SimulationCameraState:
         return self.control_robot_camera(session_id, request)
+
+    def clear_robot_trajectory(
+        self,
+        session_id: str,
+    ) -> TrajectoryClearResult:
+        """Clear visual history only; do not reset or command either robot."""
+
+        mode, _parser, _robot, observer, _orchestrator = (
+            self._resources_for_session(session_id)
+        )
+        result = observer.clear_trajectory()
+        if result.runtime_mode != mode:
+            raise SimulationProxyError("robot-runtime 返回了错误的轨迹模式")
+        return result
 
     def health(self) -> HealthResponse:
         return HealthResponse(

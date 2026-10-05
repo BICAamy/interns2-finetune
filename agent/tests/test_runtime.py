@@ -267,6 +267,37 @@ class InternS2AgentTests(unittest.TestCase):
         self.assertEqual(command.motion_sequence.steps[1].joint_index, 3)
         self.assertEqual(command.motion_sequence.steps[1].rotation_deg, 5.0)
 
+    def test_no_tool_call_parses_explicit_heart_polyline(self):
+        client = FakeInternS2Client(calls=[])
+        agent = InternS2Agent(
+            make_settings(),
+            client=client,
+            command_id_factory=lambda: "cmd-heart-polyline-fallback",
+        )
+        vectors = (
+            (-25, 0, 25), (-20, 0, 25), (0, 0, 25), (15, 0, 15),
+            (20, 0, 0), (10, 0, -15), (10, 0, 15), (20, 0, 0),
+            (15, 0, -15), (0, 0, -25), (-20, 0, -25), (-25, 0, -25),
+        )
+        prompt = "；".join(
+            f"第{index}步：沿Base坐标系组合相对移动"
+            f"ΔX={dx},ΔY={dy},ΔZ={dz}毫米"
+            for index, (dx, dy, dz) in enumerate(vectors, start=1)
+        )
+
+        command = agent.parse_command(prompt).command
+
+        assert command.intent == CommandIntent.MOVE_SEQUENCE
+        actual = tuple(
+            step.translation_mm for step in command.motion_sequence.steps
+        )
+        assert actual == tuple(
+            tuple(float(value) for value in vector) for vector in vectors
+        )
+        assert tuple(sum(vector[axis] for vector in actual) for axis in range(3)) == (
+            0.0, 0.0, 0.0,
+        )
+
     def test_puncture_tool_call_is_validated_and_model_id_is_ignored(self):
         arguments = base_arguments(
             "puncture",

@@ -40,6 +40,10 @@ class ReplayEnvironment:
     def refresh_frozen_frame(self):
         return self._frame() if self.controller.snapshot is not None else None
 
+    def clear_trajectory(self):
+        self.controller.clear_trajectory()
+        return self.refresh_frozen_frame()
+
     def close(self) -> None:
         self.closed = True
 
@@ -101,12 +105,18 @@ def test_real_mirror_replays_actual_feedback_and_freezes_without_motion(monkeypa
             "/v1/commands/move-relative",
             json={"command_id": "mirror-motion-blocked", "translation_mm": [0, 0, 1]},
         ).status_code == 403
+        cleared = client.post("/v1/trajectory/clear")
+        assert cleared.status_code == 200
+        assert cleared.json()["runtime_mode"] == "real"
+        assert cleared.json()["trajectory_points"] == 1
+        cleared_status = mirror.status()
+        assert cleared_status.frame_sequence > first.frame_sequence
 
         # A changed command target cannot alter the mirror: only a new source
         # sequence from the actual feedback channel can publish a new pose.
         time.sleep(0.04)
         assert mirror.status().source_sequence == 1
-        assert mirror.status().frame_sequence == first.frame_sequence
+        assert mirror.status().frame_sequence == cleared_status.frame_sequence
 
         current[0] = telemetry(2)
         second = wait_for(lambda: mirror.status().source_sequence == 2 and mirror.status())

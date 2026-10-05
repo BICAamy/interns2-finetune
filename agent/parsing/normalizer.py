@@ -353,7 +353,7 @@ class CommandNormalizer:
         # sentence commas remain valid sequence separators.
         coordinate_comma = "__COORD_COMMA__"
         protected_text = re.sub(
-            r"(?<=\d)[,，](?=[YyZz]\s*[=:：])",
+            r"(?<=\d)[,，](?=(?:Δ)?[YyZz]\s*[=:：])",
             coordinate_comma,
             text.strip(),
         )
@@ -386,6 +386,28 @@ class CommandNormalizer:
         steps: list[dict[str, Any]] = []
         for clause in clauses:
             compact = re.sub(r"\s+", "", clause)
+            cartesian_delta = re.fullmatch(
+                r"(?:第\d+步[::：]?)?(?:沿)?(?:Base|base|基座)(?:坐标系)?(?:下)?"
+                r"(?:组合)?(?:相对)?(?:移动|位移)"
+                r"Δ?X[=:：]?(-?\d+(?:\.\d+)?)[,，]"
+                r"Δ?Y[=:：]?(-?\d+(?:\.\d+)?)[,，]"
+                r"Δ?Z[=:：]?(-?\d+(?:\.\d+)?)(?:毫米|mm)",
+                compact,
+                flags=re.IGNORECASE,
+            )
+            if cartesian_delta is not None:
+                steps.append({
+                    "kind": MotionStepKind.CARTESIAN_RELATIVE.value,
+                    "delta_mm": [
+                        float(cartesian_delta.group(1)),
+                        float(cartesian_delta.group(2)),
+                        float(cartesian_delta.group(3)),
+                    ],
+                    "frame": CoordinateFrame.ROBOT_BASE.value,
+                    "value_source": DistanceSource.USER_PROVIDED.value,
+                })
+                continue
+
             cartesian_absolute = re.fullmatch(
                 r"(?:机械臂|TCP)?(?:移动)?(?:到|至)?(?:Base|base|基座)(?:坐标系)?(?:下)?"
                 r"[（(]?X[=:：]?(-?\d+(?:\.\d+)?)[,，]"

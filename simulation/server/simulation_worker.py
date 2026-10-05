@@ -96,6 +96,7 @@ class SimulationEnvironment(Protocol):
         request: SimulationCameraControlRequest,
     ) -> SimulationCameraState: ...
     def refresh_observation(self) -> Any: ...
+    def clear_trajectory(self) -> Any: ...
     def close(self) -> None: ...
 
 
@@ -104,6 +105,13 @@ class PendingCameraControl:
     request: SimulationCameraControlRequest
     completed: Event = field(default_factory=Event)
     result: SimulationCameraState | None = None
+    error: Exception | None = None
+
+
+@dataclass
+class PendingTrajectoryClear:
+    completed: Event = field(default_factory=Event)
+    trajectory_points: int | None = None
     error: Exception | None = None
 
 
@@ -137,6 +145,7 @@ class SimulationWorker:
         )
         self._queue = SimulationCommandQueue()
         self._camera_queue: Queue[PendingCameraControl] = Queue()
+        self._trajectory_clear_queue: Queue[PendingTrajectoryClear] = Queue()
         self._lock = Lock()
         self._event_condition = Condition(self._lock)
         self._frame_condition = Condition(self._lock)
@@ -227,6 +236,10 @@ class SimulationWorker:
                         render_immediately=active is None or paused,
                     )
 
+                trajectory_clear = self._get_trajectory_clear_nowait()
+                if trajectory_clear is not None:
+                    self._execute_trajectory_clear(environment, trajectory_clear)
+
                 if active is None:
                     command = self._queue.get_normal_nowait()
                     if command is not None:
@@ -257,6 +270,7 @@ class SimulationWorker:
                 self._event_condition.notify_all()
                 self._frame_condition.notify_all()
             self._fail_pending_camera_controls()
+            self._fail_pending_trajectory_clears()
 
     def _get_camera_nowait(self) -> PendingCameraControl | None:
         try:
@@ -285,9 +299,38 @@ class SimulationWorker:
         finally:
             pending.completed.set()
 
+    def _get_trajectory_clear_nowait(self) -> PendingTrajectoryClear | None:
+        try:
+            return self._trajectory_clear_queue.get_nowait()
+        except Empty:
+            return None
+
+    def _execute_trajectory_clear(
+        self,
+        environment: SimulationEnvironment,
+        pending: PendingTrajectoryClear,
+    ) -> None:
+        try:
+            observation = environment.clear_trajectory()
+            with self._lock:
+                self._capture_locked(observation)
+            pending.trajectory_points = len(environment.controller.trajectory_mm)
+        except Exception as error:
+            pending.error = error
+        finally:
+            pending.completed.set()
+
     def _fail_pending_camera_controls(self) -> None:
         while True:
             pending = self._get_camera_nowait()
+            if pending is None:
+                return
+            pending.error = WorkerUnavailableError("simulation worker stopped")
+            pending.completed.set()
+
+    def _fail_pending_trajectory_clears(self) -> None:
+        while True:
+            pending = self._get_trajectory_clear_nowait()
             if pending is None:
                 return
             pending.error = WorkerUnavailableError("simulation worker stopped")
@@ -718,6 +761,28 @@ class SimulationWorker:
             raise WorkerUnavailableError("simulation camera returned no state")
         return pending.result.model_copy(deep=True)
 
+    def clear_trajectory(self, *, timeout_s: float = 3.0) -> int:
+        """Clear only the rendered trajectory on the SOFA owner thread."""
+
+        with self._lock:
+            if self._initialization_error is not None:
+                raise WorkerUnavailableError(self._initialization_error)
+            if (
+                self._thread is None
+                or not self._thread.is_alive()
+                or not self._ready_event.is_set()
+            ):
+                raise WorkerUnavailableError("simulation worker is not ready")
+        pending = PendingTrajectoryClear()
+        self._trajectory_clear_queue.put(pending)
+        if not pending.completed.wait(timeout_s):
+            raise WorkerUnavailableError("simulation trajectory clear timed out")
+        if pending.error is not None:
+            raise pending.error
+        if pending.trajectory_points is None:
+            raise WorkerUnavailableError("simulation trajectory clear returned no result")
+        return pending.trajectory_points
+
     def health(self) -> SimulationHealth:
         with self._lock:
             alive = self._thread is not None and self._thread.is_alive()
@@ -734,7 +799,11 @@ class SimulationWorker:
                 worker_alive=alive,
                 initialized=initialized,
                 ready=ready,
-                queue_depth=self._queue.depth + self._camera_queue.qsize(),
+                queue_depth=(
+                    self._queue.depth
+                    + self._camera_queue.qsize()
+                    + self._trajectory_clear_queue.qsize()
+                ),
                 active_command_id=(
                     self._active_command.command_id
                     if self._active_command is not None
