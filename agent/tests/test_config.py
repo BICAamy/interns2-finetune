@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -23,6 +25,53 @@ def settings() -> AgentSettings:
 
 
 class AgentSettingsTests(unittest.TestCase):
+    def test_api_key_can_be_read_from_an_untracked_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            key_file = Path(directory) / "interns2.key"
+            key_file.write_text("test-secret\n", encoding="utf-8")
+            with patch.dict(
+                "os.environ",
+                {"INTERNS2_API_KEY_FILE": str(key_file)},
+                clear=True,
+            ):
+                self.assertEqual(AgentSettings.from_env().api_key, "test-secret")
+
+    def test_api_key_file_conflicts_with_a_direct_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            key_file = Path(directory) / "interns2.key"
+            key_file.write_text("file-secret", encoding="utf-8")
+            with patch.dict(
+                "os.environ",
+                {
+                    "INTERNS2_API_KEY": "direct-secret",
+                    "INTERNS2_API_KEY_FILE": str(key_file),
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "only one"):
+                    AgentSettings.from_env()
+
+    def test_api_key_file_must_exist_and_not_be_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing.key"
+            with patch.dict(
+                "os.environ",
+                {"INTERNS2_API_KEY_FILE": str(missing)},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "missing or unreadable"):
+                    AgentSettings.from_env()
+
+            empty = Path(directory) / "empty.key"
+            empty.write_text("\n", encoding="utf-8")
+            with patch.dict(
+                "os.environ",
+                {"INTERNS2_API_KEY_FILE": str(empty)},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "cannot be empty"):
+                    AgentSettings.from_env()
+
     def test_real_environment_requires_config_without_a_control_mode(self):
         base = {
             "RUNTIME_MODE": "real",

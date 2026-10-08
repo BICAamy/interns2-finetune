@@ -6,34 +6,47 @@ APP_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 BUNDLE_ROOT="$(cd "$APP_ROOT/.." && pwd -P)"
 PYTHON="$BUNDLE_ROOT/runtime/envs/agent-web/bin/python"
 
+# shellcheck source=scripts/services/interns2_config.sh
+source "$SCRIPT_DIR/interns2_config.sh"
+
 test -x "$PYTHON" || {
     echo "ERROR: agent-web runtime is missing at $PYTHON." >&2
     exit 1
 }
 
+interns2_configure "$APP_ROOT" || exit 1
+
 "$PYTHON" - <<'PY'
 import json
+import os
 import urllib.request
+from urllib.parse import urlsplit
 
-services = [
-    ("interns2-inference", 23333, "/v1/models"),
-]
+inference_mode = os.environ["INTERNS2_INFERENCE_MODE"]
+inference_url = os.environ["INTERNS2_BASE_URL"].rstrip("/") + "/models"
+api_key = os.environ["INTERNS2_API_KEY"]
 
 print("==================================================")
 print(" Surgical Navigation Service Status")
 print("==================================================")
 
-for name, port, path in services:
-    url = f"http://127.0.0.1:{port}{path}"
-    try:
-        with urllib.request.urlopen(url, timeout=3) as response:
-            healthy = 200 <= response.status < 300
-    except Exception:
-        healthy = False
-
-    state = "RUNNING" if healthy else "DOWN"
-    detail = "HEALTHY" if healthy else "UNAVAILABLE"
-    print(f"{name:22} {state:9} :{port:<5}  {detail}")
+headers = {}
+if api_key != "EMPTY":
+    headers["Authorization"] = f"Bearer {api_key}"
+try:
+    request = urllib.request.Request(inference_url, headers=headers)
+    with urllib.request.urlopen(request, timeout=3) as response:
+        inference_healthy = 200 <= response.status < 300
+except Exception:
+    inference_healthy = False
+inference_state = "RUNNING" if inference_healthy else "DOWN"
+inference_detail = "HEALTHY" if inference_healthy else "UNAVAILABLE"
+endpoint = urlsplit(inference_url)
+endpoint_label = endpoint.netloc or inference_url
+print(
+    f"{'interns2-inference':22} {inference_state:9} "
+    f"{endpoint_label:20}  {inference_detail} ({inference_mode})"
+)
 
 try:
     with urllib.request.urlopen("http://127.0.0.1:8001/health", timeout=3) as response:

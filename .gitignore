@@ -89,6 +89,7 @@ Thumbs.db
 .env.*
 !.env.example
 /configs/gateway-auth.local
+/configs/interns2-api-key.local
 
 # ============================================================
 # Web frontend

@@ -46,14 +46,6 @@ function supportedAudioMimeType(): string | undefined {
   return audioMimeCandidates.find((value) => MediaRecorder.isTypeSupported(value));
 }
 
-function JsonPanel({ value, empty }: { value: unknown; empty: string }) {
-  return (
-    <pre className="json-panel">
-      {value ? JSON.stringify(value, null, 2) : empty}
-    </pre>
-  );
-}
-
 function CoordinateCard({ title, point }: { title: string; point: any }) {
   return (
     <div className="coordinate-card">
@@ -842,31 +834,6 @@ export default function App() {
               )}
               {speechError && <div className="speech-error">{speechError}</div>}
             </div>
-            <div className="example-row">
-              {runtimeMode !== "real" && (
-                <button className="text-button" onClick={() => setPrompt(DEFAULT_PROMPT)}>
-                  填入点/靶点示例
-                </button>
-              )}
-              <button
-                className="text-button"
-                onClick={() => setPrompt("机械臂沿基座坐标系 Z 轴正方向移动 8 毫米")}
-              >
-                填单轴位移示例
-              </button>
-              <button
-                className="text-button"
-                onClick={() => setPrompt("机械臂在 Base 坐标系相对移动：X 加 8 毫米，Y 减 3 毫米，Z 加 5 毫米")}
-              >
-                填组合位移示例
-              </button>
-              <button
-                className="text-button"
-                onClick={() => setPrompt("机械臂移动到 Base 坐标系绝对位置 X=550 毫米，Y=50 毫米，Z=300 毫米，保持当前实际姿态不变")}
-              >
-                填绝对 XYZ 示例
-              </button>
-            </div>
             <label className="upload-zone">
               <input
                 type="file"
@@ -1105,24 +1072,6 @@ export default function App() {
             <Timeline events={session?.execution_events ?? []} />
           </section>
 
-          <section className="panel json-grid-panel">
-            <div className="panel-heading">
-              <div>
-                <span className="eyebrow">05 · 可审计数据</span>
-                <h2>InternS2 与规范化结果</h2>
-              </div>
-            </div>
-            <div className="json-grid">
-              <div>
-                <h3>InternS2 原始工具参数</h3>
-                <JsonPanel value={session?.raw_model_output} empty="等待模型解析" />
-              </div>
-              <div>
-                <h3>规范化 ParsedCommand</h3>
-                <JsonPanel value={session?.normalized_command} empty="等待结构化任务" />
-              </div>
-            </div>
-          </section>
         </div>
       </main>
 

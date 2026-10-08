@@ -7,6 +7,9 @@ BUNDLE_ROOT="$(cd "$APP_ROOT/.." && pwd -P)"
 RUNTIME_ROOT="$BUNDLE_ROOT/runtime/envs"
 LOG_DIR="$APP_ROOT/logs/services"
 
+# shellcheck source=scripts/services/interns2_config.sh
+source "$SCRIPT_DIR/interns2_config.sh"
+
 INFERENCE_ENV="$RUNTIME_ROOT/inference"
 PLANNER_ENV="$RUNTIME_ROOT/planner"
 SIM_ENV="$RUNTIME_ROOT/simulation"
@@ -207,6 +210,14 @@ if $CHECK_CONFIG; then
     exit 0
 fi
 
+# Inference selection is independent of the web page's simulation/real robot
+# selection. API mode connects to an already-running OpenAI-compatible server;
+# local mode starts the bundled LMDeploy process below.
+interns2_configure "$APP_ROOT" || exit 1
+if [[ "$INTERNS2_INFERENCE_MODE" == local ]]; then
+    export INTERNS2_MODEL="$MODEL_DIR"
+fi
+
 check_model() {
     "$INFERENCE_ENV/bin/python" - "$MODEL_DIR" <<'PY_MODEL'
 from pathlib import Path
@@ -238,11 +249,13 @@ PY_MODEL
 }
 
 check_ports_free() {
-    "$PLANNER_ENV/bin/python" - "$ROBOT_MODE" <<'PY_PORTS'
+    "$PLANNER_ENV/bin/python" - "$ROBOT_MODE" "$INTERNS2_INFERENCE_MODE" <<'PY_PORTS'
 import socket
 import sys
 
-ports = [23333, 8002, 8001, 8000]
+ports = [8002, 8001, 8000]
+if sys.argv[2] == "local":
+    ports.append(23333)
 if sys.argv[1] == "real":
     ports.append(8003)
 busy = []
@@ -266,18 +279,26 @@ wait_http() {
     local url="$2"
     local timeout_s="$3"
     local log_file="$4"
+    local auth_mode="${5:-none}"
 
     local deadline=$((SECONDS + timeout_s))
 
     printf "Waiting for %-20s " "$name"
 
     while (( SECONDS < deadline )); do
-        if "$PLANNER_ENV/bin/python" - "$url" >/dev/null 2>&1 <<'PY_HTTP'
+        if "$PLANNER_ENV/bin/python" - "$url" "$auth_mode" >/dev/null 2>&1 <<'PY_HTTP'
+import os
 import sys
 import urllib.request
 
 try:
-    with urllib.request.urlopen(sys.argv[1], timeout=2) as response:
+    headers = {}
+    if sys.argv[2] == "interns2":
+        api_key = os.environ["INTERNS2_API_KEY"]
+        if api_key != "EMPTY":
+            headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(sys.argv[1], headers=headers)
+    with urllib.request.urlopen(request, timeout=2) as response:
         if 200 <= response.status < 300:
             raise SystemExit(0)
 except Exception:
@@ -296,8 +317,10 @@ PY_HTTP
 
     echo
     echo "ERROR: $name did not become healthy."
-    echo "Last 80 log lines:"
-    tail -n 80 "$log_file" || true
+    if [[ -n "$log_file" && -f "$log_file" ]]; then
+        echo "Last 80 log lines:"
+        tail -n 80 "$log_file" || true
+    fi
     return 1
 }
 
@@ -308,7 +331,14 @@ echo "=================================================="
 echo
 echo "BUNDLE_ROOT = $BUNDLE_ROOT"
 echo "APP_ROOT    = $APP_ROOT"
-echo "MODEL_DIR   = $MODEL_DIR"
+echo "INFERENCE   = $INTERNS2_INFERENCE_MODE ($INTERNS2_BASE_URL)"
+if [[ "$INTERNS2_INFERENCE_MODE" == local ]]; then
+    echo "MODEL_DIR   = $MODEL_DIR"
+elif [[ -n "${INTERNS2_MODEL:-}" ]]; then
+    echo "MODEL       = $INTERNS2_MODEL"
+else
+    echo "MODEL       = auto-discover from /models"
+fi
 if [[ "$ROBOT_MODE" == real ]]; then
     echo "ROBOT MODE  = REAL"
     echo "BLOCKERS    = $CONFIG_MISSING"
@@ -326,24 +356,30 @@ echo "===== preflight ====="
 test -d "$APP_ROOT/.git" \
     || fail "app/.git is missing; development repository is incomplete."
 
-for env_name in inference planner simulation agent-web; do
+for env_name in planner simulation agent-web; do
     test -x "$RUNTIME_ROOT/$env_name/bin/python" \
         || fail "$env_name runtime is missing. Run bundle scripts/bootstrap.sh first."
 done
 
-test -x "$INFERENCE_ENV/bin/lmdeploy" \
-    || fail "lmdeploy is missing from inference environment."
+if [[ "$INTERNS2_INFERENCE_MODE" == local ]]; then
+    test -x "$INFERENCE_ENV/bin/python" \
+        || fail "inference runtime is missing. Run bundle scripts/bootstrap.sh first."
+    test -x "$INFERENCE_ENV/bin/lmdeploy" \
+        || fail "lmdeploy is missing from inference environment."
+fi
 
 test -x "$SIM_ENV/bin/Xvfb" \
     || fail "Xvfb is missing from simulation environment."
 
-test -x "$CUDA_TOOLKIT_ROOT/bin/nvcc" \
-    || fail "CUDA 12.8 toolkit is missing at $CUDA_TOOLKIT_ROOT."
+if [[ "$INTERNS2_INFERENCE_MODE" == local ]]; then
+    test -x "$CUDA_TOOLKIT_ROOT/bin/nvcc" \
+        || fail "CUDA 12.8 toolkit is missing at $CUDA_TOOLKIT_ROOT."
 
-CUDA_VERSION_OUTPUT="$("$CUDA_TOOLKIT_ROOT/bin/nvcc" --version)" \
-    || fail "Could not query CUDA toolkit at $CUDA_TOOLKIT_ROOT."
-[[ "$CUDA_VERSION_OUTPUT" == *"release 12.8"* ]] \
-    || fail "Expected CUDA 12.8 at $CUDA_TOOLKIT_ROOT."
+    CUDA_VERSION_OUTPUT="$("$CUDA_TOOLKIT_ROOT/bin/nvcc" --version)" \
+        || fail "Could not query CUDA toolkit at $CUDA_TOOLKIT_ROOT."
+    [[ "$CUDA_VERSION_OUTPUT" == *"release 12.8"* ]] \
+        || fail "Expected CUDA 12.8 at $CUDA_TOOLKIT_ROOT."
+fi
 
 test -x "$SOFA_ROOT/bin/runSofa" \
     || fail "SOFA runtime is missing."
@@ -358,7 +394,7 @@ test -f "$APP_ROOT/models/asr/faster-whisper-small/model.bin" \
 test -f "$APP_ROOT/web/frontend/dist/index.html" \
     || fail "frontend dist is missing. Build web/frontend first."
 
-if ! check_model; then
+if [[ "$INTERNS2_INFERENCE_MODE" == local ]] && ! check_model; then
     echo
     echo "ERROR: Intern-S2-Preview weights are incomplete:"
     echo "  $MODEL_DIR"
@@ -372,8 +408,12 @@ check_ports_free || fail "Refusing to launch beside an existing service stack."
 
 mkdir -p "$LOG_DIR"
 
-echo "Intern-S2 model = OK"
-echo "CUDA toolkit    = $CUDA_TOOLKIT_ROOT"
+if [[ "$INTERNS2_INFERENCE_MODE" == local ]]; then
+    echo "Intern-S2 model = OK"
+    echo "CUDA toolkit    = $CUDA_TOOLKIT_ROOT"
+else
+    echo "InternS2 API    = configured (connectivity checked after launch)"
+fi
 if [[ "$ROBOT_MODE" == simulation ]]; then
     echo "SOFA            = OK"
     echo "E05             = OK"
@@ -402,29 +442,36 @@ trap cleanup INT TERM EXIT
 # 1. InternS2 / LMDeploy :23333
 # --------------------------------------------------
 
-echo "[1/4] Starting InternS2 inference..."
+if [[ "$INTERNS2_INFERENCE_MODE" == local ]]; then
+    echo "[1/4] Starting local InternS2 inference..."
 
-(
-    export CUDA_VISIBLE_DEVICES="$INFERENCE_GPUS"
-    export PATH="$INFERENCE_ENV/bin:$PATH"
+    (
+        export CUDA_VISIBLE_DEVICES="$INFERENCE_GPUS"
+        export PATH="$INFERENCE_ENV/bin:$PATH"
 
-    exec "$INFERENCE_ENV/bin/lmdeploy" serve api_server \
-        "$MODEL_DIR" \
-        --trust-remote-code \
-        --backend pytorch \
-        --tp "$INFERENCE_TP" \
-        --server-port 23333 \
-        --reasoning-parser default \
-        --tool-call-parser interns2-preview
-) >"$LOG_DIR/inference.log" 2>&1 &
+        exec "$INFERENCE_ENV/bin/lmdeploy" serve api_server \
+            "$MODEL_DIR" \
+            --trust-remote-code \
+            --backend pytorch \
+            --tp "$INFERENCE_TP" \
+            --server-port 23333 \
+            --reasoning-parser default \
+            --tool-call-parser interns2-preview
+    ) >"$LOG_DIR/inference.log" 2>&1 &
 
-INFERENCE_PID=$!
-PIDS+=("$INFERENCE_PID")
+    INFERENCE_PID=$!
+    PIDS+=("$INFERENCE_PID")
 
-echo "      PID=$INFERENCE_PID"
-echo "      GPUs=$INFERENCE_GPUS"
-echo "      TP=$INFERENCE_TP"
-echo "      log=$LOG_DIR/inference.log"
+    echo "      PID=$INFERENCE_PID"
+    echo "      GPUs=$INFERENCE_GPUS"
+    echo "      TP=$INFERENCE_TP"
+    echo "      log=$LOG_DIR/inference.log"
+else
+    echo "[1/4] Using existing InternS2 API..."
+    echo "      endpoint=$INTERNS2_BASE_URL"
+    echo "      model=${INTERNS2_MODEL:-auto-discover}"
+    echo "      managed by this script=no"
+fi
 
 
 # --------------------------------------------------
@@ -588,11 +635,19 @@ fi
 echo
 echo "Checking downstream services..."
 
+if [[ "$INTERNS2_INFERENCE_MODE" == local ]]; then
+    INFERENCE_WAIT_TIMEOUT=300
+    INFERENCE_WAIT_LOG="$LOG_DIR/inference.log"
+else
+    INFERENCE_WAIT_TIMEOUT=30
+    INFERENCE_WAIT_LOG=""
+fi
 wait_http \
     "InternS2 inference" \
-    "http://127.0.0.1:23333/v1/models" \
-    300 \
-    "$LOG_DIR/inference.log"
+    "${INTERNS2_BASE_URL%/}/models" \
+    "$INFERENCE_WAIT_TIMEOUT" \
+    "$INFERENCE_WAIT_LOG" \
+    interns2
 
 wait_http \
     "planner-adapter" \
@@ -650,9 +705,6 @@ echo "[4/4] Starting agent-web..."
 (
     export PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT"
 
-    export INTERNS2_BASE_URL=http://127.0.0.1:23333/v1
-    export INTERNS2_API_KEY=EMPTY
-    export INTERNS2_MODEL="$MODEL_DIR"
     export INTERNS2_TEMPERATURE=0
 
     export RUNTIME_MODE="$ROBOT_MODE"
@@ -723,7 +775,7 @@ echo "=================================================="
 echo " ALL SERVICES HEALTHY"
 echo "=================================================="
 echo
-echo " InternS2 inference : http://127.0.0.1:23333"
+echo " InternS2 inference : $INTERNS2_BASE_URL ($INTERNS2_INFERENCE_MODE)"
 echo " $ROBOT_SERVICE_LABEL : http://127.0.0.1:8001"
 if [[ "$ROBOT_MODE" == real ]]; then
     echo " robot-simulation   : http://127.0.0.1:8003 (web default/fallback)"
@@ -732,7 +784,9 @@ echo " planner-adapter    : http://127.0.0.1:8002"
 echo " agent-web          : http://127.0.0.1:8000"
 echo
 echo " Logs:"
-echo "   $LOG_DIR/inference.log"
+if [[ "$INTERNS2_INFERENCE_MODE" == local ]]; then
+    echo "   $LOG_DIR/inference.log"
+fi
 echo "   $ROBOT_LOG"
 echo "   $LOG_DIR/planner-adapter.log"
 echo "   $LOG_DIR/agent-web.log"

@@ -46,6 +46,33 @@ def _as_bool(name: str, default: bool) -> bool:
     )
 
 
+def _interns2_api_key() -> str:
+    """Resolve an API key without requiring it to be stored in a tracked file."""
+
+    direct = os.getenv("INTERNS2_API_KEY", "").strip()
+    key_file_value = os.getenv("INTERNS2_API_KEY_FILE", "").strip()
+    if not key_file_value:
+        return direct or "EMPTY"
+
+    if direct and direct != "EMPTY":
+        raise ValueError(
+            "set only one of INTERNS2_API_KEY or INTERNS2_API_KEY_FILE"
+        )
+
+    key_file = Path(key_file_value).expanduser()
+    if not key_file.is_absolute():
+        key_file = PROJECT_ROOT / key_file
+    try:
+        api_key = key_file.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError(
+            f"INTERNS2_API_KEY_FILE is missing or unreadable: {key_file}"
+        ) from exc
+    if not api_key:
+        raise ValueError("INTERNS2_API_KEY_FILE cannot be empty")
+    return api_key
+
+
 def load_environment(env_file: str | Path | None = None) -> Path:
     """Load the project .env without overriding explicitly exported variables."""
 
@@ -114,7 +141,7 @@ class AgentSettings:
             raise ValueError("ROBOT_MODE and RUNTIME_MODE disagree")
         settings = cls(
             base_url=os.getenv("INTERNS2_BASE_URL", "http://127.0.0.1:23333/v1").strip(),
-            api_key=os.getenv("INTERNS2_API_KEY", "EMPTY").strip(),
+            api_key=_interns2_api_key(),
             model=model,
             timeout=_as_float("INTERNS2_TIMEOUT", 300.0),
             max_retries=_as_int("INTERNS2_MAX_RETRIES", 2),

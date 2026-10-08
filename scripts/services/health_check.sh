@@ -6,20 +6,26 @@ APP_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 BUNDLE_ROOT="$(cd "$APP_ROOT/.." && pwd -P)"
 PYTHON="$BUNDLE_ROOT/runtime/envs/agent-web/bin/python"
 
+# shellcheck source=scripts/services/interns2_config.sh
+source "$SCRIPT_DIR/interns2_config.sh"
+
 test -x "$PYTHON" || {
     echo "ERROR: agent-web runtime is missing at $PYTHON." >&2
     echo "Run the bundle's scripts/bootstrap.sh first." >&2
     exit 1
 }
 
+interns2_configure "$APP_ROOT" || exit 1
+
 "$PYTHON" - <<'PY'
 import json
+import os
 import sys
 import urllib.request
 
-services = [
-    ("InternS2 inference", "http://127.0.0.1:23333/v1/models"),
-]
+inference_mode = os.environ["INTERNS2_INFERENCE_MODE"]
+inference_url = os.environ["INTERNS2_BASE_URL"].rstrip("/") + "/models"
+api_key = os.environ["INTERNS2_API_KEY"]
 
 failed = False
 
@@ -27,19 +33,22 @@ print("========================================")
 print(" InternS2 Service Health Check")
 print("========================================")
 
-for name, url in services:
-    try:
-        with urllib.request.urlopen(url, timeout=3) as response:
-            ok = 200 <= response.status < 300
-            status = f"HTTP {response.status}"
-    except Exception as exc:
-        ok = False
-        status = str(exc)
+headers = {}
+if api_key != "EMPTY":
+    headers["Authorization"] = f"Bearer {api_key}"
+try:
+    request = urllib.request.Request(inference_url, headers=headers)
+    with urllib.request.urlopen(request, timeout=3) as response:
+        ok = 200 <= response.status < 300
+        status = f"HTTP {response.status}"
+except Exception as exc:
+    ok = False
+    status = str(exc)
 
-    print(f"{name:20} : {'HEALTHY' if ok else 'FAILED'}")
-    if not ok:
-        print(f"  {status}")
-        failed = True
+print(f"{'InternS2 inference':20} : {'HEALTHY' if ok else 'FAILED'} ({inference_mode})")
+if not ok:
+    print(f"  {status}")
+    failed = True
 
 robot_health = None
 web_health = None
