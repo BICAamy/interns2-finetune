@@ -166,6 +166,72 @@ function TrajectoryPlot({ telemetry }: { telemetry: SimulationTelemetry | null }
   );
 }
 
+function AmbientWaveBackground() {
+  return (
+    <div className="ambient-scene" aria-hidden="true">
+      <div className="ambient-glow ambient-glow-a" />
+      <div className="ambient-glow ambient-glow-b" />
+      <div className="ambient-glow ambient-glow-c" />
+      <svg
+        className="ambient-waves"
+        viewBox="0 0 1600 900"
+        preserveAspectRatio="xMidYMid slice"
+      >
+        <defs>
+          <linearGradient id="wave-gradient-a" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stopColor="#0a4fca" stopOpacity="0" />
+            <stop offset="0.35" stopColor="#168cff" stopOpacity="0.62" />
+            <stop offset="0.72" stopColor="#11d6dc" stopOpacity="0.48" />
+            <stop offset="1" stopColor="#13e6ca" stopOpacity="0" />
+          </linearGradient>
+          <linearGradient id="wave-gradient-b" x1="1" y1="0" x2="0" y2="1">
+            <stop offset="0" stopColor="#52c9ff" stopOpacity="0" />
+            <stop offset="0.42" stopColor="#2585ff" stopOpacity="0.34" />
+            <stop offset="0.78" stopColor="#50f0df" stopOpacity="0.22" />
+            <stop offset="1" stopColor="#50f0df" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <path
+          className="ambient-wave ambient-wave-one"
+          d="M-220 260 C 80 20, 340 430, 650 225 S 1160 10, 1820 300"
+          fill="none"
+          stroke="url(#wave-gradient-a)"
+          strokeWidth="150"
+          strokeLinecap="round"
+        />
+        <path
+          className="ambient-wave ambient-wave-two"
+          d="M-180 485 C 180 130, 425 700, 790 390 S 1320 180, 1800 560"
+          fill="none"
+          stroke="url(#wave-gradient-b)"
+          strokeWidth="96"
+          strokeLinecap="round"
+        />
+        <path
+          className="ambient-wave ambient-wave-three"
+          d="M-180 735 C 130 410, 465 790, 805 590 S 1320 350, 1790 770"
+          fill="none"
+          stroke="url(#wave-gradient-a)"
+          strokeWidth="48"
+          strokeLinecap="round"
+        />
+        <path
+          className="ambient-thread ambient-thread-one"
+          d="M-120 335 C 250 120, 410 520, 760 305 S 1280 135, 1720 410"
+          fill="none"
+        />
+        <path
+          className="ambient-thread ambient-thread-two"
+          d="M-100 620 C 260 340, 540 770, 930 505 S 1380 360, 1750 690"
+          fill="none"
+        />
+      </svg>
+      <div className="ambient-grid" />
+      <div className="ambient-noise" />
+    </div>
+  );
+}
+
 export default function App() {
   const [session, setSession] = useState<SessionSnapshot | null>(null);
   const [runtimeMode, setRuntimeMode] = useState<"simulation" | "real">("simulation");
@@ -675,6 +741,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      <AmbientWaveBackground />
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">IS</div>
