@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
+  AnimationEvent as ReactAnimationEvent,
   PointerEvent as ReactPointerEvent,
 } from "react";
 import { api, fileToDataUrl, openSessionSocket } from "./api";
@@ -226,10 +227,29 @@ function AmbientWaveBackground() {
           fill="none"
         />
       </svg>
+      <div className="medical-blueprint medical-blueprint-left" />
+      <div className="medical-blueprint medical-blueprint-right" />
+      <div className="medical-blueprint medical-blueprint-center" />
       <div className="ambient-grid" />
       <div className="ambient-noise" />
     </div>
   );
+}
+
+function triggerPanelJelly(event: ReactPointerEvent<HTMLElement>) {
+  if (event.button !== 0) return;
+  const target = event.target as HTMLElement;
+  if (target.closest("button, textarea, input, select, label, a, summary")) return;
+  const panel = event.currentTarget;
+  panel.classList.remove("panel-jelly");
+  void panel.offsetWidth;
+  panel.classList.add("panel-jelly");
+}
+
+function finishPanelJelly(event: ReactAnimationEvent<HTMLElement>) {
+  if (event.target === event.currentTarget && event.animationName === "panel-jelly") {
+    event.currentTarget.classList.remove("panel-jelly");
+  }
 }
 
 export default function App() {
@@ -837,7 +857,11 @@ export default function App() {
         )}
 
         <div className="dashboard-grid">
-          <section className="panel command-panel">
+          <section
+            className="panel command-panel"
+            onPointerDown={triggerPanelJelly}
+            onAnimationEnd={finishPanelJelly}
+          >
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">01 · 指令输入</span>
@@ -951,7 +975,11 @@ export default function App() {
             </div>
           </section>
 
-          <section className="panel coordinates-panel">
+          <section
+            className="panel coordinates-panel"
+            onPointerDown={triggerPanelJelly}
+            onAnimationEnd={finishPanelJelly}
+          >
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">02 · 任务预览</span>
@@ -981,7 +1009,11 @@ export default function App() {
             )}
           </section>
 
-          <section className="panel simulation-panel">
+          <section
+            className="panel simulation-panel"
+            onPointerDown={triggerPanelJelly}
+            onAnimationEnd={finishPanelJelly}
+          >
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">{runtimeMode === "real" ? "03 · 真实机械臂" : runtimeMode === "simulation" ? "03 · 远程仿真" : "03 · 模式未确认"}</span>
@@ -1128,7 +1160,11 @@ export default function App() {
             </div>
           </section>
 
-          <section className="panel timeline-panel">
+          <section
+            className="panel timeline-panel"
+            onPointerDown={triggerPanelJelly}
+            onAnimationEnd={finishPanelJelly}
+          >
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">04 · 确定性编排</span>
