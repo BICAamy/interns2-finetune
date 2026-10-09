@@ -253,6 +253,12 @@ def normalize_motion_input_text(
         r"\1",
         "合并被逗号拆开的旋转动词和角度",
     )
+    apply(
+        r"((?:[Jj][1-6](?:关节)?\s*)?(?:向)?[左右])"
+        r"\s*[，,、]?\s*(?=-?\d+(?:\.\d+)?\s*(?:度|°))",
+        r"\1转",
+        "根据角度单位补全 ASR 遗漏的旋转动词",
+    )
 
     apply(r"[。.!！?？]+\s*$", "", "移除句尾标点")
     return normalized.strip(), tuple(changes)

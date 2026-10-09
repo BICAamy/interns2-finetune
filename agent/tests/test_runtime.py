@@ -167,6 +167,29 @@ class InternS2AgentTests(unittest.TestCase):
             "向上移动50厘米，向左转40度",
         )
 
+    def test_asr_missing_rotation_verb_is_inferred_from_degree_unit(self):
+        client = FakeInternS2Client(calls=[])
+        agent = InternS2Agent(
+            replace(make_settings(), default_rotation_joint_index=2),
+            client=client,
+            command_id_factory=lambda: "cmd-asr-missing-rotation-verb",
+        )
+
+        result = agent.parse_command(
+            "抬高50毫米，向左，40度。",
+            input_source=CoordinateSource.ASR_TEXT,
+        )
+
+        steps = result.command.motion_sequence.steps
+        self.assertEqual(steps[0].translation_mm, (0.0, 0.0, 50.0))
+        self.assertEqual(steps[1].joint_index, 2)
+        self.assertEqual(steps[1].rotation_deg, 40.0)
+        self.assertEqual(client.chat.completions.requests, [])
+        self.assertEqual(
+            result.raw_arguments["input_normalization"]["canonical_text"],
+            "向上移动50毫米，向左转40度",
+        )
+
     def test_chinese_coordinate_and_joint_numbers_use_fast_path(self):
         client = FakeInternS2Client(calls=[])
         agent = InternS2Agent(
@@ -198,9 +221,12 @@ class InternS2AgentTests(unittest.TestCase):
         agent.parse_command("请平稳地推进五十毫米。")
 
         content = client.chat.completions.requests[0]["messages"][1]["content"]
+        system_prompt = client.chat.completions.requests[0]["messages"][0]["content"]
         self.assertIn("用户原始输入：\n请平稳地推进五十毫米。", content)
         self.assertIn("系统规范化输入", content)
         self.assertIn("请平稳地推进50毫米", content)
+        self.assertIn("立即调用工具", system_prompt)
+        self.assertIn("向左，40 度", system_prompt)
 
     def test_explicit_forward_motion_parses_identically_in_both_modes(self):
         commands = []

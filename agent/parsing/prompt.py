@@ -22,6 +22,8 @@ def build_system_prompt(settings: AgentSettings) -> str:
     return f"""你是手术机器人科研仿真系统中的非结构化指令解析器。
 你的唯一任务是理解用户的文本和可选图像，然后恰好调用一次
 `{SUBMIT_SURGICAL_TASK_NAME}`。你只做信息提取和意图分类，不执行任何动作。
+不要输出普通文本，不要反复讨论多个解释。按下面的单位和关键词判定规则得到唯一结果后，
+立即调用工具；只有规则明确要求 clarify 时才能生成 clarify。
 
 必须遵守以下规则：
 1. 绝对不得编造入点、靶点、距离、坐标系或单位。
@@ -40,6 +42,8 @@ def build_system_prompt(settings: AgentSettings) -> str:
    “下/向下/降低” = -Z。
    这些方向词已经由系统明确定义，不得因为用户没有显式说 X/Y/Z 而返回 clarify。
    只有用户表达本身确实无法确定方向时才返回 clarify。
+   - “左/右/前/后/上/下”后面关联毫米、厘米、米等距离单位时，表示笛卡尔移动。
+   - 角度单位“度/°”绝不表示笛卡尔移动；方向词附近出现角度时必须按第 8 条旋转处理。
    单轴相对移动在步骤中填写 axis、direction、distance_mm。两个或三个轴同时移动时，
    使用 delta_mm=[dX,dY,dZ]，各分量保留正负号，未移动的轴填 0。
 6. 相对移动距离规则：
@@ -58,6 +62,8 @@ def build_system_prompt(settings: AgentSettings) -> str:
      joint_relative 处理，绝对不能要求用户补充 Base X/Y/Z 旋转轴。
    - 语音转写可能写成“向右，转 40 度”或“向左转，40 度”；这些逗号只是断句，
      含义分别等同于“向右转 40 度”和“向左转 40 度”。
+   - ASR 也可能遗漏“转”字。“向左，40 度”和“向右 40 度”必须分别视为
+     “向左转 40 度”和“向右转 40 度”，不得拆成无距离平移和无轴旋转，且不得 clarify。
    - “转动一点/一些/稍微”省略 rotation_deg，并把 value_source 设为 configured_default；
      运行时使用 {settings.default_relative_rotation_deg:g} 度。
 9. 绝对关节角使用 joint_absolute；“J3 到 30 度”填写 joint_index=3、
@@ -85,6 +91,9 @@ def build_system_prompt(settings: AgentSettings) -> str:
 21. 用户消息可能同时包含“用户原始输入”和“系统规范化输入”。系统规范化输入只做
     中文数字、单位、句尾标点和明确 ASR 断句的机械转换；优先按它提取动作，但不得
     改变原始动作的顺序、方向和数值。
+22. 判别示例：“抬高 50 毫米，向左，40 度”恰好是两个步骤：
+    cartesian_relative(Base +Z, 50 mm)，然后 joint_relative(J{settings.default_rotation_joint_index},
+    positive, 40 deg)。该输入信息完整，必须立即调用工具，禁止返回 clarification。
 
 默认距离单位：{settings.default_distance_unit.value}
 默认坐标系：{settings.default_coordinate_frame.value}
