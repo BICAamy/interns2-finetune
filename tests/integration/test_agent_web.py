@@ -379,8 +379,8 @@ def test_puncture_preview_requires_confirmation_and_never_executes_puncture():
         assert blocked.status_code in {404, 405}
 
 
-def test_heart_demo_holds_preview_for_exactly_one_and_a_half_seconds():
-    class HeartDemoParser(StubParser):
+def test_heart_star_demo_holds_preview_for_two_seconds():
+    class HeartStarDemoParser(StubParser):
         def parse_command(self, *args, **kwargs) -> ParsedCommandResponse:
             parsed = super().parse_command(*args, **kwargs)
             return ParsedCommandResponse(
@@ -388,11 +388,11 @@ def test_heart_demo_holds_preview_for_exactly_one_and_a_half_seconds():
                 model=parsed.model,
                 raw_arguments={
                     **(parsed.raw_arguments or {}),
-                    "demo_preset": "heart_180mm_xz",
+                    "demo_preset": "heart_front_star_side_3d",
                 },
             )
 
-    parser = HeartDemoParser(relative_command("heart-demo-delay"))
+    parser = HeartStarDemoParser(relative_command("heart-star-demo-delay"))
     robot = FakeRobotController()
     runtime = WebRuntime(
         settings(),
@@ -408,9 +408,11 @@ def test_heart_demo_holds_preview_for_exactly_one_and_a_half_seconds():
         with patch("web.backend.runtime.asyncio.sleep", new=fake_sleep):
             snapshot = await runtime.submit_text(
                 session_id,
-                TextCommandRequest(prompt="请画一个爱心"),
+                TextCommandRequest(
+                    prompt="请画出一张正面是爱心，侧面是星星的图案"
+                ),
             )
-        fake_sleep.assert_awaited_once_with(1.5)
+        fake_sleep.assert_awaited_once_with(2.0)
         assert snapshot.status == SessionStatus.AWAITING_CONFIRMATION
         assert robot.move_sequence_calls == []
 

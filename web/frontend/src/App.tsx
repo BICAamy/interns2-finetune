@@ -15,7 +15,7 @@ import type {
 } from "./types";
 
 const SESSION_KEY = "interns2-surgical-session";
-const DEFAULT_PROMPT = "请画一个爱心";
+const DEFAULT_PROMPT = "请画出一张正面是爱心，侧面是星星的图案";
 
 const busyStatuses = new Set([
   "parsing",

@@ -54,25 +54,30 @@ POINT_FIELDS = {"x", "y", "z", "unit", "frame", "source"}
 RELATIVE_FIELDS = {
     "axis", "direction", "distance_mm", "delta_mm", "frame", "distance_source",
 }
-# Demo-only phrase expansion.  Keep the geometry explicit and deterministic;
-# it is still validated and confirmed like every other MotionSequence.
-DEMO_HEART_DELTAS_MM = (
-    (20.0, 0.0, 30.0),
-    (40.0, 0.0, 0.0),
-    (30.0, 0.0, -30.0),
-    (0.0, 0.0, -50.0),
-    (-40.0, 0.0, -50.0),
-    (-50.0, 0.0, -50.0),
-    (-50.0, 0.0, 50.0),
-    (-40.0, 0.0, 50.0),
-    (0.0, 0.0, 50.0),
-    (30.0, 0.0, 30.0),
-    (40.0, 0.0, 0.0),
-    (20.0, 0.0, -30.0),
+# Demo-only phrase expansion.  The closed 3D polyline has two deliberate
+# orthographic projections:
+#   * front view (-Y): a heart in the Base X-Z plane;
+#   * side view (+/-X): a five-point star in the Base Y-Z plane.
+# It is still validated and confirmed like every other MotionSequence.
+DEMO_HEART_STAR_DELTAS_MM = (
+    (35.0, 18.0, 68.0),
+    (55.0, 18.0, -68.0),
+    (0.0, 39.0, 0.0),
+    (-8.0, -34.0, -43.0),
+    (-82.0, 12.0, -69.0),
+    (-49.0, -35.0, 41.0),
+    (49.0, -35.0, -41.0),
+    (-82.0, 12.0, 69.0),
+    (-8.0, -34.0, 43.0),
+    (0.0, 39.0, 0.0),
+    (55.0, 18.0, 68.0),
+    (35.0, -18.0, -68.0),
 )
-DEMO_HEART_PRESET_ID = "heart_180mm_xz"
-DEMO_HEART_PROMPT = re.compile(
-    r"(?:请)?(?:(?:给我|帮我))?画(?:一个|个|一颗)?爱心[。.!！]?"
+DEMO_HEART_STAR_PRESET_ID = "heart_front_star_side_3d"
+DEMO_HEART_STAR_PROMPT = re.compile(
+    r"(?:请)?(?:(?:给我|帮我))?画(?:出)?(?:一张|一个|个)?"
+    r"正面是(?:一颗|一个|个)?爱心[,，、]?(?:而|且|并且)?"
+    r"侧面是(?:一颗|一个|个)?星星(?:的)?(?:图案|图形)?[。.!！]?"
 )
 ALLOWED_MISSING_FIELDS = {
     "intent",
@@ -114,9 +119,13 @@ MISSING_FIELD_ALIASES = {
 def identify_demo_motion_preset(text: str) -> str | None:
     """Return the exact demo preset selected by a narrowly matched phrase."""
 
-    compact_text = re.sub(r"\s+", "", text.strip())
-    if DEMO_HEART_PROMPT.fullmatch(compact_text):
-        return DEMO_HEART_PRESET_ID
+    compact_text = (
+        re.sub(r"\s+", "", text.strip())
+        .replace("**", "")
+        .strip("“”\"'")
+    )
+    if DEMO_HEART_STAR_PROMPT.fullmatch(compact_text):
+        return DEMO_HEART_STAR_PRESET_ID
     return None
 MAX_EMBEDDED_JSON_CHARS = 32_768
 MAX_EMBEDDED_JSON_DEPTH = 2
@@ -327,7 +336,7 @@ class CommandNormalizer:
         """
 
         compact_text = re.sub(r"\s+", "", text.strip())
-        if identify_demo_motion_preset(compact_text) == DEMO_HEART_PRESET_ID:
+        if identify_demo_motion_preset(compact_text) == DEMO_HEART_STAR_PRESET_ID:
             return self.normalize(
                 {
                     "intent": CommandIntent.MOVE_SEQUENCE.value,
@@ -338,12 +347,14 @@ class CommandNormalizer:
                             "frame": CoordinateFrame.ROBOT_BASE.value,
                             "value_source": DistanceSource.CONFIGURED_DEFAULT.value,
                         }
-                        for delta in DEMO_HEART_DELTAS_MM
+                        for delta in DEMO_HEART_STAR_DELTAS_MM
                     ],
                     "missing_fields": [],
                     "needs_confirmation": True,
                     "confidence": 1.0,
-                    "summary": "演示预设：在 Base X-Z 平面绘制 180×180 mm 爱心轨迹",
+                    "summary": (
+                        "演示预设：三维变视轨迹，正面为爱心、侧面为星星"
+                    ),
                 },
                 input_source=input_source,
                 input_text=text,

@@ -7,7 +7,7 @@ from math import dist
 
 import numpy as np
 
-from agent.parsing.normalizer import DEMO_HEART_DELTAS_MM
+from agent.parsing.normalizer import DEMO_HEART_STAR_DELTAS_MM
 from simulation.entry_point_env import (
     ContinuousTrajectoryController,
     EntryPointEnvConfig,
@@ -32,11 +32,11 @@ def run_until_settled(controller: ContinuousTrajectoryController, maximum_steps:
 
 
 class RelativeMotionControllerTests(unittest.TestCase):
-    def test_large_heart_demo_is_reachable_and_returns_to_start(self):
+    def test_heart_star_demo_is_reachable_and_returns_to_start(self):
         controller = ContinuousTrajectoryController(CONFIG)
         start = controller.get_state().tcp_position.as_tuple()
 
-        for delta_mm in DEMO_HEART_DELTAS_MM:
+        for delta_mm in DEMO_HEART_STAR_DELTAS_MM:
             controller.move_relative(delta_mm)
             step = run_until_settled(controller)
             self.assertEqual(step.state.motion_state, MotionState.IDLE)

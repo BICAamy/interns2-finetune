@@ -300,7 +300,7 @@ class InternS2AgentTests(unittest.TestCase):
         )
         self.assertEqual(client.chat.completions.requests, [])
 
-    def test_heart_demo_phrases_expand_to_fixed_motion_sequence_without_model(self):
+    def test_heart_star_demo_phrases_expand_to_fixed_3d_sequence_without_model(self):
         client = FakeInternS2Client(calls=[])
         agent = InternS2Agent(
             make_settings(),
@@ -308,13 +308,20 @@ class InternS2AgentTests(unittest.TestCase):
             command_id_factory=lambda: "cmd-heart-demo-preset",
         )
         expected = (
-            (20.0, 0.0, 30.0), (40.0, 0.0, 0.0), (30.0, 0.0, -30.0),
-            (0.0, 0.0, -50.0), (-40.0, 0.0, -50.0), (-50.0, 0.0, -50.0),
-            (-50.0, 0.0, 50.0), (-40.0, 0.0, 50.0), (0.0, 0.0, 50.0),
-            (30.0, 0.0, 30.0), (40.0, 0.0, 0.0), (20.0, 0.0, -30.0),
+            (35.0, 18.0, 68.0), (55.0, 18.0, -68.0),
+            (0.0, 39.0, 0.0), (-8.0, -34.0, -43.0),
+            (-82.0, 12.0, -69.0), (-49.0, -35.0, 41.0),
+            (49.0, -35.0, -41.0), (-82.0, 12.0, 69.0),
+            (-8.0, -34.0, 43.0), (0.0, 39.0, 0.0),
+            (55.0, 18.0, 68.0), (35.0, -18.0, -68.0),
         )
 
-        for prompt in ("画一个爱心", "请画一个爱心", "请帮我画一颗爱心。"):
+        for prompt in (
+            "画出一张正面是爱心，侧面是星星的图案",
+            "请画出一张正面是爱心，侧面是星星的图案",
+            "请画出一张正面是**爱心**，侧面是**星星**的图案",
+            "请帮我画一个正面是爱心且侧面是星星的图形。",
+        ):
             with self.subTest(prompt=prompt):
                 command = agent.parse_command(prompt).command
                 self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
@@ -328,10 +335,10 @@ class InternS2AgentTests(unittest.TestCase):
                 self.assertTrue(command.needs_confirmation)
 
         self.assertEqual(client.chat.completions.requests, [])
-        result = agent.parse_command("画一个爱心")
+        result = agent.parse_command("请画出一张正面是爱心，侧面是星星的图案")
         self.assertEqual(
             result.raw_arguments["demo_preset"],
-            "heart_180mm_xz",
+            "heart_front_star_side_3d",
         )
 
     def test_puncture_tool_call_is_validated_and_model_id_is_ignored(self):
