@@ -81,6 +81,7 @@ class LocalMotionTrial:
         self.stop_reason: str | None = None
         self.last_feedback_debug: str | None = None
         self.ownership_confirmed = False
+        self._allowed_waypoint_ids: set[str] = set()
         self._lease: MotionLease | None = None
         self.external_writer_detected = False
         self._initial_auto_mode: bool | None = None
@@ -135,31 +136,11 @@ class LocalMotionTrial:
         self._initial_auto_mode = snapshot.auto_mode
         self._initial_reduced_mode = snapshot.reduced_mode
         waypoint_id = "F" + hashlib.sha256(envelope.command_id.encode()).hexdigest()[:16]
-        if isinstance(envelope.payload, MoveJointRelativeRequest):
-            frame = JointWaypoint(
-                pose_xyzrpy=(
-                    *target.pose.translation_mm,
-                    *target.pose.rotation_rpy_deg,
-                ),
-                tcp_name=self.approval.tcp_name,
-                ucs_name="Base",
-                speed_deg_s=envelope.payload.speed_deg_s,
-                acceleration_deg_s2=envelope.payload.acceleration_deg_s2,
-                waypoint_id=waypoint_id,
-                target_joints_deg=target.joint_positions_deg,
-            )
-        else:
-            frame = LinearWaypoint(
-                pose_xyzrpy=(
-                    *target.pose.translation_mm,
-                    *target.pose.rotation_rpy_deg,
-                ),
-                tcp_name=self.approval.tcp_name, ucs_name="Base",
-                speed_mm_s=envelope.payload.speed_mm_s,
-                acceleration_mm_s2=self.approval.max_acceleration_mm_s2,
-                waypoint_id=waypoint_id,
-                reference_joints_deg=snapshot.joint_positions_deg,
-            )
+        frame = self.make_waypoint(
+            envelope, snapshot, target,
+            waypoint_id=waypoint_id,
+            blend_radius_mm=0.0,
+        )
         encoded = frame.encode()
         self.journal.prepare(
             command_id=envelope.command_id, fingerprint=fingerprint(envelope),
@@ -169,6 +150,7 @@ class LocalMotionTrial:
         )
         self.command_id = envelope.command_id
         self.waypoint_id = waypoint_id
+        self._allowed_waypoint_ids = {waypoint_id}
         self.target = target
         self.session_id = envelope.gateway_session_id
         self.last_sequence = snapshot.sequence
@@ -184,6 +166,113 @@ class LocalMotionTrial:
                 self.journal.transition(self.command_id, "unknown", evidence="write reply unavailable")
             self._lease.revoke()
             raise
+        return self._finish_submission(accepted)
+
+    def make_waypoint(
+        self,
+        envelope: RobotCommandEnvelope,
+        start: RobotTelemetry,
+        target: PreflightTarget,
+        *,
+        waypoint_id: str,
+        blend_radius_mm: float,
+    ) -> LinearWaypoint | JointWaypoint:
+        """Create a typed controller point from one already checked target."""
+        if isinstance(envelope.payload, MoveJointRelativeRequest):
+            return JointWaypoint(
+                pose_xyzrpy=(
+                    *target.pose.translation_mm,
+                    *target.pose.rotation_rpy_deg,
+                ),
+                tcp_name=self.approval.tcp_name,
+                ucs_name="Base",
+                speed_deg_s=envelope.payload.speed_deg_s,
+                acceleration_deg_s2=envelope.payload.acceleration_deg_s2,
+                waypoint_id=waypoint_id,
+                target_joints_deg=target.joint_positions_deg,
+                blend_radius_mm=blend_radius_mm,
+            )
+        return LinearWaypoint(
+            pose_xyzrpy=(
+                *target.pose.translation_mm,
+                *target.pose.rotation_rpy_deg,
+            ),
+            tcp_name=self.approval.tcp_name, ucs_name="Base",
+            speed_mm_s=envelope.payload.speed_mm_s,
+            acceleration_mm_s2=self.approval.max_acceleration_mm_s2,
+            waypoint_id=waypoint_id,
+            reference_joints_deg=start.joint_positions_deg,
+            blend_radius_mm=blend_radius_mm,
+        )
+
+    def submit_preflighted_sequence(
+        self,
+        envelope: RobotCommandEnvelope,
+        snapshot: RobotTelemetry,
+        readback: ControllerReadback,
+        lease: MotionLease,
+        frames: tuple[LinearWaypoint | JointWaypoint, ...],
+        final_target: PreflightTarget,
+        *,
+        now_monotonic_ns: int | None = None,
+    ) -> str:
+        """Journal and continuously queue a fully checked sequence once.
+
+        No point is sent until the caller has preflighted every segment.  The
+        controller replies are read serially; only physical arrival at the
+        final point is later accepted as sequence completion.
+        """
+        if self.command_id is not None or self.journal.unresolved():
+            raise JournalError("active or unresolved local command blocks submission")
+        if not frames:
+            raise ValueError("continuous sequence cannot be empty")
+        if frames[-1].blend_radius_mm != 0:
+            raise ValueError("the final WayPoint must stop with zero blend radius")
+        if len(frames) > 1 and any(
+            frame.blend_radius_mm <= 0 for frame in frames[:-1]
+        ):
+            raise ValueError("intermediate WayPoints require a positive blend radius")
+        if not lease.active or lease.owner != "remote":
+            raise ValueError("continuous sequence requires the remote motion lease")
+        now_monotonic_ns = (
+            time.monotonic_ns()
+            if now_monotonic_ns is None
+            else now_monotonic_ns
+        )
+        encoded = b"\n".join(frame.encode() for frame in frames)
+        self.journal.prepare(
+            command_id=envelope.command_id, fingerprint=fingerprint(envelope),
+            session_id=envelope.gateway_session_id,
+            safety_state_hash=safety_state_hash(snapshot, readback),
+            start_sequence=snapshot.sequence, encoded_frame=encoded,
+        )
+        self.command_id = envelope.command_id
+        self.waypoint_id = frames[-1].waypoint_id
+        self._allowed_waypoint_ids = {frame.waypoint_id for frame in frames}
+        self.target = final_target
+        self.session_id = envelope.gateway_session_id
+        self.last_sequence = snapshot.sequence
+        self._lease = lease
+        self._initial_auto_mode = snapshot.auto_mode
+        self._initial_reduced_mode = snapshot.reduced_mode
+        self.journal.transition(self.command_id, "send_started")
+        self.sent_monotonic_ns = now_monotonic_ns
+        self.last_feedback_monotonic_ns = now_monotonic_ns
+        try:
+            accepted = self.client.waypoint_sequence(frames)
+        except BaseException:
+            if self.journal.record(self.command_id)["state"] == "send_started":
+                self.journal.transition(
+                    self.command_id, "unknown",
+                    evidence="sequence write reply unavailable",
+                )
+            self._lease.revoke()
+            raise
+        return self._finish_submission(accepted)
+
+    def _finish_submission(self, accepted: bool) -> str:
+        if self.command_id is None or self._lease is None:
+            raise JournalError("submission state is incomplete")
         if self.journal.record(self.command_id)["state"] != "send_started":
             self._lease.revoke()
             raise JournalError("stop or fault raced with WayPoint reply; outcome remains uncertain")
@@ -306,7 +395,7 @@ class LocalMotionTrial:
                 now_monotonic_ns=now_monotonic_ns,
             )
             return "stopping" if self.stop_delivery == "sent" else "stop_unconfirmed"
-        if reported_id == self.waypoint_id:
+        if reported_id in self._allowed_waypoint_ids:
             self.ownership_confirmed = True
         elif reported_id is not None:
             self.external_writer_detected = True

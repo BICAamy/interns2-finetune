@@ -467,6 +467,7 @@ def make_approval(config: RealRobotConfig, *, package_version: str) -> MotionApp
         state_stale_ms=config.deadlines.state_stale_ms,
         ready_fsm_code=33,
         controller_override=config.motion.controller_override,
+        sequence_blend_radius_mm=config.motion.sequence_blend_radius_mm or 0.0,
     )
 
 

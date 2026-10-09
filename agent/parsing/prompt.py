@@ -14,12 +14,10 @@ def build_system_prompt(settings: AgentSettings) -> str:
     """Build the extraction prompt with runtime-owned defaults made explicit."""
 
     coordinate_default_rule = (
-        "当前是 simulation 模式：用户未说明坐标单位或坐标系时，在坐标对象中省略相应字段，"
-        f"且不要把它加入 missing_fields；运行时会采用页面可见的 "
+        "用户未说明坐标单位或坐标系时，在坐标对象中省略相应字段，"
+        "且不要把它加入 missing_fields；运行时会采用页面可见的 "
         f"{settings.default_distance_unit.value} 和 "
         f"{settings.default_coordinate_frame.value} 默认值。"
-        if settings.runtime_mode.value == "simulation"
-        else "当前是 real 模式：用户未说明坐标单位或坐标系时必须选择 clarify，并把缺失项加入 missing_fields。"
     )
     return f"""你是手术机器人科研仿真系统中的非结构化指令解析器。
 你的唯一任务是理解用户的文本和可选图像，然后恰好调用一次
@@ -81,7 +79,6 @@ def build_system_prompt(settings: AgentSettings) -> str:
 20. 用户明确要求穿刺、进针或针刺时不得改写成普通运动；如果缺少靶点，
     必须选择 clarify，并在 missing_fields 中加入 target_point。
 
-当前运行模式：{settings.runtime_mode.value}
 默认距离单位：{settings.default_distance_unit.value}
 默认坐标系：{settings.default_coordinate_frame.value}
 默认模糊相对步长：{settings.default_relative_step_mm:g} mm

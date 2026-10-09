@@ -12,17 +12,21 @@ from .models import ProtocolError
 _NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
 
-def _number(value: float, *, positive: bool = False) -> str:
+def _number(
+    value: float, *, positive: bool = False, nonnegative: bool = False,
+) -> str:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise ValueError("motion number must be finite")
     if positive and value <= 0:
         raise ValueError("motion number must be positive")
+    if nonnegative and value < 0:
+        raise ValueError("motion number must be nonnegative")
     return format(float(value), ".9g")
 
 
 @dataclass(frozen=True)
 class LinearWaypoint:
-    """A single Base-frame MoveL with no blending, seek, or joint target."""
+    """A Base-frame MoveL; nonzero radius blends into the following point."""
 
     pose_xyzrpy: tuple[float, float, float, float, float, float]
     tcp_name: str
@@ -31,6 +35,7 @@ class LinearWaypoint:
     acceleration_mm_s2: float
     waypoint_id: str
     reference_joints_deg: tuple[float, float, float, float, float, float]
+    blend_radius_mm: float = 0.0
 
     def encode(self) -> bytes:
         if len(self.pose_xyzrpy) != 6 or len(self.reference_joints_deg) != 6:
@@ -43,7 +48,7 @@ class LinearWaypoint:
             self.tcp_name, self.ucs_name,
             _number(self.speed_mm_s, positive=True),
             _number(self.acceleration_mm_s2, positive=True),
-            "0",  # blend radius
+            _number(self.blend_radius_mm, nonnegative=True),
             "1",  # MoveL, never MoveJ
             "0",  # no joint target
             "0", "0", "0",  # no seek or IO trigger
@@ -57,7 +62,7 @@ class LinearWaypoint:
 
 @dataclass(frozen=True)
 class JointWaypoint:
-    """A single relative-joint result encoded as an absolute MoveJ target."""
+    """An absolute MoveJ target; nonzero radius blends into the next point."""
 
     pose_xyzrpy: tuple[float, float, float, float, float, float]
     tcp_name: str
@@ -66,6 +71,7 @@ class JointWaypoint:
     acceleration_deg_s2: float
     waypoint_id: str
     target_joints_deg: tuple[float, float, float, float, float, float]
+    blend_radius_mm: float = 0.0
 
     def encode(self) -> bytes:
         if len(self.pose_xyzrpy) != 6 or len(self.target_joints_deg) != 6:
@@ -78,7 +84,7 @@ class JointWaypoint:
             self.tcp_name, self.ucs_name,
             _number(self.speed_deg_s, positive=True),
             _number(self.acceleration_deg_s2, positive=True),
-            "0",  # blend radius
+            _number(self.blend_radius_mm, nonnegative=True),
             "0",  # MoveJ
             "1",  # joint target is authoritative
             "0", "0", "0",  # no seek or IO trigger

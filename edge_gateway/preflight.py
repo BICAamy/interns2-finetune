@@ -54,6 +54,7 @@ class MotionApproval:
     state_stale_ms: float
     ready_fsm_code: int
     controller_override: float
+    sequence_blend_radius_mm: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.device_sn or not self.robot_model or not self.package_version or not self.tcp_name:
@@ -71,7 +72,7 @@ class MotionApproval:
             self.max_joint_acceleration_deg_s2,
             self.max_start_drift_mm, self.max_start_rotation_deg,
             self.path_sample_step_mm, self.state_stale_ms,
-            self.controller_override,
+            self.controller_override, self.sequence_blend_radius_mm,
         )
         if any(not math.isfinite(value) for value in numeric):
             raise ValueError("local motion limits must be finite")
@@ -86,6 +87,8 @@ class MotionApproval:
             raise ValueError("invalid local motion limits")
         if not 0.01 <= self.controller_override <= 1.0:
             raise ValueError("invalid controller speed override")
+        if self.sequence_blend_radius_mm < 0:
+            raise ValueError("invalid sequence blend radius")
         if any(low >= high for low, high in self.joint_soft_limits_deg) or any(
             low >= high for low, high in zip(self.workspace_low_mm, self.workspace_high_mm)
         ):
@@ -433,6 +436,7 @@ def preflight_motion(
     end_quaternion = tuple(float(value) for value in target_pose.quaternion_xyzw)
     if sum(a * b for a, b in zip(start_quaternion, end_quaternion)) < 0:
         end_quaternion = tuple(-value for value in end_quaternion)
+    final_joints = tuple(float(value) for value in snapshot.joint_positions_deg)
     for index in range(segments + 1):
         ratio = index / segments
         point = tuple(float(a + ratio * b) for a, b in zip(pose.translation_mm, translation))
@@ -452,13 +456,14 @@ def preflight_motion(
             joints = path_ik(point, quaternion)
         if joints is None or len(joints) != 6 or any(not math.isfinite(value) for value in joints):
             raise ValueError("path IK failed")
+        final_joints = tuple(float(value) for value in joints)
         if any(not low + approval.joint_margin_deg <= value <= high - approval.joint_margin_deg
                for value, (low, high) in zip(joints, approval.joint_soft_limits_deg)):
             raise ValueError("path crosses joint margin")
     arm.used = True
     return PreflightTarget(
         pose=target_pose.model_copy(update={"translation_mm": target_xyz}),
-        joint_positions_deg=tuple(float(value) for value in snapshot.joint_positions_deg),
+        joint_positions_deg=final_joints,
     )
 
 

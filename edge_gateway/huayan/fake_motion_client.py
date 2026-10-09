@@ -87,6 +87,16 @@ class FakeMotionClient:
     def waypoint(self, waypoint: LinearWaypoint | JointWaypoint) -> bool:
         return decode_write_reply(self._exchange(waypoint.encode()), command="WayPoint")
 
+    def waypoint_sequence(
+        self, waypoints: tuple[LinearWaypoint | JointWaypoint, ...],
+    ) -> bool:
+        if not waypoints:
+            raise ValueError("WayPoint sequence cannot be empty")
+        for waypoint in waypoints:
+            if not self.waypoint(waypoint):
+                return False
+        return True
+
     def software_stop(self) -> bool:
         return decode_write_reply(self._exchange(encode_software_stop()), command="GrpStop")
 

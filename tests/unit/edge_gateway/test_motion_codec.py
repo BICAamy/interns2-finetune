@@ -36,6 +36,21 @@ def test_joint_waypoint_uses_movej_and_joint_target_fields() -> None:
     )
 
 
+def test_intermediate_waypoint_encodes_configured_blend_radius() -> None:
+    frame = JointWaypoint(
+        pose_xyzrpy=(1, 2, 3, 4, 5, 6),
+        target_joints_deg=(10, 20, 30, 40, 50, 60),
+        tcp_name="TCP",
+        ucs_name="Base",
+        speed_deg_s=15,
+        acceleration_deg_s2=30,
+        waypoint_id="joint-blend-01",
+        blend_radius_mm=10,
+    ).encode()
+
+    assert frame.split(b",")[18] == b"10"
+
+
 @pytest.mark.parametrize("command", ["GrpEnable", "GrpDisable"])
 def test_group_write_reply_accepts_only_matching_ok_or_documented_fail(command: str) -> None:
     assert decode_write_reply(f"{command},OK,;".encode(), command=command) is True

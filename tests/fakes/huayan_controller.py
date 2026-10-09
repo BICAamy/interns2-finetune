@@ -112,6 +112,10 @@ class FakeHuayanController:
         self._apply_group_state_changes = apply_group_state_changes
         self._simulate_waypoint_motion = simulate_waypoint_motion
         self._waypoint_motion_s = waypoint_motion_s
+        self._waypoint_queue: deque[
+            tuple[tuple[float, ...], tuple[float, ...], bool]
+        ] = deque()
+        self.motion_completion_count = 0
         initial_document = datasheet_document()
         self._base_pose = tuple(
             float(value) for value in initial_document["PosAndVel"]["Actual_PCS_Base"]
@@ -280,7 +284,7 @@ class FakeHuayanController:
                             reference_joints = [float(value) for value in fields[8:14]]
                             valid = (all(math.isfinite(value) for value in numeric)
                                      and all(math.isfinite(value) for value in reference_joints)
-                                     and numeric[6] > 0 and numeric[7] > 0 and numeric[8] == 0)
+                                     and numeric[6] > 0 and numeric[7] > 0 and numeric[8] >= 0)
                         except ValueError:
                             valid = False
                     if valid:
@@ -325,12 +329,18 @@ class FakeHuayanController:
                         elif name == "SetOverride":
                             self._override = requested_override
                         elif name == "WayPoint" and self._simulate_waypoint_motion:
-                            self._moving = True
-                            threading.Thread(
-                                target=self._finish_waypoint,
-                                args=(target_pose, target_joints, joint_mode),
-                                daemon=True,
-                            ).start()
+                            self._waypoint_queue.append(
+                                (target_pose, target_joints, joint_mode)
+                            )
+                            if not self._moving:
+                                self._moving = True
+                                threading.Thread(
+                                    target=self._run_waypoint_queue,
+                                    daemon=True,
+                                ).start()
+                        elif name == "GrpStop":
+                            self._waypoint_queue.clear()
+                            self._moving = False
                 if pipelined:
                     return
                 continue
@@ -443,16 +453,20 @@ class FakeHuayanController:
             if self._stop.wait(self._data_interval_s):
                 return
 
-    def _finish_waypoint(
-        self,
-        target_pose: tuple[float, ...],
-        target_joints: tuple[float, ...],
-        joint_mode: bool,
-    ) -> None:
-        if self._stop.wait(self._waypoint_motion_s):
-            return
-        with self._state_lock:
-            if joint_mode:
-                self._joint_positions = target_joints
-            self._base_pose = target_pose
-            self._moving = False
+    def _run_waypoint_queue(self) -> None:
+        """Execute accepted fake points in order without an idle sample between them."""
+        while not self._stop.is_set():
+            with self._state_lock:
+                if not self._waypoint_queue:
+                    self._moving = False
+                    self.motion_completion_count += 1
+                    return
+                target_pose, target_joints, joint_mode = self._waypoint_queue.popleft()
+            if self._stop.wait(self._waypoint_motion_s):
+                return
+            with self._state_lock:
+                if not self._moving:
+                    return
+                if joint_mode:
+                    self._joint_positions = target_joints
+                self._base_pose = target_pose

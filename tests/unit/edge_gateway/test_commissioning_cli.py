@@ -40,6 +40,7 @@ def config(
         },
         "motion": {
             "speed_mm_s": 2.0, "controller_override": 1.0,
+            "sequence_blend_radius_mm": 10.0,
             "default_relative_step_mm": 15.0,
             "default_relative_rotation_deg": 15.0,
             "default_rotation_joint_index": 1,

@@ -172,7 +172,10 @@ class LocalRealMotionClient:
         except ResponseUnknown as exc:
             raise ResponseUnknown(f"SetOverride outcome unknown: {exc}") from exc
 
-    def waypoint(self, waypoint: LinearWaypoint | JointWaypoint) -> bool:
+    def _validate_waypoint(
+        self, waypoint: LinearWaypoint | JointWaypoint,
+    ) -> None:
+        """Validate one already-preflighted frame without opening a write window."""
         if not self._identified or self._write_command is not None:
             raise RuntimeError("real WayPoint requires an identified, single-use local session")
         if waypoint.tcp_name != self.config.tool.tcp_name or waypoint.ucs_name != "Base":
@@ -199,12 +202,34 @@ class LocalRealMotionClient:
             joints, self.config.limits.joint_soft_limits_deg,
         )):
             raise ValueError("WayPoint reference joints exceed approved margin")
-        encoded = waypoint.encode()
+
+    def waypoint(self, waypoint: LinearWaypoint | JointWaypoint) -> bool:
+        return self.waypoint_sequence((waypoint,))
+
+    def waypoint_sequence(
+        self, waypoints: tuple[LinearWaypoint | JointWaypoint, ...],
+    ) -> bool:
+        """Send one fully preflighted sequence serially on the owned 10003 socket.
+
+        Every frame is validated before the first byte is written. Replies are
+        still consumed one-by-one; commands are never TCP-pipelined and are
+        never replayed after an unknown outcome.
+        """
+        if not waypoints:
+            raise ValueError("WayPoint sequence cannot be empty")
+        for waypoint in waypoints:
+            self._validate_waypoint(waypoint)
+            waypoint.encode()
         self._write_command = "WayPoint"  # Set before first byte; disconnect is ambiguous.
         try:
-            return decode_write_reply(self._exchange(encoded), command="WayPoint")
+            for waypoint in waypoints:
+                if not decode_write_reply(
+                    self._exchange(waypoint.encode()), command="WayPoint",
+                ):
+                    return False
+            return True
         except ResponseUnknown as exc:
-            raise ResponseUnknown(f"WayPoint outcome unknown: {exc}") from exc
+            raise ResponseUnknown(f"WayPoint sequence outcome unknown: {exc}") from exc
 
     def software_stop(self) -> bool:
         if not self._identified or self._write_command != "WayPoint":

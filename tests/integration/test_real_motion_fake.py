@@ -14,6 +14,7 @@ from edge_gateway.command_journal import CommandJournal, JournalError
 from edge_gateway.fake_motion import FakeMotionTiming, FakeMotionTrial
 from edge_gateway.huayan.fake_motion_client import FakeMotionClient
 from edge_gateway.huayan.real_motion_client import LocalRealMotionClient
+from edge_gateway.remote_motion import RemoteMotionExecutor
 from edge_gateway.huayan.datasheet_client import DatasheetClient
 from edge_gateway.huayan.motion_codec import (
     LinearWaypoint, encode_software_stop, encode_speed_override,
@@ -24,9 +25,10 @@ from edge_gateway.preflight import (
 )
 from surgical_contracts import (
     CoordinateFrame, DistanceUnit, GatewayCommandKind, LinkState,
-    MotionSafetyLimits, MoveRelativeRequest, Pose6D, RobotCommandEnvelope,
+    MotionSafetyLimits, MotionSequenceStep, MotionStepKind,
+    MoveRelativeRequest, MoveSequenceRequest, Pose6D, RobotCommandEnvelope,
     RobotConnectionState, RobotProvider, RobotTelemetry, RuntimeMode,
-    SourceFreshness,
+    SourceFreshness, ToolStatus, command_fingerprint,
 )
 from tests.fakes.huayan_controller import (
     CommandAction, FakeHuayanController, datasheet_document, datasheet_frame,
@@ -227,6 +229,80 @@ def test_motion_client_requires_fake_only_identity_before_any_write() -> None:
         with pytest.raises(ValueError, match="did not prove"):
             client.connect()
         assert_no_motion_write(fake)
+
+
+def test_continuous_sequence_preflights_every_step_before_first_write(
+    tmp_path,
+) -> None:
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client = FakeMotionClient(
+            "127.0.0.1", fake.command_port, timeout_s=0.1,
+        )
+        client.connect()
+        journal = CommandJournal(tmp_path / "sequence-preflight.journal")
+        checked = replace(
+            approval(),
+            max_step_mm=1000,
+            max_absolute_displacement_mm=1000,
+            sequence_blend_radius_mm=10,
+        )
+        now_ms = time.time_ns() // 1_000_000
+        request = MoveSequenceRequest(
+            command_id="preflight-entire-sequence",
+            steps=(
+                MotionSequenceStep(
+                    kind=MotionStepKind.CARTESIAN_RELATIVE,
+                    translation_mm=(1.0, 0.0, 0.0),
+                ),
+                MotionSequenceStep(
+                    kind=MotionStepKind.CARTESIAN_RELATIVE,
+                    translation_mm=(500.0, 0.0, 0.0),
+                ),
+            ),
+            translation_speed_mm_s=2,
+            joint_speed_deg_s=15,
+            joint_acceleration_deg_s2=30,
+        )
+        command = RobotCommandEnvelope(
+            gateway_session_id=SESSION,
+            command_id=request.command_id,
+            command_kind=GatewayCommandKind.MOVE_SEQUENCE,
+            created_at_ms=now_ms,
+            expires_at_ms=now_ms + 5000,
+            based_on_robot_state_sequence=10,
+            expected_start_pose_robot_base=pose(),
+            expected_tcp_name="FAKE_FLANGE",
+            expected_ucs_name="Base",
+            payload=request,
+            safety_limits=MotionSafetyLimits(
+                max_speed_mm_s=5,
+                max_step_mm=1000,
+                max_rotation_deg=90,
+                max_joint_speed_deg_s=30,
+                max_joint_acceleration_deg_s2=60,
+            ),
+            operator_confirmation_id="web-sequence-preflight",
+        )
+        executor = RemoteMotionExecutor(
+            trial_factory=lambda: FakeMotionTrial(
+                client=client,
+                journal=journal,
+                timing=timing(),
+                approval=checked,
+                path_ik=ik,
+            ),
+            snapshot=telemetry,
+            readback=readback,
+            feedback=lambda: (telemetry(), "unused"),
+        )
+        try:
+            result = executor.execute(command, command_fingerprint(command))
+            assert result.status == ToolStatus.FAILED
+            assert_no_motion_write(fake)
+            assert journal.unresolved() == ()
+        finally:
+            journal.close()
+            client.close()
 
 
 def test_waypoint_frame_is_move_l_without_blend_seek_or_joint_target() -> None:

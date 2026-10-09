@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import socket
 
 import pytest
@@ -83,6 +84,33 @@ def test_real_writer_is_single_use_and_stop_requires_owned_attempt(monkeypatch):
         frames = [frame for frame in fake.received_commands if frame.startswith(b"WayPoint,")]
         assert len(frames) == 1
         assert b",0,0,90,0,90,0,TCP,Base,2,10,0,1," in frames[0]
+
+
+def test_real_writer_queues_prevalidated_sequence_serially(monkeypatch):
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        redirect_controller(monkeypatch, fake)
+        first = waypoint()
+        second = LinearWaypoint(
+            pose_xyzrpy=(102, 100, 100, 0, 0, 0),
+            tcp_name="TCP",
+            ucs_name="Base",
+            speed_mm_s=2,
+            acceleration_mm_s2=10,
+            waypoint_id="LOCAL_2",
+            reference_joints_deg=(0, 0, 90, 0, 90, 0),
+        )
+        first = replace(first, blend_radius_mm=10)
+        with LocalRealMotionClient(real_shaped_config(), timeout_s=0.1) as client:
+            assert client.waypoint_sequence((first, second)) is True
+            assert client.current_waypoint_id() == "LOCAL_2"
+            with pytest.raises(RuntimeError, match="single-use"):
+                client.waypoint(second)
+        frames = [
+            frame for frame in fake.received_commands
+            if frame.startswith(b"WayPoint,")
+        ]
+        assert len(frames) == 2
+        assert [frame.split(b",")[18] for frame in frames] == [b"10", b"0"]
 
 
 def test_real_writer_never_retries_unknown_waypoint(monkeypatch):

@@ -42,6 +42,7 @@ limits:
 motion:
   speed_mm_s: null # WayPoint直线运动速度，单位：mm/秒
   controller_override: null # 控制器速度倍率，范围0.01到1.0
+  sequence_blend_radius_mm: null # 连续序列中间点的过渡半径，单位：mm
   default_relative_step_mm: 15.0 # “移动一点”时采用的距离，单位：mm
   default_relative_rotation_deg: 15.0 # “转动一点”时采用的角度，单位：度
   default_rotation_joint_index: 1 # 未指定关节时转动哪个关节，可填 1～6

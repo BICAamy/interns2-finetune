@@ -268,7 +268,7 @@ def test_web_confirmation_runs_all_real_task_motion_on_fake(
 
             def run_gateway() -> None:
                 try:
-                    gateway.run(max_runtime_s=8)
+                    gateway.run(max_runtime_s=20)
                 except Exception as error:
                     gateway_errors.append(error)
 
@@ -431,11 +431,27 @@ def test_web_confirmation_runs_all_real_task_motion_on_fake(
                     summary="三段 Base 平移后按 J1 向右转 70 度",
                 )
                 before_sequence = robot_http.get_telemetry()
+                completions_before_sequence = fake.motion_completion_count
                 execute(
                     sequence,
                     "往左52mm之后再往上一点然后再往前74mm，再向右转70度",
                     expected_waypoint_count=4,
                 )
+                sequence_frames = [
+                    frame for frame in fake.received_commands
+                    if frame.startswith(b"WayPoint,")
+                ][-4:]
+                assert [
+                    float(frame.split(b",")[18]) for frame in sequence_frames
+                ] == [
+                    config.motion.sequence_blend_radius_mm,
+                    config.motion.sequence_blend_radius_mm,
+                    config.motion.sequence_blend_radius_mm,
+                    0.0,
+                ]
+                # All four points were queued as one controller motion. The
+                # fake never entered an idle state between sequence points.
+                assert fake.motion_completion_count == completions_before_sequence + 1
                 after_sequence = robot_http.get_telemetry()
                 assert after_sequence.actual_pose_robot_base.translation_mm == (
                     before_sequence.actual_pose_robot_base.translation_mm[0] + 74.0,

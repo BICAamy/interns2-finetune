@@ -122,6 +122,33 @@ class InternS2AgentTests(unittest.TestCase):
         self.assertEqual(steps[3].rotation_deg, -70.0)
         self.assertEqual(client.chat.completions.requests, [])
 
+    def test_explicit_forward_motion_parses_identically_in_both_modes(self):
+        commands = []
+        for mode in (RuntimeMode.SIMULATION, RuntimeMode.REAL):
+            client = FakeInternS2Client(calls=[])
+            agent = InternS2Agent(
+                replace(make_settings(), runtime_mode=mode),
+                client=client,
+                command_id_factory=lambda: "cmd-mode-independent-forward",
+            )
+
+            command = agent.parse_command("往前50mm").command
+
+            self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+            self.assertEqual(command.missing_fields, [])
+            self.assertEqual(
+                command.motion_sequence.steps[0].translation_mm,
+                (50.0, 0.0, 0.0),
+            )
+            self.assertEqual(
+                command.motion_sequence.steps[0].frame,
+                CoordinateFrame.ROBOT_BASE,
+            )
+            self.assertEqual(client.chat.completions.requests, [])
+            commands.append(command.model_dump(mode="json"))
+
+        self.assertEqual(commands[0], commands[1])
+
     def test_no_tool_call_uses_configured_vague_distance_and_rotation(self):
         client = FakeInternS2Client(calls=[])
         agent = InternS2Agent(
@@ -707,7 +734,7 @@ class InternS2AgentTests(unittest.TestCase):
             (500.0, 0.0, 500.0),
         )
 
-    def test_real_mode_missing_unit_or_frame_becomes_clarification(self):
+    def test_real_mode_missing_unit_or_frame_uses_visible_defaults(self):
         settings = replace(make_settings(), runtime_mode=RuntimeMode.REAL)
         arguments = base_arguments(
             "move_to_entry",
@@ -717,10 +744,16 @@ class InternS2AgentTests(unittest.TestCase):
 
         command = agent.parse_command("移动到入点(500,0,500)").command
 
-        self.assertEqual(command.intent, CommandIntent.CLARIFY)
-        self.assertTrue(command.needs_confirmation)
-        self.assertIn("entry_point.unit", command.missing_fields)
-        self.assertIn("entry_point.frame", command.missing_fields)
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        self.assertEqual(command.missing_fields, [])
+        self.assertEqual(
+            command.motion_sequence.steps[0].target_position_mm,
+            (500.0, 0.0, 500.0),
+        )
+        self.assertEqual(
+            command.motion_sequence.steps[0].frame,
+            CoordinateFrame.ROBOT_BASE,
+        )
 
     def test_missing_required_target_is_downgraded_to_clarification(self):
         arguments = base_arguments(

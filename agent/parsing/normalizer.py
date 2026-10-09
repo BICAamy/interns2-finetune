@@ -24,7 +24,6 @@ from surgical_contracts import (
     MotionStepKind,
     ParsedCommand,
     RelativeMotion,
-    RuntimeMode,
 )
 
 from .errors import CommandParsingError
@@ -674,8 +673,6 @@ class CommandNormalizer:
         point_missing: list[str] = []
         unit = value.get("unit")
         if unit is None or not str(unit).strip():
-            if self.settings.runtime_mode == RuntimeMode.REAL:
-                point_missing.append(f"{name}.unit")
             scale = 1.0
         else:
             scale = UNIT_SCALE_TO_MM.get(str(unit).strip().lower())
@@ -685,8 +682,6 @@ class CommandNormalizer:
 
         frame_value = value.get("frame")
         if frame_value is None or not str(frame_value).strip():
-            if self.settings.runtime_mode == RuntimeMode.REAL:
-                point_missing.append(f"{name}.frame")
             frame = self.settings.default_coordinate_frame
         else:
             frame = FRAME_ALIASES.get(str(frame_value).strip().lower())
@@ -783,11 +778,7 @@ class CommandNormalizer:
 
         frame_value = value.get("frame")
         if frame_value is None or not str(frame_value).strip():
-            if self.settings.runtime_mode == RuntimeMode.REAL:
-                missing.append("relative_motion.frame")
-                frame = None
-            else:
-                frame = self.settings.default_coordinate_frame
+            frame = self.settings.default_coordinate_frame
         else:
             frame = FRAME_ALIASES.get(str(frame_value).strip().lower())
             if frame is None or frame != self.settings.default_coordinate_frame:
@@ -940,6 +931,7 @@ class CommandNormalizer:
                     )
                     if name in step
                 }
+                relative_input["frame"] = frame.value
                 relative_input["distance_source"] = source.value
                 motion, step_missing = self._normalize_relative(relative_input)
                 if step_missing or motion is None:
