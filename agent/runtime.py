@@ -24,6 +24,7 @@ from .parsing import (
     build_submit_surgical_task_tool,
     build_system_prompt,
     identify_demo_motion_preset,
+    normalize_motion_input_text,
 )
 
 
@@ -149,11 +150,17 @@ class InternS2Agent:
         if not normalized_prompt:
             raise ValueError("The user prompt cannot be empty")
 
+        canonical_prompt, normalization_changes = normalize_motion_input_text(
+            normalized_prompt,
+            input_source=input_source,
+        )
+
         if image_path is None:
             demo_preset = identify_demo_motion_preset(normalized_prompt)
             deterministic = self.normalizer.try_normalize_sequence_text(
-                normalized_prompt,
+                canonical_prompt,
                 input_source=input_source,
+                original_text=normalized_prompt,
             )
             if deterministic is not None:
                 deterministic_steps = (
@@ -173,6 +180,17 @@ class InternS2Agent:
                         "missing_fields": deterministic.missing_fields,
                         "parser": "deterministic_motion_parser",
                         **(
+                            {
+                                "input_normalization": {
+                                    "original_text": normalized_prompt,
+                                    "canonical_text": canonical_prompt,
+                                    "changes": list(normalization_changes),
+                                }
+                            }
+                            if normalization_changes
+                            else {}
+                        ),
+                        **(
                             {"demo_preset": demo_preset}
                             if demo_preset is not None
                             else {}
@@ -180,11 +198,21 @@ class InternS2Agent:
                     },
                 )
 
+        model_prompt = normalized_prompt
+        if canonical_prompt != normalized_prompt:
+            model_prompt = (
+                "用户原始输入：\n"
+                f"{normalized_prompt}\n\n"
+                "系统规范化输入（仅规范化中文数字、单位、标点和明确的 ASR 断句）：\n"
+                f"{canonical_prompt}\n\n"
+                "请依据规范化输入提取动作，同时保持用户原始动作顺序和数值不变。"
+            )
+
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": build_system_prompt(self.settings)},
             {
                 "role": "user",
-                "content": self._user_content(normalized_prompt, image_path),
+                "content": self._user_content(model_prompt, image_path),
             },
         ]
         try:

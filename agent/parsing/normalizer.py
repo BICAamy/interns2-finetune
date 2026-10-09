@@ -114,6 +114,149 @@ MISSING_FIELD_ALIASES = {
     "target_point.coordinate_order": "coordinate_order",
 }
 
+_CHINESE_DIGITS = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+_CHINESE_SMALL_UNITS = {"十": 10, "百": 100, "千": 1000}
+_CHINESE_NUMBER_TOKEN = r"负?[零〇一二两三四五六七八九十百千万点]+"
+
+
+def _chinese_integer(value: str) -> int:
+    if not value:
+        return 0
+    if not any(
+        character in _CHINESE_SMALL_UNITS or character == "万"
+        for character in value
+    ):
+        return int("".join(str(_CHINESE_DIGITS[character]) for character in value))
+
+    total = 0
+    section = 0
+    number = 0
+    for character in value:
+        if character in _CHINESE_DIGITS:
+            number = _CHINESE_DIGITS[character]
+            continue
+        if character in _CHINESE_SMALL_UNITS:
+            multiplier = _CHINESE_SMALL_UNITS[character]
+            section += (number or 1) * multiplier
+            number = 0
+            continue
+        if character == "万":
+            total += (section + number or 1) * 10_000
+            section = 0
+            number = 0
+            continue
+        raise ValueError(f"unsupported Chinese numeral: {value}")
+    return total + section + number
+
+
+def _arabic_number(value: str) -> str:
+    negative = value.startswith("负")
+    if negative:
+        value = value[1:]
+    integer_text, separator, fraction_text = value.partition("点")
+    integer = _chinese_integer(integer_text)
+    result = str(integer)
+    if separator:
+        if not fraction_text or any(
+            character not in _CHINESE_DIGITS for character in fraction_text
+        ):
+            raise ValueError(f"unsupported Chinese decimal: {value}")
+        fraction = "".join(
+            str(_CHINESE_DIGITS[character]) for character in fraction_text
+        )
+        result = f"{result}.{fraction}"
+    return f"-{result}" if negative else result
+
+
+def normalize_motion_input_text(
+    text: str,
+    *,
+    input_source: CoordinateSource = CoordinateSource.USER_TEXT,
+) -> tuple[str, tuple[str, ...]]:
+    """Canonicalize common Chinese/ASR surface forms without changing intent."""
+
+    normalized = text.strip()
+    changes: list[str] = []
+
+    def apply(
+        pattern: str,
+        replacement: str | Callable[[re.Match[str]], str],
+        note: str,
+    ) -> None:
+        nonlocal normalized
+        updated = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+        if updated != normalized:
+            normalized = updated
+            changes.append(note)
+
+    # Speech recognition commonly writes 度 as the homophone 多. Only repair it
+    # in an explicit left/right rotation context; ordinary phrases such as
+    # “四十多毫米” remain untouched.
+    if input_source == CoordinateSource.ASR_TEXT:
+        apply(
+            rf"((?:向)?[左右]转(?:动)?)\s*[，,、]?\s*"
+            rf"({_CHINESE_NUMBER_TOKEN}|-?\d+(?:\.\d+)?)\s*多"
+            r"(?=\s*(?:[。.!！?？,，;；]|$))",
+            lambda match: f"{match.group(1)}{match.group(2)}度",
+            "将旋转角度后的 ASR 同音字“多”修正为“度”",
+        )
+
+    def replace_chinese_number(match: re.Match[str]) -> str:
+        return _arabic_number(match.group(0))
+
+    def replace_prefixed_chinese_number(match: re.Match[str]) -> str:
+        return f"{match.group(1)}{_arabic_number(match.group(2))}"
+
+    apply(
+        rf"([XYZxyz]\s*[=:：]\s*)({_CHINESE_NUMBER_TOKEN})",
+        replace_prefixed_chinese_number,
+        "将 XYZ 坐标中的中文数字转换为阿拉伯数字",
+    )
+    apply(
+        rf"([Jj]|第)({_CHINESE_NUMBER_TOKEN})(?=\s*(?:轴|关节|步|转))",
+        replace_prefixed_chinese_number,
+        "将关节或步骤编号中的中文数字转换为阿拉伯数字",
+    )
+
+    apply(
+        rf"{_CHINESE_NUMBER_TOKEN}(?=\s*(?:毫米|厘米|mm|cm|m|米|度|°))",
+        replace_chinese_number,
+        "将带单位的中文数字转换为阿拉伯数字",
+    )
+
+    # Verb-only direction words are unambiguous in the configured Base frame.
+    apply(r"(?<![向往])抬高(?=\s*-?\d)", "向上移动", "将“抬高”规范为 Base +Z")
+    apply(r"(?<![向往])降低(?=\s*-?\d)", "向下移动", "将“降低”规范为 Base -Z")
+
+    # Repair ASR punctuation that splits a single rotation into fragments.
+    apply(
+        r"((?:[Jj][1-6](?:关节)?\s*)?(?:向)?[左右])\s*[，,、]\s*(?=转(?:动)?)",
+        r"\1",
+        "合并被逗号拆开的旋转方向和动词",
+    )
+    apply(
+        r"((?:[Jj][1-6](?:关节)?\s*)?(?:向)?[左右]转(?:动)?)"
+        r"\s*[，,、]\s*(?=-?\d+(?:\.\d+)?\s*(?:度|°))",
+        r"\1",
+        "合并被逗号拆开的旋转动词和角度",
+    )
+
+    apply(r"[。.!！?？]+\s*$", "", "移除句尾标点")
+    return normalized.strip(), tuple(changes)
+
 
 def identify_demo_motion_preset(text: str) -> str | None:
     """Return the exact demo preset selected by a narrowly matched phrase."""
@@ -327,6 +470,7 @@ class CommandNormalizer:
         text: str,
         *,
         input_source: CoordinateSource = CoordinateSource.USER_TEXT,
+        original_text: str | None = None,
     ) -> ParsedCommand | None:
         """Parse only explicit, unambiguous ordered Chinese motion phrases.
 
@@ -334,6 +478,11 @@ class CommandNormalizer:
         as a fast path before invoking InternS2 without guessing user intent.
         """
 
+        source_text = original_text if original_text is not None else text
+        text, _changes = normalize_motion_input_text(
+            text,
+            input_source=input_source,
+        )
         compact_text = re.sub(r"\s+", "", text.strip())
         if identify_demo_motion_preset(compact_text) == DEMO_HEART_STAR_PRESET_ID:
             return self.normalize(
@@ -356,7 +505,7 @@ class CommandNormalizer:
                     ),
                 },
                 input_source=input_source,
-                input_text=text,
+                input_text=source_text,
             )
 
         absolute_position = re.fullmatch(
@@ -387,7 +536,7 @@ class CommandNormalizer:
                     "summary": "",
                 },
                 input_source=input_source,
-                input_text=text,
+                input_text=source_text,
             )
 
         if re.fullmatch(
@@ -407,7 +556,7 @@ class CommandNormalizer:
                     "summary": "请说明 TCP 要绕 Base X、Y、Z 中的哪一轴旋转。",
                 },
                 input_source=input_source,
-                input_text=text,
+                input_text=source_text,
             )
 
         # Keep the commas in ``X=...,Y=...,Z=...`` together while ordinary
@@ -632,7 +781,7 @@ class CommandNormalizer:
                 "summary": f"按原指令顺序执行 {len(steps)} 个动作",
             },
             input_source=input_source,
-            input_text=text,
+            input_text=source_text,
         )
 
     def _normalize_point(

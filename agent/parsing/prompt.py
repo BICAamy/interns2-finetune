@@ -54,6 +54,10 @@ def build_system_prompt(settings: AgentSettings) -> str:
    “右转/向右转/减少”是负角度。
    - 用户未指定关节时 joint_index 填 {settings.default_rotation_joint_index}，即配置的
      J{settings.default_rotation_joint_index}；明确指定 J1～J6 时使用对应编号。
+   - 只要用户没有明确说“TCP”，普通的“左转/右转/向左转/向右转”就必须按
+     joint_relative 处理，绝对不能要求用户补充 Base X/Y/Z 旋转轴。
+   - 语音转写可能写成“向右，转 40 度”或“向左转，40 度”；这些逗号只是断句，
+     含义分别等同于“向右转 40 度”和“向左转 40 度”。
    - “转动一点/一些/稍微”省略 rotation_deg，并把 value_source 设为 configured_default；
      运行时使用 {settings.default_relative_rotation_deg:g} 度。
 9. 绝对关节角使用 joint_absolute；“J3 到 30 度”填写 joint_index=3、
@@ -78,6 +82,9 @@ def build_system_prompt(settings: AgentSettings) -> str:
 19. 不得调用任何其他函数，不得返回底层工具名或服务地址。
 20. 用户明确要求穿刺、进针或针刺时不得改写成普通运动；如果缺少靶点，
     必须选择 clarify，并在 missing_fields 中加入 target_point。
+21. 用户消息可能同时包含“用户原始输入”和“系统规范化输入”。系统规范化输入只做
+    中文数字、单位、句尾标点和明确 ASR 断句的机械转换；优先按它提取动作，但不得
+    改变原始动作的顺序、方向和数值。
 
 默认距离单位：{settings.default_distance_unit.value}
 默认坐标系：{settings.default_coordinate_frame.value}

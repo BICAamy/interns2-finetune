@@ -122,6 +122,86 @@ class InternS2AgentTests(unittest.TestCase):
         self.assertEqual(steps[3].rotation_deg, -70.0)
         self.assertEqual(client.chat.completions.requests, [])
 
+    def test_chinese_numbers_split_rotation_and_terminal_punctuation_use_fast_path(self):
+        client = FakeInternS2Client(calls=[])
+        agent = InternS2Agent(
+            make_settings(),
+            client=client,
+            command_id_factory=lambda: "cmd-chinese-motion-text",
+        )
+
+        result = agent.parse_command("往前五十毫米，向右，转四十度。")
+
+        steps = result.command.motion_sequence.steps
+        self.assertEqual(len(steps), 2)
+        self.assertEqual(steps[0].translation_mm, (50.0, 0.0, 0.0))
+        self.assertEqual(steps[1].joint_index, 1)
+        self.assertEqual(steps[1].rotation_deg, -40.0)
+        self.assertEqual(client.chat.completions.requests, [])
+        self.assertEqual(
+            result.raw_arguments["input_normalization"]["canonical_text"],
+            "往前50毫米，向右转40度",
+        )
+
+    def test_asr_homophone_and_raise_verb_use_fast_path(self):
+        client = FakeInternS2Client(calls=[])
+        agent = InternS2Agent(
+            replace(make_settings(), default_rotation_joint_index=4),
+            client=client,
+            command_id_factory=lambda: "cmd-asr-motion-text",
+        )
+
+        result = agent.parse_command(
+            "抬高五十厘米，向左转，四十多。",
+            input_source=CoordinateSource.ASR_TEXT,
+        )
+
+        steps = result.command.motion_sequence.steps
+        self.assertEqual(len(steps), 2)
+        self.assertEqual(steps[0].translation_mm, (0.0, 0.0, 500.0))
+        self.assertEqual(steps[1].joint_index, 4)
+        self.assertEqual(steps[1].rotation_deg, 40.0)
+        self.assertEqual(client.chat.completions.requests, [])
+        self.assertEqual(
+            result.raw_arguments["input_normalization"]["canonical_text"],
+            "向上移动50厘米，向左转40度",
+        )
+
+    def test_chinese_coordinate_and_joint_numbers_use_fast_path(self):
+        client = FakeInternS2Client(calls=[])
+        agent = InternS2Agent(
+            make_settings(),
+            client=client,
+            command_id_factory=lambda: "cmd-chinese-coordinate-joint",
+        )
+
+        result = agent.parse_command(
+            "移动到Base坐标系下X=五百,Y=负十,Z=三百毫米，"
+            "然后第三关节转到三十度。"
+        )
+
+        steps = result.command.motion_sequence.steps
+        self.assertEqual(steps[0].target_position_mm, (500.0, -10.0, 300.0))
+        self.assertEqual(steps[1].joint_index, 3)
+        self.assertEqual(steps[1].target_angle_deg, 30.0)
+        self.assertEqual(client.chat.completions.requests, [])
+
+    def test_model_fallback_receives_raw_and_canonical_text(self):
+        arguments = base_arguments(
+            "clarify",
+            missing_fields=["motion_sequence"],
+            needs_confirmation=True,
+            summary="请明确运动方向",
+        )
+        agent, client = make_agent(arguments)
+
+        agent.parse_command("请平稳地推进五十毫米。")
+
+        content = client.chat.completions.requests[0]["messages"][1]["content"]
+        self.assertIn("用户原始输入：\n请平稳地推进五十毫米。", content)
+        self.assertIn("系统规范化输入", content)
+        self.assertIn("请平稳地推进50毫米", content)
+
     def test_explicit_forward_motion_parses_identically_in_both_modes(self):
         commands = []
         for mode in (RuntimeMode.SIMULATION, RuntimeMode.REAL):
