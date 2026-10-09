@@ -858,18 +858,97 @@ export default function App() {
 
         <div className="dashboard-grid">
           <section
-            className="panel command-panel"
+            className="panel simulation-panel"
             onPointerDown={triggerPanelJelly}
             onAnimationEnd={finishPanelJelly}
           >
             <div className="panel-heading">
               <div>
-                <span className="eyebrow">01 · 指令输入</span>
-                <h2>医生任务</h2>
+                <span className="eyebrow">01 · 真机仿真</span>
+                <h2>E05-Pro 实时画面与任务控制</h2>
               </div>
-              <span className="step-badge">文本 + 语音 + 可选图像</span>
+              <span className={`step-badge ${telemetry?.connected ? "live" : ""}`}>
+                {telemetry?.connected ? (runtimeMode === "real" ? `FRESH · ${Math.round(telemetry.source_age_ms ?? 0)} ms` : `${telemetry.simulation_fps ?? 0} FPS`) : (telemetry?.freshness ?? "遥测断开").toUpperCase()}
+              </span>
             </div>
-            <textarea
+            <div className="simulation-layout">
+              <div
+                ref={videoStageRef}
+                className={`video-stage ${cameraDragging ? "dragging" : ""} ${realStale ? "stale" : ""}`}
+                onPointerDown={runtimeMode !== null ? beginCameraDrag : undefined}
+                onPointerMove={runtimeMode !== null ? moveCamera : undefined}
+                onPointerUp={runtimeMode !== null ? endCameraDrag : undefined}
+                onPointerCancel={runtimeMode !== null ? endCameraDrag : undefined}
+              >
+                {videoUrl && (
+                  <img
+                    key={videoUrl}
+                    src={videoUrl}
+                    alt={runtimeMode === "real" ? "真实反馈驱动的 SOFA E05-Pro 数字孪生" : "远程 SOFA E05-Pro 仿真画面"}
+                    draggable={false}
+                    onLoad={() => {
+                      setVideoConnected(true);
+                      setVideoFailed(false);
+                    }}
+                    onError={() => {
+                      setVideoConnected(false);
+                      setVideoFailed(true);
+                    }}
+                  />
+                )}
+                {runtimeMode === null && (
+                  <div className="video-fallback"><strong>运行模式未确认</strong><span>暂不显示机械臂画面。</span></div>
+                )}
+                {runtimeMode !== null && <div className="video-overlay top-left">
+                  <span className={videoConnected ? "record-dot live" : "record-dot"} />
+                  {videoConnected ? (runtimeMode === "real" ? "REAL / WEB CONTROL" : "REMOTE SIMULATION") : "RECONNECTING"}
+                </div>}
+                {runtimeMode !== null && <div className="video-overlay bottom-right">
+                  frame {telemetry?.frame_sequence ?? 0}
+                </div>}
+                {runtimeMode !== null && <div className="camera-hint">
+                  左键旋转 · 右键平移 · 滚轮缩放 · 双击复位
+                </div>}
+                {runtimeMode !== null && <div className="camera-state">
+                  {camera
+                    ? `方位 ${camera.yaw_deg.toFixed(0)}° · 俯仰 ${camera.pitch_deg.toFixed(0)}° · ${camera.distance_m.toFixed(2)} m`
+                    : "正在读取相机状态"}
+                </div>}
+                {runtimeMode !== null && <div
+                  className="camera-presets"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onDoubleClick={(event) => event.stopPropagation()}
+                >
+                  {cameraPresets.map((preset) => (
+                    <button
+                      key={preset.id}
+                      className={camera?.preset === preset.id ? "active" : ""}
+                      onClick={() => void updateCamera({ action: "preset", preset: preset.id })}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>}
+                {videoFailed && runtimeMode !== null && (
+                  <div className="video-fallback">
+                    <strong>数字孪生视频暂时不可用</strong>
+                    <span>系统将在 2 秒后自动重连；真实模式不会因此向机械臂发送命令。</span>
+                  </div>
+                )}
+                {realStale && <div className="stale-overlay"><strong>真实机械臂连接恢复中</strong><span>真实操作已暂停；请检查 Mac、10003、10004 和 SSH 隧道</span></div>}
+                {runtimeMode === "real" && telemetry?.mirror_warning && <div className="calibration-warning">{telemetry.mirror_warning}</div>}
+                {cameraError && <div className="camera-error">{cameraError}</div>}
+              </div>
+
+              <aside className="command-console">
+                <div className="command-console-heading">
+                  <div>
+                    <span>任务控制</span>
+                    <h3>医生指令</h3>
+                  </div>
+                  <span className="step-badge">文本 + 语音 + 可选图像</span>
+                </div>
+                <textarea
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
               disabled={isBusy || recording || speechBusy}
@@ -973,125 +1052,24 @@ export default function App() {
                 <code>fingerprint {proposal.fingerprint}</code>
               )}
             </div>
-          </section>
-
-          <section
-            className="panel coordinates-panel"
-            onPointerDown={triggerPanelJelly}
-            onAnimationEnd={finishPanelJelly}
-          >
-            <div className="panel-heading">
-              <div>
-                <span className="eyebrow">02 · 任务预览</span>
-                <h2>坐标与 TCP</h2>
-              </div>
-              <span className="step-badge">单位：mm</span>
+              </aside>
             </div>
-            <CoordinateCard title="入点" point={entry} />
-            <CoordinateCard title="靶点" point={target} />
-            <CoordinateCard title={runtimeMode === "real" ? "控制器实际 TCP（工具未标定）" : "当前针尖 TCP"} point={currentTcp} />
-            {Array.isArray(command?.motion_sequence?.steps) &&
-              command.motion_sequence.steps.map((step: Record<string, any>, index: number) => (
-                <div className="relative-card" key={`${step.kind}-${index}`}>
-                  <span>步骤 {index + 1}</span>
-                  <strong>{describeMotionStep(step)}</strong>
-                </div>
-              ))}
-            {command?.relative_motion && (
-              <div className="relative-card">
-                <span>相对运动</span>
-                <strong>
-                  {command.relative_motion.delta_mm
-                    ? `ΔX ${command.relative_motion.delta_mm[0]} · ΔY ${command.relative_motion.delta_mm[1]} · ΔZ ${command.relative_motion.delta_mm[2]} mm`
-                    : `${String(command.relative_motion.axis).toUpperCase()} 轴 · ${command.relative_motion.direction === "positive" ? "+" : "−"}${command.relative_motion.distance_mm} mm`}
-                </strong>
-              </div>
-            )}
           </section>
 
           <section
-            className="panel simulation-panel"
+            className="panel telemetry-panel"
             onPointerDown={triggerPanelJelly}
             onAnimationEnd={finishPanelJelly}
           >
             <div className="panel-heading">
               <div>
-                <span className="eyebrow">{runtimeMode === "real" ? "03 · 真实机械臂" : runtimeMode === "simulation" ? "03 · 远程仿真" : "03 · 模式未确认"}</span>
-                <h2>{runtimeMode === "real" ? "真实反馈驱动的 E05-Pro 数字孪生" : runtimeMode === "simulation" ? "E05-Pro 实时画面与遥测" : "等待运行模式确认"}</h2>
+                <span className="eyebrow">02 · 运行遥测</span>
+                <h2>{runtimeMode === "real" ? "真实控制器状态" : "运动状态与轨迹"}</h2>
               </div>
               <span className={`step-badge ${telemetry?.connected ? "live" : ""}`}>
                 {telemetry?.connected ? (runtimeMode === "real" ? `FRESH · ${Math.round(telemetry.source_age_ms ?? 0)} ms` : `${telemetry.simulation_fps ?? 0} FPS`) : (telemetry?.freshness ?? "遥测断开").toUpperCase()}
               </span>
             </div>
-            <div className="simulation-layout">
-              <div
-                ref={videoStageRef}
-                className={`video-stage ${cameraDragging ? "dragging" : ""} ${realStale ? "stale" : ""}`}
-                onPointerDown={runtimeMode !== null ? beginCameraDrag : undefined}
-                onPointerMove={runtimeMode !== null ? moveCamera : undefined}
-                onPointerUp={runtimeMode !== null ? endCameraDrag : undefined}
-                onPointerCancel={runtimeMode !== null ? endCameraDrag : undefined}
-              >
-                {videoUrl && (
-                  <img
-                    key={videoUrl}
-                    src={videoUrl}
-                    alt={runtimeMode === "real" ? "真实反馈驱动的 SOFA E05-Pro 数字孪生" : "远程 SOFA E05-Pro 仿真画面"}
-                    draggable={false}
-                    onLoad={() => {
-                      setVideoConnected(true);
-                      setVideoFailed(false);
-                    }}
-                    onError={() => {
-                      setVideoConnected(false);
-                      setVideoFailed(true);
-                    }}
-                  />
-                )}
-                {runtimeMode === null && (
-                  <div className="video-fallback"><strong>运行模式未确认</strong><span>暂不显示机械臂画面。</span></div>
-                )}
-                {runtimeMode !== null && <div className="video-overlay top-left">
-                  <span className={videoConnected ? "record-dot live" : "record-dot"} />
-                  {videoConnected ? (runtimeMode === "real" ? "REAL / WEB CONTROL" : "REMOTE SIMULATION") : "RECONNECTING"}
-                </div>}
-                {runtimeMode !== null && <div className="video-overlay bottom-right">
-                  frame {telemetry?.frame_sequence ?? 0}
-                </div>}
-                {runtimeMode !== null && <div className="camera-hint">
-                  左键旋转 · 右键平移 · 滚轮缩放 · 双击复位
-                </div>}
-                {runtimeMode !== null && <div className="camera-state">
-                  {camera
-                    ? `方位 ${camera.yaw_deg.toFixed(0)}° · 俯仰 ${camera.pitch_deg.toFixed(0)}° · ${camera.distance_m.toFixed(2)} m`
-                    : "正在读取相机状态"}
-                </div>}
-                {runtimeMode !== null && <div
-                  className="camera-presets"
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onDoubleClick={(event) => event.stopPropagation()}
-                >
-                  {cameraPresets.map((preset) => (
-                    <button
-                      key={preset.id}
-                      className={camera?.preset === preset.id ? "active" : ""}
-                      onClick={() => void updateCamera({ action: "preset", preset: preset.id })}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                </div>}
-                {videoFailed && runtimeMode !== null && (
-                  <div className="video-fallback">
-                    <strong>数字孪生视频暂时不可用</strong>
-                    <span>系统将在 2 秒后自动重连；真实模式不会因此向机械臂发送命令。</span>
-                  </div>
-                )}
-                {realStale && <div className="stale-overlay"><strong>真实机械臂连接恢复中</strong><span>真实操作已暂停；请检查 Mac、10003、10004 和 SSH 隧道</span></div>}
-                {runtimeMode === "real" && telemetry?.mirror_warning && <div className="calibration-warning">{telemetry.mirror_warning}</div>}
-                {cameraError && <div className="camera-error">{cameraError}</div>}
-              </div>
-
               {runtimeMode === "real" ? (
                 <aside className="telemetry-board">
                   <div className="connection-grid">
@@ -1157,7 +1135,40 @@ export default function App() {
                   <div className="telemetry-error">{String(telemetry.error.message ?? "仿真遥测不可用")}</div>
                 )}
               </aside>}
+          </section>
+
+          <section
+            className="panel coordinates-panel"
+            onPointerDown={triggerPanelJelly}
+            onAnimationEnd={finishPanelJelly}
+          >
+            <div className="panel-heading">
+              <div>
+                <span className="eyebrow">03 · 任务预览</span>
+                <h2>坐标与 TCP</h2>
+              </div>
+              <span className="step-badge">单位：mm</span>
             </div>
+            <CoordinateCard title="入点" point={entry} />
+            <CoordinateCard title="靶点" point={target} />
+            <CoordinateCard title={runtimeMode === "real" ? "控制器实际 TCP（工具未标定）" : "当前针尖 TCP"} point={currentTcp} />
+            {Array.isArray(command?.motion_sequence?.steps) &&
+              command.motion_sequence.steps.map((step: Record<string, any>, index: number) => (
+                <div className="relative-card" key={`${step.kind}-${index}`}>
+                  <span>步骤 {index + 1}</span>
+                  <strong>{describeMotionStep(step)}</strong>
+                </div>
+              ))}
+            {command?.relative_motion && (
+              <div className="relative-card">
+                <span>相对运动</span>
+                <strong>
+                  {command.relative_motion.delta_mm
+                    ? `ΔX ${command.relative_motion.delta_mm[0]} · ΔY ${command.relative_motion.delta_mm[1]} · ΔZ ${command.relative_motion.delta_mm[2]} mm`
+                    : `${String(command.relative_motion.axis).toUpperCase()} 轴 · ${command.relative_motion.direction === "positive" ? "+" : "−"}${command.relative_motion.distance_mm} mm`}
+                </strong>
+              </div>
+            )}
           </section>
 
           <section
