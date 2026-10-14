@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from inspect import signature
 from threading import get_ident
 import time
 
@@ -16,7 +17,7 @@ from simulation.entry_point_env import (
 )
 from simulation.server.api import create_app
 from simulation.server.simulation_worker import SimulationWorker
-from simulation.server.video_stream import encode_jpeg, mjpeg_chunk
+from simulation.server.video_stream import encode_jpeg, mjpeg_chunk, mjpeg_stream
 from surgical_contracts import CommandExecutionStatus, MotionState
 
 
@@ -27,6 +28,10 @@ TERMINAL = {
     CommandExecutionStatus.REJECTED.value,
     CommandExecutionStatus.CANCELLED.value,
 }
+
+
+def test_mjpeg_stream_defaults_to_twenty_fps() -> None:
+    assert signature(mjpeg_stream).parameters["maximum_fps"].default == 20.0
 
 
 @dataclass(frozen=True)
@@ -93,6 +98,10 @@ class ControllerEnvironment:
         return self.controller.move_tcp_rotation(
             axis, angle_deg, absolute=absolute, speed_mm_s=speed_mm_s
         )
+
+    def move_sequence(self, request):
+        self._owned()
+        return self.controller.move_sequence(request)
 
     def step(self):
         self._owned()

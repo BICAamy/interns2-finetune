@@ -157,6 +157,7 @@ class EntryPointEnvConfig:
     joint_speed_deg_s: float = 15.0
     joint_acceleration_deg_s2: float = 30.0
     maximum_rotation_deg: float = 720.0
+    sequence_blend_radius_mm: float = 0.0
     image_shape: tuple[int, int] = (600, 600)
     trajectory_history_limit: int = 2048
     tcp_name: str = "needle_tip"
@@ -186,6 +187,12 @@ class EntryPointEnvConfig:
             if not isfinite(value) or value <= 0.0:
                 raise ValueError(f"{name} must be a finite positive number")
             object.__setattr__(self, name, value)
+        blend_radius = float(self.sequence_blend_radius_mm)
+        if not isfinite(blend_radius) or blend_radius < 0.0:
+            raise ValueError(
+                "sequence_blend_radius_mm must be a finite nonnegative number"
+            )
+        object.__setattr__(self, "sequence_blend_radius_mm", blend_radius)
         if self.default_speed_mm_s > self.maximum_speed_mm_s:
             raise ValueError("default_speed_mm_s cannot exceed maximum_speed_mm_s")
         if (
@@ -286,6 +293,9 @@ class EntryPointEnvConfig:
                 section.get("joint_acceleration_deg_s2", 30.0)
             ),
             maximum_rotation_deg=float(section.get("maximum_rotation_deg", 720.0)),
+            sequence_blend_radius_mm=float(
+                section.get("sequence_blend_radius_mm", 0.0)
+            ),
             image_shape=(
                 int(image_data.get("height", 600)),
                 int(image_data.get("width", 600)),

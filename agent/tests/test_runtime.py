@@ -9,6 +9,11 @@ from types import SimpleNamespace
 
 from agent.config import AgentSettings
 from agent.parsing import CommandParsingError
+from agent.parsing.normalizer import (
+    DEMO_CURVE_SAMPLE_SPACING_MM,
+    DEMO_HEART_STAR_CONTROL_DELTAS_MM,
+    DEMO_HEART_STAR_DELTAS_MM,
+)
 from agent.runtime import InternS2Agent
 from surgical_contracts import (
     Axis,
@@ -440,14 +445,17 @@ class InternS2AgentTests(unittest.TestCase):
             client=client,
             command_id_factory=lambda: "cmd-heart-demo-preset",
         )
-        expected = (
-            (35.0, 18.0, 68.0), (55.0, 18.0, -68.0),
-            (0.0, 39.0, 0.0), (-8.0, -34.0, -43.0),
-            (-82.0, 12.0, -69.0), (-49.0, -35.0, 41.0),
-            (49.0, -35.0, -41.0), (-82.0, 12.0, 69.0),
-            (-8.0, -34.0, 43.0), (0.0, 39.0, 0.0),
-            (55.0, 18.0, 68.0), (35.0, -18.0, -68.0),
-        )
+        expected = DEMO_HEART_STAR_DELTAS_MM
+        self.assertGreater(len(expected), len(DEMO_HEART_STAR_CONTROL_DELTAS_MM))
+        for delta in expected:
+            length = sum(component * component for component in delta) ** 0.5
+            self.assertLessEqual(length, DEMO_CURVE_SAMPLE_SPACING_MM + 0.05)
+        for axis in range(3):
+            self.assertAlmostEqual(
+                sum(delta[axis] for delta in expected),
+                0.0,
+                places=7,
+            )
 
         for prompt in (
             "画出一张正面是爱心，侧面是星星的图案",

@@ -14,6 +14,8 @@ from surgical_contracts import (
     Axis,
     CoordinateSource,
     MotionState,
+    MotionStepKind,
+    MoveSequenceRequest,
     Point3D,
     RobotState,
     RuntimeMode,
@@ -40,6 +42,20 @@ class MotionCommandKind(str, Enum):
     RELATIVE = "relative"
     JOINT_RELATIVE = "joint_relative"
     CARTESIAN_POSE = "cartesian_pose"
+    SEQUENCE = "sequence"
+
+
+@dataclass(frozen=True)
+class _SequenceTarget:
+    """One prevalidated absolute target inside a continuous sequence."""
+
+    kind: MotionCommandKind
+    target_position_mm: tuple[float, float, float]
+    target_joint_positions_rad: np.ndarray | None
+    target_orientation: Rotation
+    linear_speed_mm_s: float
+    joint_speed_deg_s: float
+    blend_radius_mm: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -114,6 +130,9 @@ class ContinuousTrajectoryController:
         self._active_command_id: str | None = None
         self._last_command_id: str | None = None
         self._command_kind: MotionCommandKind | None = None
+        self._active_motion_kind: MotionCommandKind | None = None
+        self._sequence_targets: tuple[_SequenceTarget, ...] = ()
+        self._sequence_index: int | None = None
         self._step_sequence = 0
         self._command_sequence = 0
         self._trajectory_mm: list[tuple[float, float, float]] = [self._position_mm]
@@ -242,6 +261,7 @@ class ContinuousTrajectoryController:
         self._target_position_mm = target_position
         self._joint_speed_deg_s = speed
         self._command_kind = MotionCommandKind.JOINT_RELATIVE
+        self._active_motion_kind = MotionCommandKind.JOINT_RELATIVE
         self._active_command_id = command_id
         self._last_command_id = command_id
         self._motion_state = MotionState.MOVING
@@ -342,10 +362,270 @@ class ContinuousTrajectoryController:
         self._target_tcp_orientation = target_orientation
         self._joint_speed_deg_s = self.config.joint_speed_deg_s
         self._command_kind = MotionCommandKind.CARTESIAN_POSE
+        self._active_motion_kind = MotionCommandKind.CARTESIAN_POSE
         self._active_command_id = command_id
         self._last_command_id = command_id
         self._motion_state = MotionState.MOVING
         return command_id
+
+    def move_sequence(self, request: MoveSequenceRequest) -> str:
+        """Prevalidate and execute one MotionSequence without intermediate idle states.
+
+        Cartesian translation corners use the configured blend radius.  Joint
+        and orientation targets still pass through their exact target, but the
+        controller activates the following target in the same control tick so
+        the externally visible state remains ``moving`` until the final step.
+        """
+
+        self._ensure_motion_can_start()
+        linear_speed = self._validated_speed(request.translation_speed_mm_s)
+        joint_speed = float(request.joint_speed_deg_s)
+        joint_acceleration = float(request.joint_acceleration_deg_s2)
+        if not isfinite(joint_speed) or joint_speed <= 0.0:
+            raise InvalidMotionCommand("joint sequence speed must be finite and positive")
+        if (
+            not isfinite(joint_acceleration)
+            or joint_acceleration <= 0.0
+            or joint_acceleration > self.config.joint_acceleration_deg_s2
+        ):
+            raise InvalidMotionCommand(
+                "joint sequence acceleration exceeds the simulation configuration"
+            )
+
+        nominal_joints = self._joint_positions_rad.copy()
+        nominal_snapshot = self.kinematics.forward(nominal_joints)
+        nominal_position = self._position_from_snapshot(nominal_snapshot)
+        nominal_orientation = Rotation.from_matrix(
+            nominal_snapshot.tcp_transform[:3, :3]
+        )
+        raw_targets: list[_SequenceTarget] = []
+        segment_starts: list[tuple[float, float, float]] = []
+
+        for step in request.steps:
+            segment_starts.append(nominal_position)
+            if step.kind in {
+                MotionStepKind.CARTESIAN_RELATIVE,
+                MotionStepKind.CARTESIAN_ABSOLUTE,
+            }:
+                if step.kind == MotionStepKind.CARTESIAN_RELATIVE:
+                    assert step.translation_mm is not None
+                    delta = self._vector(step.translation_mm, name="translation_mm")
+                    distance_mm = sqrt(sum(component * component for component in delta))
+                    if distance_mm > self.config.maximum_relative_distance_mm:
+                        raise InvalidMotionCommand(
+                            "sequence translation exceeds maximum_relative_distance_mm"
+                        )
+                    target_position = tuple(
+                        current + offset
+                        for current, offset in zip(nominal_position, delta)
+                    )
+                else:
+                    assert step.target_position_mm is not None
+                    target_position = self._vector(
+                        step.target_position_mm,
+                        name="target_position_mm",
+                    )
+                if not self.config.workspace.contains(target_position):
+                    raise WorkspaceViolationError(
+                        f"sequence target {target_position} mm is outside the workspace"
+                    )
+                try:
+                    solution = self.kinematics.inverse(
+                        target_position,
+                        nominal_orientation,
+                        nominal_joints,
+                    )
+                except InverseKinematicsError as error:
+                    raise UnreachableTargetError(str(error)) from error
+                nominal_joints = np.asarray(
+                    solution.joint_positions_rad,
+                    dtype=np.float64,
+                )
+                nominal_position = target_position
+                raw_targets.append(_SequenceTarget(
+                    kind=MotionCommandKind.RELATIVE,
+                    target_position_mm=target_position,
+                    target_joint_positions_rad=None,
+                    target_orientation=nominal_orientation,
+                    linear_speed_mm_s=linear_speed,
+                    joint_speed_deg_s=joint_speed,
+                ))
+                continue
+
+            if step.kind in {
+                MotionStepKind.JOINT_RELATIVE,
+                MotionStepKind.JOINT_ABSOLUTE,
+            }:
+                assert step.joint_index is not None
+                joint_offset = step.joint_index - 1
+                if step.kind == MotionStepKind.JOINT_RELATIVE:
+                    assert step.rotation_deg is not None
+                    rotation_deg = float(step.rotation_deg)
+                    target_angle_deg = (
+                        float(np.rad2deg(nominal_joints[joint_offset]))
+                        + rotation_deg
+                    )
+                else:
+                    assert step.target_angle_deg is not None
+                    target_angle_deg = float(step.target_angle_deg)
+                    rotation_deg = target_angle_deg - float(
+                        np.rad2deg(nominal_joints[joint_offset])
+                    )
+                if abs(rotation_deg) > self.config.maximum_rotation_deg:
+                    raise InvalidMotionCommand(
+                        "sequence joint rotation exceeds maximum_rotation_deg"
+                    )
+                maximum_speed = self.config.robot.joint_max_speeds_deg_s[
+                    joint_offset
+                ]
+                if joint_speed > maximum_speed:
+                    raise InvalidMotionCommand(
+                        f"joint speed cannot exceed {maximum_speed}"
+                    )
+                low, high = self.config.robot.joint_limits_deg[joint_offset]
+                if not low <= target_angle_deg <= high:
+                    raise InvalidMotionCommand(
+                        "sequence joint target exceeds configured joint limit"
+                    )
+                nominal_joints = nominal_joints.copy()
+                nominal_joints[joint_offset] = np.deg2rad(target_angle_deg)
+                nominal_snapshot = self.kinematics.forward(nominal_joints)
+                nominal_position = self._position_from_snapshot(nominal_snapshot)
+                if not self.config.workspace.contains(nominal_position):
+                    raise WorkspaceViolationError(
+                        "sequence joint target leaves the workspace"
+                    )
+                nominal_orientation = Rotation.from_matrix(
+                    nominal_snapshot.tcp_transform[:3, :3]
+                )
+                raw_targets.append(_SequenceTarget(
+                    kind=MotionCommandKind.JOINT_RELATIVE,
+                    target_position_mm=nominal_position,
+                    target_joint_positions_rad=nominal_joints.copy(),
+                    target_orientation=nominal_orientation,
+                    linear_speed_mm_s=linear_speed,
+                    joint_speed_deg_s=joint_speed,
+                ))
+                continue
+
+            assert step.rotation_axis is not None
+            angle = (
+                step.rotation_deg
+                if step.kind == MotionStepKind.TCP_ROTATION_RELATIVE
+                else step.target_angle_deg
+            )
+            assert angle is not None
+            selected_axis = Axis(step.rotation_axis)
+            rpy = nominal_orientation.as_euler("xyz", degrees=True)
+            axis_index = {Axis.X: 0, Axis.Y: 1, Axis.Z: 2}[selected_axis]
+            delta_deg = (
+                float(angle) - float(rpy[axis_index])
+                if step.kind == MotionStepKind.TCP_ROTATION_ABSOLUTE
+                else float(angle)
+            )
+            if abs(delta_deg) > self.config.maximum_rotation_deg:
+                raise InvalidMotionCommand(
+                    "sequence TCP rotation exceeds maximum_rotation_deg"
+                )
+            rpy[axis_index] += delta_deg
+            nominal_orientation = Rotation.from_euler("xyz", rpy, degrees=True)
+            try:
+                solution = self.kinematics.inverse(
+                    nominal_position,
+                    nominal_orientation,
+                    nominal_joints,
+                )
+            except InverseKinematicsError as error:
+                raise UnreachableTargetError(str(error)) from error
+            nominal_joints = np.asarray(
+                solution.joint_positions_rad,
+                dtype=np.float64,
+            )
+            raw_targets.append(_SequenceTarget(
+                kind=MotionCommandKind.CARTESIAN_POSE,
+                target_position_mm=nominal_position,
+                target_joint_positions_rad=nominal_joints.copy(),
+                target_orientation=nominal_orientation,
+                linear_speed_mm_s=linear_speed,
+                joint_speed_deg_s=self.config.joint_speed_deg_s,
+            ))
+
+        targets: list[_SequenceTarget] = []
+        for index, target in enumerate(raw_targets):
+            blend_radius = 0.0
+            if (
+                index < len(raw_targets) - 1
+                and target.kind == MotionCommandKind.RELATIVE
+                and raw_targets[index + 1].kind == MotionCommandKind.RELATIVE
+                and self.config.sequence_blend_radius_mm > 0.0
+            ):
+                incoming = dist(segment_starts[index], target.target_position_mm)
+                outgoing = dist(
+                    target.target_position_mm,
+                    raw_targets[index + 1].target_position_mm,
+                )
+                blend_radius = min(
+                    self.config.sequence_blend_radius_mm,
+                    incoming * 0.45,
+                    outgoing * 0.45,
+                )
+            targets.append(_SequenceTarget(
+                kind=target.kind,
+                target_position_mm=target.target_position_mm,
+                target_joint_positions_rad=target.target_joint_positions_rad,
+                target_orientation=target.target_orientation,
+                linear_speed_mm_s=target.linear_speed_mm_s,
+                joint_speed_deg_s=target.joint_speed_deg_s,
+                blend_radius_mm=blend_radius,
+            ))
+
+        if not targets:
+            raise InvalidMotionCommand("motion sequence must contain at least one step")
+        self._sequence_targets = tuple(targets)
+        self._sequence_index = 0
+        self._command_kind = MotionCommandKind.SEQUENCE
+        self._active_command_id = request.command_id
+        self._last_command_id = request.command_id
+        self._activate_sequence_target(self._sequence_targets[0])
+        self._motion_state = MotionState.MOVING
+        return request.command_id
+
+    def _activate_sequence_target(self, target: _SequenceTarget) -> None:
+        self._active_motion_kind = target.kind
+        self._target_position_mm = target.target_position_mm
+        self._target_joint_positions_rad = (
+            None
+            if target.target_joint_positions_rad is None
+            else target.target_joint_positions_rad.copy()
+        )
+        self._target_tcp_orientation = target.target_orientation
+        self._speed_mm_s = target.linear_speed_mm_s
+        self._joint_speed_deg_s = target.joint_speed_deg_s
+        if target.kind == MotionCommandKind.RELATIVE:
+            self._fixed_tcp_orientation = target.target_orientation
+
+    def _complete_active_target(self) -> None:
+        if self._command_kind == MotionCommandKind.SEQUENCE:
+            assert self._sequence_index is not None
+            next_index = self._sequence_index + 1
+            if next_index < len(self._sequence_targets):
+                self._sequence_index = next_index
+                self._activate_sequence_target(self._sequence_targets[next_index])
+                self._motion_state = MotionState.MOVING
+                return
+        self._finish_motion()
+
+    def _active_blend_radius_mm(self) -> float:
+        if (
+            self._command_kind != MotionCommandKind.SEQUENCE
+            or self._sequence_index is None
+        ):
+            return 0.0
+        return self._sequence_targets[self._sequence_index].blend_radius_mm
+
+    def _clear_sequence(self) -> None:
+        self._sequence_targets = ()
+        self._sequence_index = None
 
     def _ensure_motion_can_start(self) -> None:
         if self._estop:
@@ -366,6 +646,7 @@ class ContinuousTrajectoryController:
         self._target_tcp_orientation = None
         self._speed_mm_s = speed_mm_s
         self._command_kind = kind
+        self._active_motion_kind = kind
         self._active_command_id = command_id
         self._last_command_id = command_id
         if dist(self._position_mm, target) <= self._completion_tolerance_mm():
@@ -382,7 +663,9 @@ class ContinuousTrajectoryController:
             del self._trajectory_mm[:overflow]
 
     def _finish_motion(self) -> None:
-        if self._command_kind in {
+        completed_kind = self._active_motion_kind
+        top_level_kind = self._command_kind
+        if completed_kind in {
             MotionCommandKind.JOINT_RELATIVE,
             MotionCommandKind.CARTESIAN_POSE,
         }:
@@ -391,16 +674,19 @@ class ContinuousTrajectoryController:
             )
         self._target_joint_positions_rad = None
         self._target_tcp_orientation = None
-        if self._command_kind == MotionCommandKind.ENTRY_POINT:
+        if top_level_kind == MotionCommandKind.ENTRY_POINT:
             self._motion_state = MotionState.AT_ENTRY
         else:
             self._motion_state = MotionState.IDLE
         self._active_command_id = None
+        self._active_motion_kind = None
+        self._command_kind = None
+        self._clear_sequence()
 
     def _completion_tolerance_mm(self) -> float:
         """Use task tolerance for entry positioning and IK precision for offsets."""
 
-        if self._command_kind == MotionCommandKind.RELATIVE:
+        if self._active_motion_kind == MotionCommandKind.RELATIVE:
             return self.config.ik_position_tolerance_mm
         return self.config.reach_tolerance_mm
 
@@ -436,7 +722,7 @@ class ContinuousTrajectoryController:
     def step(self) -> SimulationStep:
         self._step_sequence += 1
         if self._motion_state == MotionState.MOVING:
-            if self._command_kind in {
+            if self._active_motion_kind in {
                 MotionCommandKind.JOINT_RELATIVE,
                 MotionCommandKind.CARTESIAN_POSE,
             }:
@@ -460,7 +746,7 @@ class ContinuousTrajectoryController:
                     self._position_mm = actual_position
                     self._append_trajectory(actual_position)
                     if np.max(np.abs(delta)) <= maximum_step:
-                        self._finish_motion()
+                        self._complete_active_target()
             elif self._target_position_mm is None:
                 self.mark_failed()
             else:
@@ -485,11 +771,15 @@ class ContinuousTrajectoryController:
                 self._joint_positions_rad = joints
                 self._position_mm = actual_position
                 self._append_trajectory(actual_position)
-                if (
-                    dist(self._position_mm, self._target_position_mm)
-                    <= self._completion_tolerance_mm()
-                ):
-                    self._finish_motion()
+                remaining_after_step = dist(
+                    self._position_mm,
+                    self._target_position_mm,
+                )
+                blend_radius = self._active_blend_radius_mm()
+                if blend_radius > 0.0 and remaining_after_step <= blend_radius:
+                    self._complete_active_target()
+                elif remaining_after_step <= self._completion_tolerance_mm():
+                    self._complete_active_target()
         return self.snapshot()
 
     def snapshot(self) -> SimulationStep:
@@ -506,10 +796,7 @@ class ContinuousTrajectoryController:
                 else None
             ),
             position_error_mm=error,
-            reached=(
-                self._command_kind == MotionCommandKind.ENTRY_POINT
-                and self._motion_state == MotionState.AT_ENTRY
-            ),
+            reached=self._motion_state == MotionState.AT_ENTRY,
             joint_positions_deg=self.joint_positions_deg,
         )
 
@@ -532,6 +819,8 @@ class ContinuousTrajectoryController:
         self._target_joint_positions_rad = None
         self._target_tcp_orientation = None
         self._command_kind = None
+        self._active_motion_kind = None
+        self._clear_sequence()
         self._active_command_id = None
         self._motion_state = MotionState.ESTOP if self._estop else MotionState.STOPPED
         return self.get_state()
@@ -543,12 +832,20 @@ class ContinuousTrajectoryController:
         self._target_joint_positions_rad = None
         self._target_tcp_orientation = None
         self._command_kind = None
+        self._active_motion_kind = None
+        self._clear_sequence()
         self._active_command_id = None
         self._estop = True
         self._motion_state = MotionState.ESTOP
         return self.get_state()
 
     def mark_failed(self) -> RobotState:
+        self._target_position_mm = None
+        self._target_joint_positions_rad = None
+        self._target_tcp_orientation = None
+        self._command_kind = None
+        self._active_motion_kind = None
+        self._clear_sequence()
         self._active_command_id = None
         self._motion_state = MotionState.FAILED
         return self.get_state()

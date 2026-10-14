@@ -15,8 +15,13 @@ from simulation.entry_point_env import (
     WorkspaceBounds,
     WorkspaceViolationError,
 )
-from surgical_contracts import MotionState
-from surgical_contracts import Point3D
+from surgical_contracts import (
+    MotionSequenceStep,
+    MotionState,
+    MotionStepKind,
+    MoveSequenceRequest,
+    Point3D,
+)
 
 
 CONFIG = EntryPointEnvConfig.from_yaml()
@@ -32,14 +37,80 @@ def run_until_settled(controller: ContinuousTrajectoryController, maximum_steps:
 
 
 class RelativeMotionControllerTests(unittest.TestCase):
+    def test_cartesian_sequence_blends_corners_without_intermediate_idle(self):
+        controller = ContinuousTrajectoryController(CONFIG)
+        start = controller.get_state().tcp_position.as_tuple()
+        first_corner = (start[0] - 20.0, start[1], start[2])
+        controller.move_sequence(MoveSequenceRequest(
+            command_id="three-segment-blend",
+            steps=(
+                MotionSequenceStep(
+                    kind=MotionStepKind.CARTESIAN_RELATIVE,
+                    translation_mm=(-20.0, 0.0, 0.0),
+                ),
+                MotionSequenceStep(
+                    kind=MotionStepKind.CARTESIAN_RELATIVE,
+                    translation_mm=(0.0, 20.0, 0.0),
+                ),
+                MotionSequenceStep(
+                    kind=MotionStepKind.CARTESIAN_RELATIVE,
+                    translation_mm=(20.0, 0.0, 0.0),
+                ),
+            ),
+            translation_speed_mm_s=CONFIG.default_speed_mm_s,
+            joint_speed_deg_s=CONFIG.joint_speed_deg_s,
+            joint_acceleration_deg_s2=CONFIG.joint_acceleration_deg_s2,
+        ))
+
+        observed_states = []
+        for _ in range(100):
+            step = controller.step()
+            observed_states.append(step.state.motion_state)
+            if step.state.motion_state != MotionState.MOVING:
+                break
+        else:
+            self.fail("blended sequence did not settle")
+
+        self.assertEqual(observed_states[-1], MotionState.IDLE)
+        self.assertTrue(all(
+            state == MotionState.MOVING for state in observed_states[:-1]
+        ))
+        self.assertGreater(
+            min(dist(point, first_corner) for point in controller.trajectory_mm),
+            CONFIG.ik_position_tolerance_mm,
+        )
+        np.testing.assert_allclose(
+            controller.get_state().tcp_position.as_tuple(),
+            (start[0], start[1] + 20.0, start[2]),
+            atol=CONFIG.ik_position_tolerance_mm,
+        )
+
     def test_heart_star_demo_is_reachable_and_returns_to_start(self):
         controller = ContinuousTrajectoryController(CONFIG)
         start = controller.get_state().tcp_position.as_tuple()
 
-        for delta_mm in DEMO_HEART_STAR_DELTAS_MM:
-            controller.move_relative(delta_mm)
-            step = run_until_settled(controller)
-            self.assertEqual(step.state.motion_state, MotionState.IDLE)
+        controller.move_sequence(MoveSequenceRequest(
+            command_id="heart-star-continuous",
+            steps=tuple(
+                MotionSequenceStep(
+                    kind=MotionStepKind.CARTESIAN_RELATIVE,
+                    translation_mm=delta_mm,
+                )
+                for delta_mm in DEMO_HEART_STAR_DELTAS_MM
+            ),
+            translation_speed_mm_s=CONFIG.default_speed_mm_s,
+            joint_speed_deg_s=CONFIG.joint_speed_deg_s,
+            joint_acceleration_deg_s2=CONFIG.joint_acceleration_deg_s2,
+        ))
+        for _ in range(1000):
+            step = controller.step()
+            if step.state.motion_state != MotionState.MOVING:
+                break
+            self.assertEqual(step.state.motion_state, MotionState.MOVING)
+        else:
+            self.fail("continuous heart/star sequence did not settle")
+
+        self.assertEqual(step.state.motion_state, MotionState.IDLE)
 
         np.testing.assert_allclose(
             controller.get_state().tcp_position.as_tuple(),

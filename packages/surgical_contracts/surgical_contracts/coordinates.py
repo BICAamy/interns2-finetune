@@ -191,6 +191,6 @@ class MotionSequenceStep(ContractModel):
 
 
 class MotionSequence(ContractModel):
-    """An ordered list executed one step at a time."""
+    """An ordered list executed as one continuous sequence when supported."""
 
     steps: tuple[MotionSequenceStep, ...] = Field(min_length=1)

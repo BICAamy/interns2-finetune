@@ -213,8 +213,14 @@ def test_real_and_simulation_motion_values_match_but_load_independently() -> Non
         == real_config.motion.joint_acceleration_deg_s2
     )
     assert simulation_policy.max_rotation_deg == real_config.limits.max_rotation_deg
-    assert simulation_policy.auto_execute_delay_s == 0.5
-    assert real_config.interaction.auto_execute_delay_s == 0.5
+    assert (
+        simulation_policy.sequence_blend_radius_mm
+        == real_config.motion.sequence_blend_radius_mm
+    )
+    assert (
+        simulation_policy.auto_execute_delay_s
+        == real_config.interaction.auto_execute_delay_s
+    )
     assert real_config.deadlines.real_mode_fallback_ms == 5000
 
     simulation_data = yaml.safe_load(
@@ -333,6 +339,10 @@ def test_real_stale_state_is_disconnected_for_ui_and_keeps_last_pose() -> None:
 
 def test_transient_real_disconnect_stays_real_and_clears_recovery_state() -> None:
     clock = FakeMonotonic()
+    auto_execute_delay_ms = round(
+        load_simulation_motion_policy("configs/simulation.yaml").auto_execute_delay_s
+        * 1000
+    )
     client, real_observer, _simulation_robot = _dual_mode_client(
         monotonic_clock=clock,
     )
@@ -343,12 +353,12 @@ def test_transient_real_disconnect_stays_real_and_clears_recovery_state() -> Non
         assert health["robot_mode_settings"]["simulation"] == {
             "workspace_low_mm": [200.0, -1000.0, 100.0],
             "workspace_high_mm": [1000.0, 1000.0, 800.0],
-            "auto_execute_delay_ms": 500,
+            "auto_execute_delay_ms": auto_execute_delay_ms,
         }
         assert health["robot_mode_settings"]["real"] == {
             "workspace_low_mm": [200.0, -1000.0, 100.0],
             "workspace_high_mm": [1000.0, 1000.0, 800.0],
-            "auto_execute_delay_ms": 500,
+            "auto_execute_delay_ms": auto_execute_delay_ms,
         }
 
         session = client.post("/api/sessions").json()

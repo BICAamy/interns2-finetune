@@ -27,7 +27,7 @@ def mjpeg_chunk(jpeg: bytes) -> bytes:
     ).encode("ascii") + jpeg + b"\r\n"
 
 
-def mjpeg_stream(worker: Any, *, maximum_fps: float = 10.0) -> Iterator[bytes]:
+def mjpeg_stream(worker: Any, *, maximum_fps: float = 20.0) -> Iterator[bytes]:
     minimum_interval = 1.0 / max(1.0, maximum_fps)
     sequence = -1
     latest_jpeg: bytes | None = None

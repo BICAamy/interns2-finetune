@@ -15,6 +15,7 @@ from sofa_env.base import RenderFramework, RenderMode, SofaEnv
 
 from surgical_contracts import (
     Axis,
+    MoveSequenceRequest,
     Point3D,
     RobotState,
     SimulationCameraControlRequest,
@@ -205,6 +206,11 @@ class EntryPointReachEnv(SofaEnv):
             absolute=absolute,
             speed_mm_s=speed_mm_s,
         )
+
+    def move_sequence(self, request: MoveSequenceRequest) -> str:
+        """Start one prevalidated sequence as a single continuous motion."""
+
+        return self.controller.move_sequence(request)
 
     def _do_action(self, _unused_action: Any) -> None:
         self._last_step = self.controller.step()

@@ -28,6 +28,7 @@ class SimulationMotionPolicyConfig:
     joint_speed_deg_s: float
     joint_acceleration_deg_s2: float
     max_rotation_deg: float
+    sequence_blend_radius_mm: float
     workspace_low_mm: tuple[float, float, float]
     workspace_high_mm: tuple[float, float, float]
     auto_execute_delay_s: float
@@ -84,12 +85,18 @@ def load_simulation_motion_policy(
         joint_speed_deg_s=positive("joint_speed_deg_s"),
         joint_acceleration_deg_s2=positive("joint_acceleration_deg_s2"),
         max_rotation_deg=positive("maximum_rotation_deg"),
+        sequence_blend_radius_mm=float(section["sequence_blend_radius_mm"]),
         workspace_low_mm=workspace_low_mm,
         workspace_high_mm=workspace_high_mm,
         auto_execute_delay_s=positive("auto_execute_delay_s"),
     )
     if policy.move_speed_mm_s > policy.max_speed_mm_s:
         raise ValueError("simulation default speed cannot exceed its maximum speed")
+    if (
+        not isfinite(policy.sequence_blend_radius_mm)
+        or policy.sequence_blend_radius_mm < 0
+    ):
+        raise ValueError("simulation sequence blend radius must be finite and nonnegative")
     if not policy.tcp_name:
         raise ValueError("entry_point_env.tcp_name cannot be empty")
     return policy
