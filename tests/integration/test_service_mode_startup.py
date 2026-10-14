@@ -199,7 +199,8 @@ def test_syntax_of_all_service_scripts() -> None:
     scripts = APP_ROOT / "scripts" / "services"
     result = subprocess.run(
         ["bash", "-n", *(str(scripts / name) for name in (
-            "start_all.sh", "start_real_mirror_pilot.sh", "test_real_mirror_sofa.sh",
+            "start_all.sh", "stop_all.sh", "start_real_mirror_pilot.sh",
+            "test_real_mirror_sofa.sh",
             "health_check.sh", "status.sh", "logs.sh"
         ))],
         capture_output=True,

@@ -6,6 +6,9 @@ APP_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 BUNDLE_ROOT="$(cd "$APP_ROOT/.." && pwd -P)"
 RUNTIME_ROOT="$BUNDLE_ROOT/runtime/envs"
 LOG_DIR="$APP_ROOT/logs/services"
+SERVICE_STATE_DIR="${SERVICE_STATE_DIR:-$APP_ROOT/run/services}"
+SUPERVISOR_PID_FILE="$SERVICE_STATE_DIR/start_all.pid"
+INFERENCE_MODE_FILE="$SERVICE_STATE_DIR/inference_mode"
 
 # shellcheck source=scripts/services/interns2_config.sh
 source "$SCRIPT_DIR/interns2_config.sh"
@@ -42,6 +45,16 @@ cd "$APP_ROOT"
 
 PIDS=()
 
+clear_supervisor_state() {
+    local recorded_pid=""
+    if [[ -r "$SUPERVISOR_PID_FILE" ]]; then
+        IFS= read -r recorded_pid < "$SUPERVISOR_PID_FILE" || true
+    fi
+    if [[ "$recorded_pid" == "$$" ]]; then
+        rm -f -- "$SUPERVISOR_PID_FILE" "$INFERENCE_MODE_FILE"
+    fi
+}
+
 cleanup() {
     trap - INT TERM EXIT
 
@@ -63,6 +76,7 @@ cleanup() {
     done
 
     wait 2>/dev/null || true
+    clear_supervisor_state
 
     echo "All services stopped."
 }
@@ -406,7 +420,7 @@ fi
 
 check_ports_free || fail "Refusing to launch beside an existing service stack."
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$SERVICE_STATE_DIR"
 
 if [[ "$INTERNS2_INFERENCE_MODE" == local ]]; then
     echo "Intern-S2 model = OK"
@@ -436,6 +450,8 @@ echo "frontend dist   = OK"
 echo
 
 trap cleanup INT TERM EXIT
+printf '%s\n' "$$" > "$SUPERVISOR_PID_FILE"
+printf '%s\n' "$INTERNS2_INFERENCE_MODE" > "$INFERENCE_MODE_FILE"
 
 
 # --------------------------------------------------

@@ -34,6 +34,7 @@ class ServiceScriptsTest(unittest.TestCase):
         scripts = (
             "interns2_config.sh",
             "start_all.sh",
+            "stop_all.sh",
             "health_check.sh",
             "status.sh",
             "logs.sh",
@@ -202,6 +203,71 @@ class ServiceScriptsTest(unittest.TestCase):
             content,
         )
         self.assertIn('if [[ "$INTERNS2_INFERENCE_MODE" == local ]]', content)
+
+    def test_stop_all_targets_only_the_start_all_supervisor(self) -> None:
+        start = (SERVICE_SCRIPTS / "start_all.sh").read_text(encoding="utf-8")
+        stop = (SERVICE_SCRIPTS / "stop_all.sh").read_text(encoding="utf-8")
+
+        self.assertIn('SUPERVISOR_PID_FILE="$SERVICE_STATE_DIR/start_all.pid"', start)
+        self.assertIn('printf \'%s\\n\' "$$" > "$SUPERVISOR_PID_FILE"', start)
+        self.assertIn('printf \'%s\\n\' "$INTERNS2_INFERENCE_MODE"', start)
+        self.assertIn('PIDS+=("$INFERENCE_PID")', start)
+        self.assertIn('kill -TERM "$SUPERVISOR_PID"', stop)
+        self.assertNotIn("pkill", stop)
+        self.assertNotIn("INFERENCE_PID", stop)
+        self.assertNotIn("23333", stop)
+
+    def test_stop_all_api_mode_leaves_external_process_running(self) -> None:
+        external = subprocess.Popen(["sleep", "30"])
+        supervisor = None
+        try:
+            supervisor = subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    'trap "exit 0" TERM; while :; do sleep 1; done',
+                    "scripts/services/start_all.sh",
+                ],
+                cwd=APP_ROOT,
+            )
+            with tempfile.TemporaryDirectory() as directory:
+                state_dir = Path(directory)
+                (state_dir / "start_all.pid").write_text(
+                    f"{supervisor.pid}\n",
+                    encoding="utf-8",
+                )
+                (state_dir / "inference_mode").write_text(
+                    "api\n",
+                    encoding="utf-8",
+                )
+                environment = os.environ.copy()
+                environment.update({
+                    "SERVICE_STATE_DIR": str(state_dir),
+                    "STOP_TIMEOUT_SECONDS": "5",
+                })
+                result = subprocess.run(
+                    ["bash", str(SERVICE_SCRIPTS / "stop_all.sh")],
+                    cwd=APP_ROOT,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "external InternS2 API/model service is still running",
+                result.stdout,
+            )
+            supervisor.wait(timeout=2)
+            self.assertIsNone(external.poll())
+        finally:
+            if supervisor is not None and supervisor.poll() is None:
+                supervisor.terminate()
+                supervisor.wait(timeout=2)
+            if external.poll() is None:
+                external.terminate()
+            external.wait(timeout=2)
 
 
 if __name__ == "__main__":
