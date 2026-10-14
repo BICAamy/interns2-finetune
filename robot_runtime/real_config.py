@@ -144,6 +144,12 @@ class ArrivalCriteria(_StrictModel):
     dwell_ms: int | None = Field(default=None, gt=0)
 
 
+class InteractionConfig(_StrictModel):
+    """Browser interaction timing; it does not weaken motion safety checks."""
+
+    auto_execute_delay_s: float = Field(default=0.5, gt=0, le=60)
+
+
 class RealRobotConfig(_StrictModel):
     schema_version: Literal["1.0"] = "1.0"
     controller: ControllerConfig = Field(default_factory=ControllerConfig)
@@ -154,6 +160,7 @@ class RealRobotConfig(_StrictModel):
     motion: MotionCommandConfig = Field(default_factory=MotionCommandConfig)
     deadlines: Deadlines = Field(default_factory=Deadlines)
     arrival: ArrivalCriteria = Field(default_factory=ArrivalCriteria)
+    interaction: InteractionConfig = Field(default_factory=InteractionConfig)
 
     def blocking_fields(self) -> tuple[str, ...]:
         """Missing calibration/limits prevent any later motion authorization."""

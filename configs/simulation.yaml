@@ -13,11 +13,12 @@ entry_point_env:
   joint_acceleration_deg_s2: 30.0 # 关节相对旋转加速度
   maximum_rotation_deg: 720.0 # 与真机 limits.max_rotation_deg 一致
   trajectory_history_limit: 2048 # 最多保留 2048 个历史轨迹点
+  auto_execute_delay_s: 0.5 # 解析完成后留给用户取消的时间；超时自动执行
 
   # workspace是一个长方体，对应xyz三个方向；与当前真机配置保持一致
   workspace:
-    low_mm: [100.0, -1000.0, 100.0]
-    high_mm: [1000.0, 1000.0, 1500.0]
+    low_mm: [200.0, -1000.0, 100.0]
+    high_mm: [1000.0, 1000.0, 800.0]
 
   robot:
     model_name: E05-Pro # 机器人名字

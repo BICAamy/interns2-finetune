@@ -38,9 +38,9 @@ class SessionStatus(str, Enum):
 STATUS_LABELS: dict[SessionStatus, str] = {
     SessionStatus.READY: "等待输入",
     SessionStatus.PARSING: "正在解析指令",
-    SessionStatus.AWAITING_CONFIRMATION: "已提取任务，等待医生确认",
+    SessionStatus.AWAITING_CONFIRMATION: "解析完成，即将自动执行",
     SessionStatus.CLARIFICATION_REQUIRED: "需要补充信息",
-    SessionStatus.EXECUTING: "任务已确认，准备执行",
+    SessionStatus.EXECUTING: "任务已进入执行流程",
     SessionStatus.MOVING_TO_ENTRY: "正在移动到入点",
     SessionStatus.VERIFYING_ENTRY: "正在复核机械臂入点位置",
     SessionStatus.MOVING_RELATIVE: "正在执行相对移动",
@@ -105,6 +105,12 @@ class SessionSnapshot(WebModel):
     error: dict[str, Any] | None = None
 
 
+class RobotModeSettings(WebModel):
+    workspace_low_mm: tuple[float, float, float] | None = None
+    workspace_high_mm: tuple[float, float, float] | None = None
+    auto_execute_delay_ms: int = Field(ge=1, le=60_000)
+
+
 class HealthResponse(WebModel):
     status: Literal["healthy"] = "healthy"
     service: Literal["agent-web"] = "agent-web"
@@ -117,6 +123,7 @@ class HealthResponse(WebModel):
     sessions: int = Field(ge=0)
     downstream: dict[str, str]
     asr: ASRStatus
+    robot_mode_settings: dict[str, RobotModeSettings] = Field(default_factory=dict)
 
 
 class SimulationTelemetryView(WebModel):

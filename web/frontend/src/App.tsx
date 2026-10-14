@@ -1,14 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type {
-  AnimationEvent as ReactAnimationEvent,
-  PointerEvent as ReactPointerEvent,
-} from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import { api, fileToDataUrl, openSessionSocket } from "./api";
 import type {
-  ASRStatus,
   CameraControlPayload,
   CameraPreset,
   Point3D,
+  RobotModeSettings,
   SessionSnapshot,
   SimulationCameraState,
   SimulationTelemetry,
@@ -34,18 +31,6 @@ const cameraPresets: Array<{ id: CameraPreset; label: string }> = [
   { id: "top", label: "俯视" },
   { id: "isometric", label: "等轴测" },
 ];
-
-const audioMimeCandidates = [
-  "audio/webm;codecs=opus",
-  "audio/webm",
-  "audio/ogg;codecs=opus",
-  "audio/mp4",
-];
-
-function supportedAudioMimeType(): string | undefined {
-  if (typeof MediaRecorder === "undefined") return undefined;
-  return audioMimeCandidates.find((value) => MediaRecorder.isTypeSupported(value));
-}
 
 function CoordinateCard({ title, point }: { title: string; point: any }) {
   return (
@@ -236,28 +221,15 @@ function AmbientWaveBackground() {
   );
 }
 
-function triggerPanelJelly(event: ReactPointerEvent<HTMLElement>) {
-  if (event.button !== 0) return;
-  const target = event.target as HTMLElement;
-  if (target.closest("button, textarea, input, select, label, a, summary")) return;
-  const panel = event.currentTarget;
-  panel.classList.remove("panel-jelly");
-  void panel.offsetWidth;
-  panel.classList.add("panel-jelly");
-}
-
-function finishPanelJelly(event: ReactAnimationEvent<HTMLElement>) {
-  if (event.target === event.currentTarget && event.animationName === "panel-jelly") {
-    event.currentTarget.classList.remove("panel-jelly");
-  }
-}
-
 export default function App() {
   const [session, setSession] = useState<SessionSnapshot | null>(null);
   const [runtimeMode, setRuntimeMode] = useState<"simulation" | "real">("simulation");
   const [availableModes, setAvailableModes] = useState<Array<"simulation" | "real">>([
     "simulation",
   ]);
+  const [modeSettings, setModeSettings] = useState<
+    Partial<Record<"simulation" | "real", RobotModeSettings>>
+  >({});
   const [modeBusy, setModeBusy] = useState(false);
   const [enableBusy, setEnableBusy] = useState(false);
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
@@ -273,11 +245,8 @@ export default function App() {
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [trajectoryBusy, setTrajectoryBusy] = useState(false);
   const [trajectoryNotice, setTrajectoryNotice] = useState<string | null>(null);
-  const [asrStatus, setAsrStatus] = useState<ASRStatus | null>(null);
-  const [recording, setRecording] = useState(false);
-  const [speechBusy, setSpeechBusy] = useState(false);
-  const [recordingElapsedMs, setRecordingElapsedMs] = useState(0);
-  const [speechError, setSpeechError] = useState<string | null>(null);
+  const [autoExecuteRemainingMs, setAutoExecuteRemainingMs] = useState<number | null>(null);
+  const [autoExecuting, setAutoExecuting] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
   const cameraDrag = useRef<{
     pointerId: number;
@@ -288,11 +257,7 @@ export default function App() {
   const cameraRequestInFlight = useRef(false);
   const lastCameraSendAt = useRef(0);
   const videoStageRef = useRef<HTMLDivElement | null>(null);
-  const mediaRecorder = useRef<MediaRecorder | null>(null);
-  const microphoneStream = useRef<MediaStream | null>(null);
-  const audioChunks = useRef<Blob[]>([]);
-  const recordingStartedAt = useRef(0);
-  const recordingTimer = useRef<number | null>(null);
+  const autoExecuteToken = useRef(0);
   const lastRobotMode = useRef<"simulation" | "real">("simulation");
 
   useEffect(() => {
@@ -301,6 +266,7 @@ export default function App() {
       .then((health) => {
         if (!cancelled) {
           setAvailableModes(health.available_robot_modes);
+          setModeSettings(health.robot_mode_settings);
         }
       })
       .catch((error) => {
@@ -378,35 +344,6 @@ export default function App() {
   }, [session?.session_id]);
 
   useEffect(() => {
-    let cancelled = false;
-    api.asrStatus()
-      .then((status) => {
-        if (!cancelled) setAsrStatus(status);
-      })
-      .catch((error) => {
-        if (!cancelled) setSpeechError(String(error));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (recordingTimer.current !== null) {
-        window.clearInterval(recordingTimer.current);
-      }
-      if (mediaRecorder.current?.state === "recording") {
-        mediaRecorder.current.ondataavailable = null;
-        mediaRecorder.current.onstop = null;
-        mediaRecorder.current.onerror = null;
-        mediaRecorder.current.stop();
-      }
-      microphoneStream.current?.getTracks().forEach((track) => track.stop());
-    };
-  }, []);
-
-  useEffect(() => {
     if (!session?.session_id || runtimeMode === null) return;
     let cancelled = false;
     api.camera(session.session_id)
@@ -452,15 +389,11 @@ export default function App() {
       prompt.trim() &&
       !isBusy &&
       !session.pending_confirmation &&
-      !recording &&
-      !speechBusy &&
       !realStale,
   );
-  const canRecord = Boolean(
-    session &&
-      asrStatus?.available &&
-      !speechBusy,
-  );
+  const activeModeSettings = modeSettings[runtimeMode];
+  const workspaceLow = activeModeSettings?.workspace_low_mm;
+  const workspaceHigh = activeModeSettings?.workspace_high_mm;
   const entry = (command?.entry_point ?? telemetry?.entry_point) as Point3D | undefined;
   const target = (command?.target_point ?? telemetry?.target_point) as Point3D | undefined;
   const currentTcp = telemetry?.current_tcp ?? session?.current_tcp;
@@ -476,6 +409,58 @@ export default function App() {
     return "neutral";
   }, [session, isBusy]);
 
+  useEffect(() => {
+    if (!session?.pending_confirmation || !activeModeSettings) {
+      setAutoExecuteRemainingMs(null);
+      setAutoExecuting(false);
+      return;
+    }
+    if (runtimeMode === "real" && (telemetry?.enabled !== true || realStale)) {
+      setAutoExecuteRemainingMs(null);
+      return;
+    }
+
+    const token = ++autoExecuteToken.current;
+    const delayMs = activeModeSettings.auto_execute_delay_ms;
+    const deadline = performance.now() + delayMs;
+    setAutoExecuteRemainingMs(delayMs);
+
+    const countdown = window.setInterval(() => {
+      setAutoExecuteRemainingMs(Math.max(0, Math.ceil(deadline - performance.now())));
+    }, 50);
+    const timer = window.setTimeout(async () => {
+      window.clearInterval(countdown);
+      if (autoExecuteToken.current !== token) return;
+      setAutoExecuteRemainingMs(0);
+      setAutoExecuting(true);
+      setRequestError(null);
+      try {
+        const snapshot = await api.confirm(session.session_id, proposal?.fingerprint);
+        if (autoExecuteToken.current === token) setSession(snapshot);
+      } catch (error) {
+        if (autoExecuteToken.current === token) {
+          setRequestError(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (autoExecuteToken.current === token) setAutoExecuting(false);
+      }
+    }, delayMs);
+
+    return () => {
+      window.clearInterval(countdown);
+      window.clearTimeout(timer);
+    };
+  }, [
+    session?.session_id,
+    session?.revision,
+    session?.pending_confirmation,
+    runtimeMode,
+    activeModeSettings?.auto_execute_delay_ms,
+    proposal?.fingerprint,
+    telemetry?.enabled,
+    realStale,
+  ]);
+
   async function run(action: () => Promise<SessionSnapshot>) {
     setRequestError(null);
     try {
@@ -483,6 +468,14 @@ export default function App() {
     } catch (error) {
       setRequestError(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  async function cancelPendingExecution() {
+    if (!session?.pending_confirmation || autoExecuting) return;
+    autoExecuteToken.current += 1;
+    setAutoExecuteRemainingMs(null);
+    setAutoExecuting(false);
+    await run(() => api.action(session.session_id, "cancel"));
   }
 
   async function setRobotEnabled(enabled: boolean) {
@@ -639,116 +632,6 @@ export default function App() {
     }
   }
 
-  function releaseMicrophone() {
-    if (recordingTimer.current !== null) {
-      window.clearInterval(recordingTimer.current);
-      recordingTimer.current = null;
-    }
-    microphoneStream.current?.getTracks().forEach((track) => track.stop());
-    microphoneStream.current = null;
-    mediaRecorder.current = null;
-    setRecording(false);
-  }
-
-  async function uploadSpeech(blob: Blob, durationMs: number) {
-    if (!session) return;
-    setSpeechBusy(true);
-    setSpeechError(null);
-    setRequestError(null);
-    try {
-      const snapshot = await api.submitSpeech(
-        session.session_id,
-        blob,
-        durationMs,
-      );
-      setSession(snapshot);
-      if (snapshot.prompt) setPrompt(snapshot.prompt);
-    } catch (error) {
-      setSpeechError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setSpeechBusy(false);
-    }
-  }
-
-  async function startRecording() {
-    if (!canRecord || recording) return;
-    setSpeechError(null);
-    if (!window.isSecureContext) {
-      setSpeechError("麦克风要求安全页面，请通过 SSH 转发后使用 localhost 打开控制台。");
-      return;
-    }
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-      setSpeechError("当前浏览器不支持麦克风录音，请使用最新版 Chrome、Edge 或 Safari。");
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-        },
-        video: false,
-      });
-      const mimeType = supportedAudioMimeType();
-      const recorder = mimeType
-        ? new MediaRecorder(stream, { mimeType })
-        : new MediaRecorder(stream);
-      microphoneStream.current = stream;
-      mediaRecorder.current = recorder;
-      audioChunks.current = [];
-      recordingStartedAt.current = performance.now();
-      setRecordingElapsedMs(0);
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) audioChunks.current.push(event.data);
-      };
-      recorder.onerror = () => {
-        setSpeechError("麦克风录音失败，请检查浏览器权限后重试。");
-        recorder.onstop = null;
-        releaseMicrophone();
-      };
-      recorder.onstop = () => {
-        const durationMs = Math.max(
-          1,
-          Math.round(performance.now() - recordingStartedAt.current),
-        );
-        const blob = new Blob(audioChunks.current, {
-          type: recorder.mimeType || mimeType || "audio/webm",
-        });
-        audioChunks.current = [];
-        releaseMicrophone();
-        if (blob.size === 0) {
-          setSpeechError("没有采集到音频，请检查麦克风后重试。");
-          return;
-        }
-        void uploadSpeech(blob, durationMs);
-      };
-      recorder.start(250);
-      setRecording(true);
-      recordingTimer.current = window.setInterval(() => {
-        const elapsed = performance.now() - recordingStartedAt.current;
-        setRecordingElapsedMs(Math.round(elapsed));
-        const limitMs = (asrStatus?.max_duration_s ?? 30) * 1000;
-        if (elapsed >= limitMs - 200 && recorder.state === "recording") recorder.stop();
-      }, 100);
-    } catch (error) {
-      releaseMicrophone();
-      const name = error instanceof DOMException ? error.name : "";
-      setSpeechError(
-        name === "NotAllowedError"
-          ? "麦克风权限被拒绝。请允许当前 localhost 页面使用麦克风。"
-          : "无法打开麦克风，请确认设备未被其他程序占用。",
-      );
-    }
-  }
-
-  function stopRecording() {
-    if (mediaRecorder.current?.state === "recording") {
-      mediaRecorder.current.stop();
-    }
-  }
-
   function selectImage(file: File | null) {
     if (file && file.size > 10 * 1024 * 1024) {
       setRequestError("图像不能超过 10 MiB");
@@ -767,7 +650,7 @@ export default function App() {
           <div className="brand-mark">IS</div>
           <div>
             <h1>InternS2 手术导航控制台</h1>
-            <p>{runtimeMode === "real" ? "真实机械臂 · 网页确认控制 · 实际反馈数字孪生" : runtimeMode === "simulation" ? "E05-Pro 仿真定位 · 人工确认模式" : "正在确认机器人运行模式"}</p>
+            <p>{runtimeMode === "real" ? "真实机械臂 · 实际反馈数字孪生" : runtimeMode === "simulation" ? "E05-Pro 仿真定位" : "正在确认机器人运行模式"}</p>
           </div>
         </div>
         <div className="topbar-actions">
@@ -857,11 +740,7 @@ export default function App() {
         )}
 
         <div className="dashboard-grid">
-          <section
-            className="panel simulation-panel"
-            onPointerDown={triggerPanelJelly}
-            onAnimationEnd={finishPanelJelly}
-          >
+          <section className="panel simulation-panel">
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">01 · 真机仿真</span>
@@ -946,64 +825,28 @@ export default function App() {
                     <span>任务控制</span>
                     <h3>医生指令</h3>
                   </div>
-                  <span className="step-badge">文本 + 语音 + 可选图像</span>
+                  <span className="step-badge">文本 + 可选图像</span>
                 </div>
+                {workspaceLow && workspaceHigh && (
+                  <div className="workspace-range" aria-label="Base 坐标系可移动范围">
+                    <div>
+                      <span>Base 可移动范围</span>
+                      <strong>输入坐标须位于以下区间（mm）</strong>
+                    </div>
+                    {(["X", "Y", "Z"] as const).map((axis, index) => (
+                      <span className="workspace-axis" key={axis}>
+                        <b>{axis}</b>
+                        {workspaceLow[index].toFixed(0)} ～ {workspaceHigh[index].toFixed(0)}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <textarea
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
-              disabled={isBusy || recording || speechBusy}
+              disabled={isBusy}
               aria-label="手术导航文本指令"
             />
-            <div className={`speech-console ${recording ? "recording" : ""}`}>
-              <div className="speech-control-row">
-                <button
-                  className={`button voice ${recording ? "recording" : ""}`}
-                  disabled={recording ? false : !canRecord}
-                  onClick={recording ? stopRecording : startRecording}
-                >
-                  <span className="microphone-dot" />
-                  {recording
-                    ? `结束录音 ${(recordingElapsedMs / 1000).toFixed(1)}s`
-                    : speechBusy
-                      ? "正在转写并解析…"
-                      : "开始语音指令"}
-                </button>
-                <span className="speech-engine">
-                  {asrStatus?.available
-                    ? `${asrStatus.model} · 本地离线`
-                    : asrStatus?.unavailable_reason ?? "正在检查本地 ASR"}
-                </span>
-              </div>
-              {session?.asr_transcription && (
-                <div
-                  className={`transcription-result ${session.asr_transcription.low_confidence ? "warning" : ""}`}
-                >
-                  <div>
-                    <span>最终转写</span>
-                    <strong>{session.asr_transcription.text}</strong>
-                  </div>
-                  <div className="transcription-metrics">
-                    <span>
-                      置信度 {(session.asr_transcription.confidence * 100).toFixed(1)}%
-                    </span>
-                    <span>语言 {session.asr_transcription.language}</span>
-                    <span>ASR {session.asr_transcription.asr_latency_ms} ms</span>
-                    {session.asr_transcription.end_to_end_latency_ms !== null && (
-                      <span>端到端 {session.asr_transcription.end_to_end_latency_ms} ms</span>
-                    )}
-                    {session.asr_transcription.safety_action && (
-                      <span className="fast-action">
-                        已走{session.asr_transcription.safety_action === "estop" ? "急停" : "停止"}快速通道
-                      </span>
-                    )}
-                  </div>
-                  {session.asr_transcription.low_confidence && (
-                    <p>低置信度：请逐字核对数字、正负号、单位与 XYZ 顺序后再确认。</p>
-                  )}
-                </div>
-              )}
-              {speechError && <div className="speech-error">{speechError}</div>}
-            </div>
             <label className="upload-zone">
               <input
                 type="file"
@@ -1024,18 +867,15 @@ export default function App() {
                 {session?.status === "parsing" ? "正在解析…" : "解析任务"}
               </button>
               <button
-                className="button confirm"
-                disabled={!session?.pending_confirmation || (runtimeMode === "real" && (telemetry?.enabled !== true || realStale))}
-                onClick={() => session && run(() => api.confirm(session.session_id, proposal?.fingerprint))}
-              >
-                {runtimeMode === "real" ? (telemetry?.enabled ? "确认执行" : "请先使能机械臂") : "确认并执行"}
-              </button>
-              <button
                 className="button secondary"
-                disabled={!session?.pending_confirmation}
-                onClick={() => session && run(() => api.action(session.session_id, "cancel"))}
+                disabled={!session?.pending_confirmation || autoExecuting}
+                onClick={() => void cancelPendingExecution()}
               >
-                取消
+                {autoExecuting
+                  ? "正在提交…"
+                  : session?.pending_confirmation
+                    ? "取消本次执行"
+                    : "取消"}
               </button>
               <button
                 className="button secondary"
@@ -1045,9 +885,24 @@ export default function App() {
                 复位急停
               </button>
             </div>
+            {session?.pending_confirmation && (
+              <div className="auto-execute-notice" role="status">
+                <span className="auto-execute-spinner" />
+                <div>
+                  <strong>
+                    {autoExecuting
+                      ? "正在提交执行"
+                      : autoExecuteRemainingMs === null
+                        ? "等待真实机械臂进入可执行状态"
+                        : `${(autoExecuteRemainingMs / 1000).toFixed(1)} 秒后自动执行`}
+                  </strong>
+                  <span>如需停止本次任务，请立即点击“取消本次执行”。</span>
+                </div>
+              </div>
+            )}
             <div className="safety-note">
               <strong>执行边界</strong>
-              <span>{runtimeMode === "real" ? "所有移动与旋转统一为 MotionSequence；网页只确认一次 fingerprint，Mac 按每一步真实起点复算并检查 YAML 限制。" : "所有移动与旋转统一为 MotionSequence；穿刺任务只移动到入点并请求不可执行的路径预览。"}</span>
+              <span>{runtimeMode === "real" ? "所有移动与旋转统一为 MotionSequence；倒计时结束后自动提交 fingerprint，Mac 按每一步真实起点复算并检查 YAML 限制。" : "所有移动与旋转统一为 MotionSequence；解析后按配置倒计时自动执行，穿刺任务只移动到入点并请求不可执行的路径预览。"}</span>
               {runtimeMode === "real" && proposal?.fingerprint && (
                 <code>fingerprint {proposal.fingerprint}</code>
               )}
@@ -1056,11 +911,7 @@ export default function App() {
             </div>
           </section>
 
-          <section
-            className="panel telemetry-panel"
-            onPointerDown={triggerPanelJelly}
-            onAnimationEnd={finishPanelJelly}
-          >
+          <section className="panel telemetry-panel">
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">02 · 运行遥测</span>
@@ -1137,11 +988,7 @@ export default function App() {
               </aside>}
           </section>
 
-          <section
-            className="panel coordinates-panel"
-            onPointerDown={triggerPanelJelly}
-            onAnimationEnd={finishPanelJelly}
-          >
+          <section className="panel coordinates-panel">
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">03 · 任务预览</span>
@@ -1171,11 +1018,7 @@ export default function App() {
             )}
           </section>
 
-          <section
-            className="panel timeline-panel"
-            onPointerDown={triggerPanelJelly}
-            onAnimationEnd={finishPanelJelly}
-          >
+          <section className="panel timeline-panel">
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">04 · 确定性编排</span>
@@ -1191,7 +1034,7 @@ export default function App() {
 
       <footer>
         <span>InternS2 Surgical Navigation · {runtimeMode === "real" ? "REAL / WEB CONTROL" : "SIMULATION"}</span>
-        <strong>{runtimeMode === "real" ? "使能状态来自真实反馈 · 运动需单次 fingerprint 确认" : "当前版本未执行穿刺"}</strong>
+        <strong>{runtimeMode === "real" ? "使能状态来自真实反馈 · 解析后按配置自动执行" : "当前版本未执行穿刺"}</strong>
       </footer>
     </div>
   );

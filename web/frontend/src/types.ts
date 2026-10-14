@@ -78,6 +78,12 @@ export interface TextCommandPayload {
   image_name?: string;
 }
 
+export interface RobotModeSettings {
+  workspace_low_mm: [number, number, number] | null;
+  workspace_high_mm: [number, number, number] | null;
+  auto_execute_delay_ms: number;
+}
+
 export interface Point3D {
   x: number;
   y: number;

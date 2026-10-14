@@ -28,6 +28,9 @@ class SimulationMotionPolicyConfig:
     joint_speed_deg_s: float
     joint_acceleration_deg_s2: float
     max_rotation_deg: float
+    workspace_low_mm: tuple[float, float, float]
+    workspace_high_mm: tuple[float, float, float]
+    auto_execute_delay_s: float
 
 
 def load_simulation_motion_policy(
@@ -53,6 +56,22 @@ def load_simulation_motion_policy(
             raise ValueError(f"entry_point_env.{name} must be an integer from 1 to 6")
         return value
 
+    def triple(name: str, value: Any) -> tuple[float, float, float]:
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            raise ValueError(f"entry_point_env.{name} must contain three numbers")
+        result = tuple(float(item) for item in value)
+        if any(not isfinite(item) for item in result):
+            raise ValueError(f"entry_point_env.{name} must contain finite numbers")
+        return result  # type: ignore[return-value]
+
+    workspace = section.get("workspace")
+    if not isinstance(workspace, dict):
+        raise ValueError("entry_point_env.workspace must be a mapping")
+    workspace_low_mm = triple("workspace.low_mm", workspace.get("low_mm"))
+    workspace_high_mm = triple("workspace.high_mm", workspace.get("high_mm"))
+    if any(low >= high for low, high in zip(workspace_low_mm, workspace_high_mm)):
+        raise ValueError("simulation workspace lower bounds must be below upper bounds")
+
     policy = SimulationMotionPolicyConfig(
         tcp_name=str(section["tcp_name"]).strip(),
         entry_tolerance_mm=positive("reach_tolerance_mm"),
@@ -65,6 +84,9 @@ def load_simulation_motion_policy(
         joint_speed_deg_s=positive("joint_speed_deg_s"),
         joint_acceleration_deg_s2=positive("joint_acceleration_deg_s2"),
         max_rotation_deg=positive("maximum_rotation_deg"),
+        workspace_low_mm=workspace_low_mm,
+        workspace_high_mm=workspace_high_mm,
+        auto_execute_delay_s=positive("auto_execute_delay_s"),
     )
     if policy.move_speed_mm_s > policy.max_speed_mm_s:
         raise ValueError("simulation default speed cannot exceed its maximum speed")

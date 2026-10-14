@@ -70,3 +70,6 @@ arrival:
   orientation_tolerance_deg: 2.0
   stable_samples: 5
   dwell_ms: 500
+
+interaction:
+  auto_execute_delay_s: 0.5 # 解析完成后留给用户取消的时间；超时自动执行

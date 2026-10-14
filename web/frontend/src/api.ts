@@ -6,6 +6,7 @@ import type {
   SimulationTelemetry,
   TextCommandPayload,
   TrajectoryClearResult,
+  RobotModeSettings,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -28,6 +29,7 @@ export const api = {
     runtime_mode: "simulation" | "real";
     default_robot_mode: "simulation" | "real";
     available_robot_modes: Array<"simulation" | "real">;
+    robot_mode_settings: Partial<Record<"simulation" | "real", RobotModeSettings>>;
   }>("/health"),
   createSession: () =>
     request<SessionSnapshot>("/api/sessions", { method: "POST" }),

@@ -63,3 +63,6 @@ arrival: # 怎样判断机器人真的到位
   orientation_tolerance_deg: null # 朝向最多能差多少，单位：deg
   stable_samples: null # 连续多少次状态都满足要求；至少填 2
   dwell_ms: null # 到位后还要保持多久，单位：ms
+
+interaction:
+  auto_execute_delay_s: 0.5 # 解析完成后等待多久自动执行，期间用户可以取消

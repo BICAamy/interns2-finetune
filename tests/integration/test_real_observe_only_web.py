@@ -213,6 +213,8 @@ def test_real_and_simulation_motion_values_match_but_load_independently() -> Non
         == real_config.motion.joint_acceleration_deg_s2
     )
     assert simulation_policy.max_rotation_deg == real_config.limits.max_rotation_deg
+    assert simulation_policy.auto_execute_delay_s == 0.5
+    assert real_config.interaction.auto_execute_delay_s == 0.5
     assert real_config.deadlines.real_mode_fallback_ms == 5000
 
     simulation_data = yaml.safe_load(
@@ -338,6 +340,16 @@ def test_transient_real_disconnect_stays_real_and_clears_recovery_state() -> Non
         health = client.get("/health").json()
         assert health["default_robot_mode"] == "simulation"
         assert health["available_robot_modes"] == ["real", "simulation"]
+        assert health["robot_mode_settings"]["simulation"] == {
+            "workspace_low_mm": [200.0, -1000.0, 100.0],
+            "workspace_high_mm": [1000.0, 1000.0, 800.0],
+            "auto_execute_delay_ms": 500,
+        }
+        assert health["robot_mode_settings"]["real"] == {
+            "workspace_low_mm": [200.0, -1000.0, 100.0],
+            "workspace_high_mm": [1000.0, 1000.0, 800.0],
+            "auto_execute_delay_ms": 500,
+        }
 
         session = client.post("/api/sessions").json()
         session_id = session["session_id"]

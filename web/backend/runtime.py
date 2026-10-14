@@ -131,9 +131,9 @@ class WebRuntime:
         parser_was_provided = parser is not None
         configured_mode = RuntimeMode(settings.runtime_mode)
         fallback_url = settings.robot_simulation_fallback_base_url
-        simulation_policy = None
-        if configured_mode == RuntimeMode.SIMULATION or fallback_url:
-            simulation_policy = load_simulation_motion_policy()
+        # The browser can switch modes, so its shared UI policy always needs
+        # the independently loaded simulation bounds and interaction timing.
+        simulation_policy = load_simulation_motion_policy()
         if configured_mode == RuntimeMode.SIMULATION:
             assert simulation_policy is not None
             settings = replace(
@@ -356,6 +356,24 @@ class WebRuntime:
             if RuntimeMode.SIMULATION in self._robots
             else configured_mode
         )
+        self._robot_mode_settings: dict[str, dict[str, Any]] = {}
+        self._robot_mode_settings[RuntimeMode.SIMULATION.value] = {
+            "workspace_low_mm": simulation_policy.workspace_low_mm,
+            "workspace_high_mm": simulation_policy.workspace_high_mm,
+            "auto_execute_delay_ms": round(
+                simulation_policy.auto_execute_delay_s * 1000
+            ),
+        }
+        if self._real_config is not None:
+            real_low = self._real_config.limits.workspace_low_mm
+            real_high = self._real_config.limits.workspace_high_mm
+            self._robot_mode_settings[RuntimeMode.REAL.value] = {
+                "workspace_low_mm": real_low,
+                "workspace_high_mm": real_high,
+                "auto_execute_delay_ms": round(
+                    self._real_config.interaction.auto_execute_delay_s * 1000
+                ),
+            }
         self._tasks: set[asyncio.Task[Any]] = set()
         self._motion_origins: dict[str, Point3D] = {}
         self._fps_samples: dict[str, tuple[int, float, float]] = {}
@@ -956,6 +974,7 @@ class WebRuntime:
                 "planner_adapter": self.settings.planner_adapter_base_url,
             },
             asr=self.asr.status(),
+            robot_mode_settings=self._robot_mode_settings,
         )
 
     def asr_status(self) -> ASRStatus:
@@ -1226,19 +1245,28 @@ class WebRuntime:
                 record.pending_command = None
                 record.message = parsed.clarification or "需要补充信息"
             else:
-                # Web execution always requires an explicit human confirmation,
-                # even when the parser considers a relative command unambiguous.
+                # Keep the existing confirmation boundary as a short cancellable
+                # staging state. The browser submits the same fingerprint after
+                # the per-mode YAML delay unless the operator cancels first.
                 record.status = SessionStatus.AWAITING_CONFIRMATION
                 record.pending_command = parsed.command
-                record.message = "请核对结构化任务，确认后才会调用机械臂"
+                delay_ms = self._robot_mode_settings[
+                    selected_mode.value
+                ]["auto_execute_delay_ms"]
+                record.message = (
+                    f"结构化任务已生成；{delay_ms / 1000:g} 秒内未取消将自动执行"
+                )
                 if motion_proposal is not None:
-                    record.message = "不可执行 proposal 已生成；核对 fingerprint 后确认一次即可"
+                    record.message = (
+                        "不可执行 proposal 已生成；"
+                        f"{delay_ms / 1000:g} 秒内未取消将自动提交当前 fingerprint"
+                    )
                 if (
                     asr_transcription is not None
                     and asr_transcription.low_confidence
                 ):
                     record.message = (
-                        "语音置信度较低，请逐字核对转写与坐标；确认后才会调用机械臂"
+                        "语音置信度较低，请逐字核对；自动执行前请立即取消错误结果"
                     )
 
         return self.store.mutate(session_id, finish)
@@ -1270,7 +1298,7 @@ class WebRuntime:
             record.active_command_id = command.command_id
             record.status = SessionStatus.EXECUTING
             record.live_tool_events = []
-            record.message = "任务已确认，准备调用机械臂"
+            record.message = "自动执行倒计时结束，准备调用机械臂"
             record.error = None
 
         snapshot = self.store.mutate(session_id, begin)
@@ -1330,7 +1358,7 @@ class WebRuntime:
                 raise SessionConflict("only a command awaiting confirmation can be cancelled")
             record.pending_command = None
             record.status = SessionStatus.CANCELLED
-            record.message = "待确认任务已取消；未调用任何工具"
+            record.message = "自动执行已取消；未调用任何工具"
 
         return self.store.mutate(session_id, operation)
 
