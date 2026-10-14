@@ -32,126 +32,6 @@ const cameraPresets: Array<{ id: CameraPreset; label: string }> = [
   { id: "isometric", label: "等轴测" },
 ];
 
-function CoordinateCard({ title, point }: { title: string; point: any }) {
-  return (
-    <div className="coordinate-card">
-      <span>{title}</span>
-      {point ? (
-        <strong>
-          X {Number(point.x).toFixed(2)} · Y {Number(point.y).toFixed(2)} · Z{" "}
-          {Number(point.z).toFixed(2)} <small>{point.unit ?? "mm"}</small>
-        </strong>
-      ) : (
-        <strong className="muted">未提供</strong>
-      )}
-      <small>{point?.frame ?? "—"}</small>
-    </div>
-  );
-}
-
-function describeMotionStep(step: Record<string, any>): string {
-  const vector = (values: unknown) =>
-    Array.isArray(values) ? values.map((value) => Number(value).toFixed(2)).join(", ") : "—";
-  switch (step.kind) {
-    case "cartesian_relative":
-      return `Base ΔXYZ [${vector(step.translation_mm)}] mm`;
-    case "cartesian_absolute":
-      return `Base XYZ [${vector(step.target_position_mm)}] mm（保持实际姿态）`;
-    case "joint_relative":
-      return `J${step.joint_index} ${Number(step.rotation_deg) >= 0 ? "+" : ""}${Number(step.rotation_deg)}°`;
-    case "joint_absolute":
-      return `J${step.joint_index} 到 ${Number(step.target_angle_deg)}°`;
-    case "tcp_rotation_relative":
-      return `TCP 绕 Base ${String(step.rotation_axis).toUpperCase()} 相对旋转 ${Number(step.rotation_deg) >= 0 ? "+" : ""}${Number(step.rotation_deg)}°`;
-    case "tcp_rotation_absolute":
-      return `TCP 的 Base RPY ${String(step.rotation_axis).toUpperCase()} 分量设为 ${Number(step.target_angle_deg)}°`;
-    default:
-      return String(step.kind ?? "未知运动步骤");
-  }
-}
-
-function stateLabel(value: boolean | null | undefined): string {
-  if (value == null) return "未知";
-  return value ? "是" : "否";
-}
-
-function Timeline({ events }: { events: Array<Record<string, any>> }) {
-  if (!events.length) {
-    return <div className="empty-state">提交任务后，这里会显示工具调用时间线。</div>;
-  }
-  return (
-    <ol className="timeline">
-      {events.map((event, index) => {
-        const name = event.event ?? `${event.tool}.${event.phase}`;
-        const status = event.status ?? event.phase;
-        return (
-          <li key={`${name}-${event.sequence ?? index}-${event.timestamp_ms}`}>
-            <span className={`timeline-dot ${status}`} />
-            <div>
-              <strong>{name}</strong>
-              <span>
-                {event.timestamp_ms ? new Date(event.timestamp_ms).toLocaleTimeString() : ""}
-                {event.duration_ms !== undefined ? ` · ${event.duration_ms} ms` : ""}
-              </span>
-            </div>
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
-
-function TrajectoryPlot({ telemetry }: { telemetry: SimulationTelemetry | null }) {
-  const trajectory = telemetry?.trajectory_mm ?? [];
-  if (trajectory.length < 2) {
-    return <div className="trajectory-empty">机械臂运动后显示 X–Z 轨迹</div>;
-  }
-  const reference = [
-    ...trajectory,
-    ...(telemetry?.entry_point
-      ? [[telemetry.entry_point.x, telemetry.entry_point.y, telemetry.entry_point.z] as [number, number, number]]
-      : []),
-  ];
-  const xs = reference.map((point) => point[0]);
-  const zs = reference.map((point) => point[2]);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minZ = Math.min(...zs);
-  const maxZ = Math.max(...zs);
-  const rangeX = Math.max(1, maxX - minX);
-  const rangeZ = Math.max(1, maxZ - minZ);
-  const project = (point: [number, number, number]) =>
-    `${12 + ((point[0] - minX) / rangeX) * 216},${108 - ((point[2] - minZ) / rangeZ) * 96}`;
-  const entry = telemetry?.entry_point;
-  const current = telemetry?.current_tcp;
-
-  return (
-    <div className="trajectory-plot">
-      <svg viewBox="0 0 240 120" role="img" aria-label="机械臂 X-Z 平面轨迹">
-        <path className="plot-grid" d="M12 12V108H228M12 60H228M120 12V108" />
-        <polyline points={trajectory.map(project).join(" ")} />
-        {entry && (
-          <circle
-            className="entry-marker"
-            cx={Number(project([entry.x, entry.y, entry.z]).split(",")[0])}
-            cy={Number(project([entry.x, entry.y, entry.z]).split(",")[1])}
-            r="4"
-          />
-        )}
-        {current && (
-          <circle
-            className="tcp-marker"
-            cx={Number(project([current.x, current.y, current.z]).split(",")[0])}
-            cy={Number(project([current.x, current.y, current.z]).split(",")[1])}
-            r="3.5"
-          />
-        )}
-      </svg>
-      <span>X–Z 平面 · 青色 TCP / 橙色入点</span>
-    </div>
-  );
-}
-
 function AmbientWaveBackground() {
   return (
     <div className="ambient-scene" aria-hidden="true">
@@ -243,8 +123,6 @@ export default function App() {
   const [camera, setCamera] = useState<SimulationCameraState | null>(null);
   const [cameraDragging, setCameraDragging] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const [trajectoryBusy, setTrajectoryBusy] = useState(false);
-  const [trajectoryNotice, setTrajectoryNotice] = useState<string | null>(null);
   const [autoExecuteRemainingMs, setAutoExecuteRemainingMs] = useState<number | null>(null);
   const [autoExecuting, setAutoExecuting] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
@@ -370,7 +248,6 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [videoFailed, runtimeMode]);
 
-  const command = session?.normalized_command;
   const proposal = session?.motion_proposal as {
     fingerprint?: string;
     envelope?: {
@@ -394,9 +271,6 @@ export default function App() {
   const activeModeSettings = modeSettings[runtimeMode];
   const workspaceLow = activeModeSettings?.workspace_low_mm;
   const workspaceHigh = activeModeSettings?.workspace_high_mm;
-  const entry = (command?.entry_point ?? telemetry?.entry_point) as Point3D | undefined;
-  const target = (command?.target_point ?? telemetry?.target_point) as Point3D | undefined;
-  const currentTcp = telemetry?.current_tcp ?? session?.current_tcp;
   const videoUrl = session
     ? api.videoUrl(session.session_id, videoAttempt, runtimeMode)
     : "";
@@ -517,25 +391,6 @@ export default function App() {
     }
   }
 
-  async function clearTrajectory() {
-    if (!session || trajectoryBusy) return;
-    setTrajectoryBusy(true);
-    setTrajectoryNotice(null);
-    setRequestError(null);
-    try {
-      const result = await api.clearTrajectory(session.session_id);
-      setTelemetry(await api.telemetry(session.session_id));
-      setTrajectoryNotice(
-        result.trajectory_points > 0
-          ? "轨迹已清除；当前 TCP 位置已作为下一条轨迹的起点。"
-          : "轨迹已清除。",
-      );
-    } catch (error) {
-      setRequestError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setTrajectoryBusy(false);
-    }
-  }
   useEffect(() => {
   if (runtimeMode === null) return;
   const element = videoStageRef.current;
@@ -909,124 +764,6 @@ export default function App() {
             </div>
               </aside>
             </div>
-          </section>
-
-          <section className="panel telemetry-panel">
-            <div className="panel-heading">
-              <div>
-                <span className="eyebrow">02 · 运行遥测</span>
-                <h2>{runtimeMode === "real" ? "真实控制器状态" : "运动状态与轨迹"}</h2>
-              </div>
-              <span className={`step-badge ${telemetry?.connected ? "live" : ""}`}>
-                {telemetry?.connected ? (runtimeMode === "real" ? `FRESH · ${Math.round(telemetry.source_age_ms ?? 0)} ms` : `${telemetry.simulation_fps ?? 0} FPS`) : (telemetry?.freshness ?? "遥测断开").toUpperCase()}
-              </span>
-            </div>
-              {runtimeMode === "real" ? (
-                <aside className="telemetry-board">
-                  <div className="connection-grid">
-                    {["server", "gateway", "datasheet", "command_socket", "controller_box"].map((name) => (
-                      <span key={name} className={telemetry?.connections[name] === "connected" ? "ok" : "bad"}>
-                        {name} <strong>{telemetry?.connections[name] ?? "unknown"}</strong>
-                      </span>
-                    ))}
-                  </div>
-                  <div className="telemetry-stats">
-                    <div><span>反馈新鲜度</span><strong>{telemetry?.freshness ?? "unknown"} · {telemetry?.source_age_ms != null ? `${telemetry.source_age_ms.toFixed(0)} ms` : "—"}</strong></div>
-                    <div><span>FSM / 运动状态</span><strong>{telemetry?.fsm_code ?? "—"} / {telemetry?.motion_state ?? "—"}</strong></div>
-                    <div><span>使能 / 上电</span><strong>{stateLabel(telemetry?.enabled)} / {stateLabel(telemetry?.electrified)}</strong></div>
-                    <div><span>Moving / InPos</span><strong>{stateLabel(telemetry?.moving)} / {stateLabel(telemetry?.in_position)}</strong></div>
-                    <div><span>急停 / 急停回路故障</span><strong>{stateLabel(telemetry?.physical_estop_active)} / {stateLabel(telemetry?.emergency_stop_circuit_fault)}</strong></div>
-                    <div><span>光幕 / 光幕回路故障</span><strong>{stateLabel(telemetry?.safeguard_active)} / {stateLabel(telemetry?.safeguard_circuit_fault)}</strong></div>
-                  </div>
-                  <div className="joint-strip">
-                    {(telemetry?.joint_positions_deg ?? []).map((joint, index) => (
-                      <span key={index}>J{index + 1} <strong>{joint.toFixed(3)}°</strong></span>
-                    ))}
-                  </div>
-                  <div className="actual-pose">
-                    <span>控制器 Actual_PCS_Base（工具 TCP 尚未标定）</span>
-                    <strong>{telemetry?.actual_tcp_robot_base ? `XYZ ${telemetry.actual_tcp_robot_base.translation_mm.map((value) => value.toFixed(3)).join(" / ")} mm` : "—"}</strong>
-                    <strong>{telemetry?.actual_tcp_robot_base ? `RPY ${telemetry.actual_tcp_robot_base.rotation_rpy_deg.map((value) => value.toFixed(3)).join(" / ")}°` : "—"}</strong>
-                  </div>
-                  {telemetry?.vendor_fault && <div className="telemetry-error">Vendor error {String(telemetry.vendor_fault.vendor_error_code ?? "unknown")}</div>}
-                  {!telemetry?.mirror_calibrated && <div className="telemetry-error">关节/Base 坐标尚未通过标定验收；当前画面不可用于定位。</div>}
-                  {telemetry?.error && <div className="telemetry-error">{String(telemetry.error.message ?? "真实遥测不可用")}</div>}
-                </aside>
-              ) : <aside className="telemetry-board">
-                <div className="trajectory-toolbar">
-                  <div>
-                    <strong>本次轨迹</strong>
-                    {trajectoryNotice && <span>{trajectoryNotice}</span>}
-                  </div>
-                  <button
-                    className="button secondary"
-                    disabled={!session || trajectoryBusy}
-                    onClick={() => void clearTrajectory()}
-                  >
-                    {trajectoryBusy ? "清除中…" : "清除轨迹"}
-                  </button>
-                </div>
-                <div className="telemetry-stats">
-                  <div><span>位置误差</span><strong>{telemetry?.position_error_mm != null ? `${telemetry.position_error_mm.toFixed(3)} mm` : "—"}</strong></div>
-                  <div><span>运动状态</span><strong>{telemetry?.motion_state ?? "—"}</strong></div>
-                  <div><span>当前工具</span><strong>{telemetry?.current_tool ?? "空闲"}</strong></div>
-                  <div><span>轨迹点</span><strong>{telemetry?.trajectory_total_points ?? 0}</strong></div>
-                </div>
-                <div className="progress-block">
-                  <div><span>运动进度</span><strong>{telemetry?.motion_progress_percent != null ? `${telemetry.motion_progress_percent.toFixed(1)}%` : "等待任务"}</strong></div>
-                  <div className="progress-track"><i style={{ width: `${telemetry?.motion_progress_percent ?? 0}%` }} /></div>
-                </div>
-                <TrajectoryPlot telemetry={telemetry} />
-                <div className="joint-strip">
-                  {(telemetry?.joint_positions_deg ?? []).map((joint, index) => (
-                    <span key={index}>J{index + 1} <strong>{joint.toFixed(1)}°</strong></span>
-                  ))}
-                </div>
-                {telemetry?.error && (
-                  <div className="telemetry-error">{String(telemetry.error.message ?? "仿真遥测不可用")}</div>
-                )}
-              </aside>}
-          </section>
-
-          <section className="panel coordinates-panel">
-            <div className="panel-heading">
-              <div>
-                <span className="eyebrow">03 · 任务预览</span>
-                <h2>坐标与 TCP</h2>
-              </div>
-              <span className="step-badge">单位：mm</span>
-            </div>
-            <CoordinateCard title="入点" point={entry} />
-            <CoordinateCard title="靶点" point={target} />
-            <CoordinateCard title={runtimeMode === "real" ? "控制器实际 TCP（工具未标定）" : "当前针尖 TCP"} point={currentTcp} />
-            {Array.isArray(command?.motion_sequence?.steps) &&
-              command.motion_sequence.steps.map((step: Record<string, any>, index: number) => (
-                <div className="relative-card" key={`${step.kind}-${index}`}>
-                  <span>步骤 {index + 1}</span>
-                  <strong>{describeMotionStep(step)}</strong>
-                </div>
-              ))}
-            {command?.relative_motion && (
-              <div className="relative-card">
-                <span>相对运动</span>
-                <strong>
-                  {command.relative_motion.delta_mm
-                    ? `ΔX ${command.relative_motion.delta_mm[0]} · ΔY ${command.relative_motion.delta_mm[1]} · ΔZ ${command.relative_motion.delta_mm[2]} mm`
-                    : `${String(command.relative_motion.axis).toUpperCase()} 轴 · ${command.relative_motion.direction === "positive" ? "+" : "−"}${command.relative_motion.distance_mm} mm`}
-                </strong>
-              </div>
-            )}
-          </section>
-
-          <section className="panel timeline-panel">
-            <div className="panel-heading">
-              <div>
-                <span className="eyebrow">04 · 确定性编排</span>
-                <h2>工具调用时间线</h2>
-              </div>
-              <span className="step-badge">revision {session?.revision ?? 0}</span>
-            </div>
-            <Timeline events={session?.execution_events ?? []} />
           </section>
 
         </div>
