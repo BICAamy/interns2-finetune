@@ -148,7 +148,8 @@ class TrajectoryRenderer:
             )
         projected_path = [project(np.asarray(point, dtype=np.float64)) for point in trajectory_scene]
         for start, end in zip(projected_path, projected_path[1:]):
-            self._draw_line(output, start, end, (255, 215, 0))
+            # Amber remains clearly visible on the pale-blue SOFA background.
+            self._draw_line(output, start, end, (245, 158, 11))
         if entry_scene is not None:
             self._draw_disk(
                 output,

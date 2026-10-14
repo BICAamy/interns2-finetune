@@ -112,6 +112,7 @@ export default function App() {
   >({});
   const [modeBusy, setModeBusy] = useState(false);
   const [enableBusy, setEnableBusy] = useState(false);
+  const [trajectoryClearBusy, setTrajectoryClearBusy] = useState(false);
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [image, setImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -362,6 +363,20 @@ export default function App() {
       setRequestError(error instanceof Error ? error.message : String(error));
     } finally {
       setEnableBusy(false);
+    }
+  }
+
+  async function clearTrajectory() {
+    if (!session || trajectoryClearBusy) return;
+    setTrajectoryClearBusy(true);
+    setRequestError(null);
+    try {
+      await api.clearTrajectory(session.session_id);
+      setTelemetry(await api.telemetry(session.session_id));
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTrajectoryClearBusy(false);
     }
   }
 
@@ -738,6 +753,14 @@ export default function App() {
                 onClick={() => session && run(() => api.action(session.session_id, "reset-estop"))}
               >
                 复位急停
+              </button>
+              <button
+                className="button secondary"
+                disabled={!session || trajectoryClearBusy}
+                onClick={() => void clearTrajectory()}
+                title="只清除画面中的历史轨迹，不移动或复位机械臂"
+              >
+                {trajectoryClearBusy ? "清除中…" : "轨迹清除"}
               </button>
             </div>
             {session?.pending_confirmation && (

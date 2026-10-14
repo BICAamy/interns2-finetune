@@ -67,6 +67,9 @@ _DEFAULT_CAMERA_POSE = camera_pose(
     _DEFAULT_CAMERA_POSITION,
     DEFAULT_CAMERA_TARGET_M,
 )
+# Very light sky blue keeps the white/silver E05-Pro readable while matching
+# the browser's white-and-blue visual system. Values are OpenGL RGBA floats.
+SCENE_BACKGROUND_RGBA = (0.92, 0.97, 1.0, 1.0)
 
 
 def _require_model_assets(model_dir: Path) -> dict[str, Path]:
@@ -118,6 +121,7 @@ def createScene(
         root_node=root_node,
         plugin_list=PLUGIN_LIST,
         visual_style_flags=VISUAL_STYLES["normal"],
+        background_color=SCENE_BACKGROUND_RGBA,
         scene_has_collisions=False,
     )
 

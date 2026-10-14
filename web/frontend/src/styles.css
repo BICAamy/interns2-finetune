@@ -1685,3 +1685,9 @@ footer strong { color: #1d4ed8; }
 @media (prefers-reduced-motion: reduce) {
   .auto-execute-spinner { animation: none; }
 }
+
+/* Match the letterbox area around the square MJPEG frame to the SOFA scene. */
+.video-stage,
+.video-stage img {
+  background: #ebf7ff;
+}
