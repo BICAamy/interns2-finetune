@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
-from math import isfinite
+from math import ceil, isfinite
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -53,10 +53,13 @@ POINT_FIELDS = {"x", "y", "z", "unit", "frame", "source"}
 RELATIVE_FIELDS = {
     "axis", "direction", "distance_mm", "delta_mm", "frame", "distance_source",
 }
-# Demo-only phrase expansion.  The closed 3D curve has two deliberate
+# Demo-only phrase expansion.  The closed 3D polyline has two deliberate
 # orthographic projections:
 #   * front view (-Y): a heart in the Base X-Z plane;
 #   * side view (+/-X): a five-point star in the Base Y-Z plane.
+# Some 3D segments deliberately retrace the same projected edge.  Therefore
+# this special illusion must be subdivided without a free spline: a spline
+# separates those coincident passes into visible loops in one of the views.
 # It is still validated and confirmed like every other MotionSequence.
 DEMO_CURVE_SAMPLE_SPACING_MM = 8.0
 DEMO_HEART_STAR_CONTROL_DELTAS_MM = (
@@ -75,31 +78,6 @@ DEMO_HEART_STAR_CONTROL_DELTAS_MM = (
 )
 
 
-def _catmull_rom_point(
-    p0: tuple[float, float, float],
-    p1: tuple[float, float, float],
-    p2: tuple[float, float, float],
-    p3: tuple[float, float, float],
-    t: float,
-) -> tuple[float, float, float]:
-    """Return one point on a uniform Catmull-Rom segment from p1 to p2."""
-
-    t2 = t * t
-    t3 = t2 * t
-    return tuple(
-        0.5
-        * (
-            2.0 * p1[axis]
-            + (-p0[axis] + p2[axis]) * t
-            + (2.0 * p0[axis] - 5.0 * p1[axis] + 4.0 * p2[axis] - p3[axis])
-            * t2
-            + (-p0[axis] + 3.0 * p1[axis] - 3.0 * p2[axis] + p3[axis])
-            * t3
-        )
-        for axis in range(3)
-    )  # type: ignore[return-value]
-
-
 def _distance_3d(
     start: tuple[float, float, float],
     end: tuple[float, float, float],
@@ -107,15 +85,15 @@ def _distance_3d(
     return sum((right - left) ** 2 for left, right in zip(start, end)) ** 0.5
 
 
-def _closed_spline_deltas(
+def _subdivide_closed_polyline_deltas(
     control_deltas: tuple[tuple[float, float, float], ...],
     *,
     spacing_mm: float,
 ) -> tuple[tuple[float, float, float], ...]:
-    """Smooth a closed relative polyline and resample it by arc length."""
+    """Densify a closed polyline while preserving every projected edge."""
 
     if not 5.0 <= spacing_mm <= 10.0:
-        raise ValueError("demo curve spacing must stay within 5..10 mm")
+        raise ValueError("demo path spacing must stay within 5..10 mm")
     origin = (0.0, 0.0, 0.0)
     cumulative = [origin]
     for delta in control_deltas:
@@ -125,59 +103,16 @@ def _closed_spline_deltas(
         ))
     if _distance_3d(cumulative[-1], origin) > 1e-6:
         raise ValueError("demo curve control deltas must form a closed path")
-    control_points = cumulative[:-1]
-    if len(control_points) < 4:
-        raise ValueError("a closed spline requires at least four control points")
-
-    # First create a fine spline polyline, then sample that polyline at nearly
-    # uniform arc-length intervals.  This keeps controller WayPoints around
-    # 8 mm apart even when adjacent design control points have unequal spans.
-    dense = [control_points[0]]
-    subdivisions = 32
-    count = len(control_points)
-    for index in range(count):
-        p0 = control_points[(index - 1) % count]
-        p1 = control_points[index]
-        p2 = control_points[(index + 1) % count]
-        p3 = control_points[(index + 2) % count]
-        dense.extend(
-            _catmull_rom_point(p0, p1, p2, p3, sample / subdivisions)
-            for sample in range(1, subdivisions + 1)
-        )
-
-    sampled = [dense[0]]
-    distance_until_sample = spacing_mm
-    segment_start = dense[0]
-    for segment_end in dense[1:]:
-        segment_length = _distance_3d(segment_start, segment_end)
-        while segment_length >= distance_until_sample and segment_length > 0.0:
-            ratio = distance_until_sample / segment_length
-            point = tuple(
-                segment_start[axis]
-                + (segment_end[axis] - segment_start[axis]) * ratio
-                for axis in range(3)
-            )
-            sampled.append(point)  # type: ignore[arg-type]
-            segment_start = point  # type: ignore[assignment]
-            segment_length = _distance_3d(segment_start, segment_end)
-            distance_until_sample = spacing_mm
-        distance_until_sample -= segment_length
-        segment_start = segment_end
-
-    # End exactly at the origin so accumulated floating-point error never
-    # makes repeated demonstrations drift away from their starting position.
-    if _distance_3d(sampled[-1], origin) <= 1e-6:
-        sampled[-1] = origin
-    else:
-        sampled.append(origin)
-    return tuple(
-        tuple(current[axis] - previous[axis] for axis in range(3))
-        for previous, current in zip(sampled, sampled[1:])
-        if _distance_3d(previous, current) > 1e-9
-    )  # type: ignore[return-value]
+    dense_deltas: list[tuple[float, float, float]] = []
+    for delta in control_deltas:
+        length = _distance_3d(origin, delta)
+        subdivisions = max(1, ceil(length / spacing_mm))
+        increment = tuple(float(value) / subdivisions for value in delta)
+        dense_deltas.extend(increment for _ in range(subdivisions))
+    return tuple(dense_deltas)
 
 
-DEMO_HEART_STAR_DELTAS_MM = _closed_spline_deltas(
+DEMO_HEART_STAR_DELTAS_MM = _subdivide_closed_polyline_deltas(
     DEMO_HEART_STAR_CONTROL_DELTAS_MM,
     spacing_mm=DEMO_CURVE_SAMPLE_SPACING_MM,
 )

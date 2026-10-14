@@ -1689,5 +1689,5 @@ footer strong { color: #1d4ed8; }
 /* Match the letterbox area around the square MJPEG frame to the SOFA scene. */
 .video-stage,
 .video-stage img {
-  background: #ebf7ff;
+  background: #f8fafc;
 }

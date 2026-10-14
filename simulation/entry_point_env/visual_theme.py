@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 
-# OpenGL RGBA floats. This is approximately #EBF7FF.
-SCENE_BACKGROUND_RGBA = (0.92, 0.97, 1.0, 1.0)
+# Match the browser page background exactly: #F8FAFC.
+SCENE_BACKGROUND_RGBA = (248.0 / 255.0, 250.0 / 255.0, 252.0 / 255.0, 1.0)
 
 
 def apply_opengl_background(opengl_gl: object) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+from math import ceil
 import tempfile
 import unittest
 from pathlib import Path
@@ -456,6 +457,43 @@ class InternS2AgentTests(unittest.TestCase):
                 0.0,
                 places=7,
             )
+
+        # Every design edge must remain a straight, evenly subdivided edge.
+        # The illusion contains projected edges that intentionally retrace one
+        # another; a free 3D spline would split them into visible loops.
+        dense_offset = 0
+        for control_delta in DEMO_HEART_STAR_CONTROL_DELTAS_MM:
+            segment_length = sum(value * value for value in control_delta) ** 0.5
+            subdivision_count = max(
+                1,
+                ceil(segment_length / DEMO_CURVE_SAMPLE_SPACING_MM),
+            )
+            expected_increment = tuple(
+                value / subdivision_count for value in control_delta
+            )
+            self.assertEqual(
+                expected[dense_offset:dense_offset + subdivision_count],
+                (expected_increment,) * subdivision_count,
+            )
+            dense_offset += subdivision_count
+        self.assertEqual(dense_offset, len(expected))
+
+        # Each original control corner is therefore reached exactly.
+        dense_points = [(0.0, 0.0, 0.0)]
+        for delta in expected:
+            dense_points.append(tuple(
+                dense_points[-1][axis] + delta[axis] for axis in range(3)
+            ))
+        control_point = (0.0, 0.0, 0.0)
+        for control_delta in DEMO_HEART_STAR_CONTROL_DELTAS_MM:
+            control_point = tuple(
+                control_point[axis] + control_delta[axis]
+                for axis in range(3)
+            )
+            self.assertTrue(any(
+                all(abs(actual[axis] - control_point[axis]) < 1e-7 for axis in range(3))
+                for actual in dense_points
+            ))
 
         for prompt in (
             "画出一张正面是爱心，侧面是星星的图案",
