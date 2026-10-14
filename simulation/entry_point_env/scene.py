@@ -31,6 +31,7 @@ from simulation.entry_point_env.camera_controller import (
     camera_pose,
     camera_position,
 )
+from simulation.entry_point_env.visual_theme import SCENE_BACKGROUND_RGBA
 
 
 PLUGIN_LIST = list(
@@ -67,11 +68,6 @@ _DEFAULT_CAMERA_POSE = camera_pose(
     _DEFAULT_CAMERA_POSITION,
     DEFAULT_CAMERA_TARGET_M,
 )
-# Very light sky blue keeps the white/silver E05-Pro readable while matching
-# the browser's white-and-blue visual system. Values are OpenGL RGBA floats.
-SCENE_BACKGROUND_RGBA = (0.92, 0.97, 1.0, 1.0)
-
-
 def _require_model_assets(model_dir: Path) -> dict[str, Path]:
     # Huayan publishes uppercase .STL names. The pinned sofa_env loader uses a
     # case-sensitive suffix table, so the image prepares lowercase symlink

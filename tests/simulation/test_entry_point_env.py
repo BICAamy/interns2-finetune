@@ -14,11 +14,30 @@ from simulation.entry_point_env import (
     WorkspaceViolationError,
 )
 from simulation.entry_point_env.renderer import TrajectoryRenderer
+from simulation.entry_point_env.visual_theme import (
+    SCENE_BACKGROUND_RGBA,
+    apply_opengl_background,
+)
 from surgical_contracts import CoordinateFrame, MotionState, Point3D
 
 
 CONFIG = EntryPointEnvConfig.from_yaml()
 RUN_SOFA_INTEGRATION = os.environ.get("ENTRY_POINT_SOFA_TESTS") == "1"
+
+
+class _FakeOpenGL:
+    GL_COLOR_BUFFER_BIT = 0x4000
+    GL_DEPTH_BUFFER_BIT = 0x0100
+
+    def __init__(self) -> None:
+        self.clear_color = None
+        self.clear_mask = None
+
+    def glClearColor(self, *rgba: float) -> None:
+        self.clear_color = rgba
+
+    def glClear(self, mask: int) -> None:
+        self.clear_mask = mask
 
 
 def run_until_settled(
@@ -36,6 +55,17 @@ def run_until_settled(
 
 
 class EntryPointControllerTests(unittest.TestCase):
+    def test_opengl_framebuffer_uses_scene_background(self):
+        fake_gl = _FakeOpenGL()
+
+        apply_opengl_background(fake_gl)
+
+        self.assertEqual(fake_gl.clear_color, SCENE_BACKGROUND_RGBA)
+        self.assertEqual(
+            fake_gl.clear_mask,
+            fake_gl.GL_COLOR_BUFFER_BIT | fake_gl.GL_DEPTH_BUFFER_BIT,
+        )
+
     def test_reaches_multiple_workspace_points_with_bounded_steps(self):
         controller = ContinuousTrajectoryController(CONFIG)
         maximum_step = CONFIG.maximum_speed_mm_s * CONFIG.time_step_s

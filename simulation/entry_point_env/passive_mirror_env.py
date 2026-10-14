@@ -18,6 +18,7 @@ from .camera_controller import OrbitCameraController
 from .config import DEFAULT_CONFIG_PATH, EntryPointEnvConfig
 from .external_joint_state_controller import ExternalJointStateController
 from .renderer import TrajectoryRenderer
+from .visual_theme import apply_opengl_background
 
 
 SCENE_PATH = Path(__file__).resolve().with_name("scene.py")
@@ -78,6 +79,12 @@ class PassiveRealMirrorEnv(SofaEnv):
         self.observation_space = spaces.Box(
             low=0, high=255, shape=self.config.image_shape + (3,), dtype=np.uint8
         )
+
+    def _init_opengl(self) -> None:
+        """Use the same sky-blue colour in the actual off-screen framebuffer."""
+
+        super()._init_opengl()
+        apply_opengl_background(self.opengl_gl)
 
     @staticmethod
     def _scene_pose(transform_mm: np.ndarray) -> tuple[float, ...]:
