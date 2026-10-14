@@ -1686,8 +1686,15 @@ footer strong { color: #1d4ed8; }
   .auto-execute-spinner { animation: none; }
 }
 
-/* Match the letterbox area around the square MJPEG frame to the SOFA scene. */
-.video-stage,
+/* Fill the wide viewport with the square SOFA frame instead of leaving side bars. */
+.video-stage {
+  border: 0;
+  background: #f8fafc;
+  box-shadow: none;
+}
+
 .video-stage img {
+  object-fit: cover;
+  object-position: center;
   background: #f8fafc;
 }
