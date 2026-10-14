@@ -295,7 +295,7 @@ def test_camera_defaults_upright_and_view_controls_render_on_worker_thread(servi
     initial = client.get("/v1/camera")
     assert initial.status_code == 200
     assert initial.json()["preset"] == "front"
-    assert initial.json()["position_m"] == pytest.approx([0.35, -1.65, 0.42])
+    assert initial.json()["position_m"] == pytest.approx([0.35, -2.1, 0.42])
 
     orbit = client.put(
         "/v1/camera",

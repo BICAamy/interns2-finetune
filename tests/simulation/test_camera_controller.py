@@ -18,7 +18,7 @@ def test_default_front_camera_is_upright_and_looks_towards_positive_y():
     rotation = Rotation.from_quat(controller.pose[3:])
 
     assert state.preset == "front"
-    assert state.position_m == pytest.approx((0.35, -1.65, 0.42))
+    assert state.position_m == pytest.approx((0.35, -2.1, 0.42))
     assert rotation.apply((0.0, 0.0, -1.0)) == pytest.approx((0.0, 1.0, 0.0))
     assert rotation.apply((0.0, 1.0, 0.0)) == pytest.approx((0.0, 0.0, 1.0))
 
@@ -36,6 +36,8 @@ def test_five_presets_and_orbit_zoom_limits_are_deterministic():
         state = controller.apply(request(action="preset", preset=preset))
         assert state.preset == preset
         assert (state.yaw_deg, state.pitch_deg) == angles
+        if preset in {"front", "left", "right"}:
+            assert state.distance_m == pytest.approx(2.1)
 
     for _ in range(10):
         state = controller.apply(

@@ -23,9 +23,9 @@ def _default_camera_state() -> SimulationCameraState:
         preset="front",
         yaw_deg=0.0, # 相机相对于底座坐标系的yaw角偏移值
         pitch_deg=0.0, # 相机相对于底座坐标系的pitch角偏移值
-        distance_m=1.65, 
+        distance_m=2.1,
         target_m=(0.35, 0.0, 0.42), # 相机看这里
-        position_m=(0.35, -1.65, 0.42), # 相机初始位置
+        position_m=(0.35, -2.1, 0.42), # 相机初始位置
         updated_at_ms=time.time_ns() // 1_000_000, # 摄像机状态最后一次被修改时的 Unix 时间戳，ms
     )
 

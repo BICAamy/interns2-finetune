@@ -16,7 +16,7 @@ from surgical_contracts import (
 
 
 DEFAULT_CAMERA_TARGET_M = np.asarray((0.35, 0.0, 0.42), dtype=np.float64)
-DEFAULT_CAMERA_DISTANCE_M = 1.65
+DEFAULT_CAMERA_DISTANCE_M = 2.1
 MIN_CAMERA_DISTANCE_M = 0.75
 MAX_CAMERA_DISTANCE_M = 3.5
 MIN_CAMERA_PITCH_DEG = -75.0
@@ -26,9 +26,9 @@ _TARGET_LOW_M = np.asarray((-0.4, -0.8, -0.2), dtype=np.float64)
 _TARGET_HIGH_M = np.asarray((1.1, 0.8, 1.2), dtype=np.float64)
 
 _PRESETS: dict[CameraPreset, tuple[float, float, float]] = {
-    CameraPreset.FRONT: (0.0, 0.0, 1.65),
-    CameraPreset.LEFT: (-90.0, 0.0, 1.65),
-    CameraPreset.RIGHT: (90.0, 0.0, 1.65),
+    CameraPreset.FRONT: (0.0, 0.0, 2.1),
+    CameraPreset.LEFT: (-90.0, 0.0, 2.1),
+    CameraPreset.RIGHT: (90.0, 0.0, 2.1),
     CameraPreset.TOP: (0.0, 82.0, 1.75),
     CameraPreset.ISOMETRIC: (38.0, 28.0, 1.85),
 }
