@@ -23,6 +23,7 @@ from surgical_contracts import (
     command_fingerprint,
 )
 
+from .command_journal import JournalError
 from .fake_motion import LocalMotionTrial
 from .huayan.adapter import fixed_xyz_quaternion
 from .preflight import (
@@ -51,19 +52,27 @@ class RemoteMotionExecutor:
         readback: Callable[[], ControllerReadback],
         feedback: Callable[[], tuple[RobotTelemetry, str | None]],
         poll_interval_s: float = 0.02,
+        local_preflight_timeout_ms: int = 120_000,
     ) -> None:
         if poll_interval_s <= 0:
             raise ValueError("remote motion poll interval must be positive")
+        if local_preflight_timeout_ms <= 0:
+            raise ValueError("local preflight timeout must be positive")
         self._trial_factory = trial_factory
         self._snapshot = snapshot
         self._readback = readback
         self._feedback = feedback
         self._poll_interval_s = poll_interval_s
+        self._local_preflight_timeout_ms = local_preflight_timeout_ms
         self._used_fingerprints: set[str] = set()
         self._active = False
 
     def execute(
-        self, envelope: RobotCommandEnvelope, fingerprint: str,
+        self,
+        envelope: RobotCommandEnvelope,
+        fingerprint: str,
+        *,
+        local_deadline_monotonic_ns: int | None = None,
     ) -> RobotCommandResult:
         if envelope.command_kind not in {
             GatewayCommandKind.MOVE_RELATIVE,
@@ -73,23 +82,44 @@ class RemoteMotionExecutor:
             return self._failure(envelope, ErrorCode.OPERATION_NOT_ENABLED)
         if command_fingerprint(envelope) != fingerprint:
             return self._failure(envelope, ErrorCode.COMMAND_CONFLICT)
-        started_at_ms = time.time_ns() // 1_000_000
-        if not envelope.created_at_ms <= started_at_ms < envelope.expires_at_ms:
-            return self._failure(envelope, ErrorCode.COMMAND_EXPIRED)
         if self._active or fingerprint in self._used_fingerprints:
-            return self._failure(envelope, ErrorCode.COMMAND_CONFLICT)
+            return self._failure(
+                envelope,
+                ErrorCode.COMMAND_CONFLICT,
+                "motion fingerprint is already active or has already been consumed",
+            )
+
+        if local_deadline_monotonic_ns is None:
+            local_deadline_monotonic_ns = (
+                time.monotonic_ns()
+                + self._local_preflight_timeout_ms * 1_000_000
+            )
+        if time.monotonic_ns() >= local_deadline_monotonic_ns:
+            return self._failure(
+                envelope,
+                ErrorCode.ROBOT_TIMEOUT,
+                "Mac-local preflight deadline expired before execution began",
+            )
 
         self._active = True
         self._used_fingerprints.add(fingerprint)
         try:
             if envelope.command_kind != GatewayCommandKind.MOVE_SEQUENCE:
-                return self._execute_one(envelope, fingerprint)
+                return self._execute_one(
+                    envelope,
+                    fingerprint,
+                    local_deadline_monotonic_ns,
+                )
             request = envelope.payload
             if not isinstance(request, MoveSequenceRequest):
                 return self._failure(envelope, ErrorCode.INVALID_COMMAND_SCHEMA)
-            return self._execute_continuous_sequence(envelope, request)
-        except Exception:
-            return self._failure(envelope, ErrorCode.INTERNAL_ERROR)
+            return self._execute_continuous_sequence(
+                envelope,
+                request,
+                local_deadline_monotonic_ns,
+            )
+        except Exception as exc:
+            return self._exception_failure(envelope, exc)
         finally:
             self._active = False
 
@@ -97,6 +127,7 @@ class RemoteMotionExecutor:
         self,
         envelope: RobotCommandEnvelope,
         request: MoveSequenceRequest,
+        local_deadline_monotonic_ns: int,
     ) -> RobotCommandResult:
         """Preflight the complete path, queue it once, then verify only its end.
 
@@ -110,10 +141,9 @@ class RemoteMotionExecutor:
             readback = self._readback()
             if start.actual_pose_robot_base is None:
                 raise ValueError("actual Base pose is unavailable")
-            remaining_ms = envelope.expires_at_ms - time.time_ns() // 1_000_000
-            if remaining_ms <= 0:
-                return self._failure(envelope, ErrorCode.COMMAND_EXPIRED)
-            expires_ns = time.monotonic_ns() + remaining_ms * 1_000_000
+            expires_ns = local_deadline_monotonic_ns
+            if time.monotonic_ns() >= expires_ns:
+                raise TimeoutError("Mac-local preflight deadline expired")
             lease = MotionLease(
                 owner="remote",
                 session_id=envelope.gateway_session_id,
@@ -125,6 +155,10 @@ class RemoteMotionExecutor:
                 tuple[RobotCommandEnvelope, RobotTelemetry, PreflightTarget]
             ] = []
             for index, step in enumerate(request.steps):
+                if time.monotonic_ns() >= expires_ns:
+                    raise TimeoutError(
+                        "Mac-local preflight deadline expired while checking sequence"
+                    )
                 child = self._sequence_child(
                     envelope, request, step, index=index, start=predicted,
                 )
@@ -152,6 +186,7 @@ class RemoteMotionExecutor:
                     trial.path_ik,
                     trial.joint_fk,
                     required_lease_owner="remote",
+                    enforce_envelope_deadline=False,
                 )
                 planned.append((child, predicted, target))
                 predicted = predicted.model_copy(update={
@@ -193,6 +228,10 @@ class RemoteMotionExecutor:
 
             # One fresh guard after full-path planning; there is deliberately
             # no stop/readback/preflight cycle between individual points.
+            if time.monotonic_ns() >= expires_ns:
+                raise TimeoutError(
+                    "Mac-local preflight deadline expired before WayPoint submission"
+                )
             fresh = self._snapshot()
             fresh_readback = self._readback()
             self._verify_sequence_start_unchanged(
@@ -207,10 +246,10 @@ class RemoteMotionExecutor:
                 planned[-1][2],
             )
             return self._wait_for_trial(envelope, trial, state, fresh.sequence)
-        except Exception:
+        except Exception as exc:
             if trial is not None and trial.potentially_moving:
                 trial.request_stop(reason="continuous remote sequence failed")
-            return self._failure(envelope, ErrorCode.INTERNAL_ERROR)
+            return self._exception_failure(envelope, exc)
 
     def _sequence_child(
         self,
@@ -285,12 +324,14 @@ class RemoteMotionExecutor:
                 speed_mm_s=request.translation_speed_mm_s,
             )
             kind = GatewayCommandKind.MOVE_CARTESIAN_POSE
-        now_ms = time.time_ns() // 1_000_000
         return RobotCommandEnvelope(
             gateway_session_id=parent.gateway_session_id,
             command_id=child_id,
             command_kind=kind,
-            created_at_ms=now_ms,
+            # Child envelopes inherit the proposal's immutable wire timestamps.
+            # Their execution is governed by the independent Mac monotonic
+            # deadline after the parent has arrived in time.
+            created_at_ms=parent.created_at_ms,
             expires_at_ms=parent.expires_at_ms,
             based_on_robot_state_sequence=start.sequence,
             expected_start_pose_robot_base=pose,
@@ -330,6 +371,7 @@ class RemoteMotionExecutor:
         self,
         envelope: RobotCommandEnvelope,
         fingerprint: str,
+        local_deadline_monotonic_ns: int,
     ) -> RobotCommandResult:
         trial: LocalMotionTrial | None = None
         try:
@@ -338,10 +380,9 @@ class RemoteMotionExecutor:
             pose = snapshot.actual_pose_robot_base
             if pose is None:
                 raise ValueError("actual Base pose is unavailable")
-            remaining_ms = envelope.expires_at_ms - time.time_ns() // 1_000_000
-            if remaining_ms <= 0:
-                return self._failure(envelope, ErrorCode.COMMAND_EXPIRED)
-            expires_ns = time.monotonic_ns() + remaining_ms * 1_000_000
+            expires_ns = local_deadline_monotonic_ns
+            if time.monotonic_ns() >= expires_ns:
+                raise TimeoutError("Mac-local preflight deadline expired")
             arm = LocalArm(
                 test_id=envelope.operator_confirmation_id or "",
                 command_fingerprint=fingerprint,
@@ -364,14 +405,15 @@ class RemoteMotionExecutor:
                 arm,
                 (lease,),
                 required_lease_owner="remote",
+                enforce_envelope_deadline=False,
             )
             return self._wait_for_trial(
                 envelope, trial, state, snapshot.sequence,
             )
-        except Exception:
+        except Exception as exc:
             if trial is not None and trial.potentially_moving:
                 trial.request_stop(reason="remote motion executor failed")
-            return self._failure(envelope, ErrorCode.INTERNAL_ERROR)
+            return self._exception_failure(envelope, exc)
 
     def _wait_for_trial(
         self,
@@ -403,11 +445,46 @@ class RemoteMotionExecutor:
                 final_pose_robot_base=final_sample.actual_pose_robot_base,
                 final_joint_positions_deg=final_sample.joint_positions_deg,
             )
-        return self._failure(envelope, ErrorCode.ROBOT_TIMEOUT)
+        detail = trial.stop_reason or f"local motion ended in state {state}"
+        if trial.last_feedback_debug:
+            detail = f"{detail}; {trial.last_feedback_debug}"
+        return self._failure(envelope, ErrorCode.ROBOT_TIMEOUT, detail)
+
+    @classmethod
+    def _exception_failure(
+        cls,
+        envelope: RobotCommandEnvelope,
+        exc: Exception,
+    ) -> RobotCommandResult:
+        message = f"{type(exc).__name__}: {exc}"[:512]
+        lowered = str(exc).lower()
+        if isinstance(exc, TimeoutError) or "timeout" in lowered or "deadline" in lowered:
+            code = ErrorCode.ROBOT_TIMEOUT
+        elif isinstance(exc, JournalError) or any(
+            marker in lowered
+            for marker in ("active or unresolved", "already active", "already used")
+        ):
+            code = ErrorCode.COMMAND_CONFLICT
+        elif "workspace" in lowered:
+            code = ErrorCode.OUT_OF_WORKSPACE
+        elif " ik" in f" {lowered}" or "inverse kinematic" in lowered:
+            code = ErrorCode.IK_FAILED
+        elif any(
+            marker in lowered
+            for marker in ("wrong payload", "wrong command", "schema", "requires base/mm")
+        ):
+            code = ErrorCode.INVALID_COMMAND_SCHEMA
+        elif isinstance(exc, ValueError) or isinstance(exc, PermissionError):
+            code = ErrorCode.OPERATION_NOT_ENABLED
+        else:
+            code = ErrorCode.INTERNAL_ERROR
+        return cls._failure(envelope, code, message)
 
     @staticmethod
     def _failure(
-        envelope: RobotCommandEnvelope, error_code: ErrorCode,
+        envelope: RobotCommandEnvelope,
+        error_code: ErrorCode,
+        error_message: str | None = None,
     ) -> RobotCommandResult:
         return RobotCommandResult(
             gateway_session_id=envelope.gateway_session_id,
@@ -415,4 +492,5 @@ class RemoteMotionExecutor:
             command_kind=envelope.command_kind,
             status=ToolStatus.FAILED,
             error_code=error_code,
+            error_message=(error_message or error_code.value)[:512],
         )

@@ -52,7 +52,7 @@ class LocalMotionTrial:
     def __init__(
         self, *, client: FakeMotionClient | LocalRealMotionClient, journal: CommandJournal,
         timing: LocalMotionTiming, approval: MotionApproval,
-        path_ik: Callable[..., tuple[float, ...] | None],
+        path_ik: Callable[..., tuple[float, ...] | None] | None,
         joint_fk: Callable[[tuple[float, ...]], Pose6D] | None = None,
     ) -> None:
         if not isinstance(client, (FakeMotionClient, LocalRealMotionClient)):
@@ -110,6 +110,7 @@ class LocalMotionTrial:
         now_monotonic_ns: int | None = None,
         required_lease_owner: str = "local",
         final_guard: Callable[[], None] | None = None,
+        enforce_envelope_deadline: bool = True,
     ) -> str:
         if self.command_id is not None or self.journal.unresolved():
             raise JournalError("active or unresolved local command blocks submission")
@@ -121,6 +122,7 @@ class LocalMotionTrial:
                 self.path_ik, self.joint_fk,
                 required_lease_owner=required_lease_owner,
                 now_ms=now_ms, now_monotonic_ns=now_monotonic_ns,
+                enforce_envelope_deadline=enforce_envelope_deadline,
             )
         except Exception:
             arm.revoke()

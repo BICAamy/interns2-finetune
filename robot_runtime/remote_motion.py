@@ -517,6 +517,13 @@ class RemoteMotionStore:
                     continue
                 if command_id in self._dispatched:
                     continue
+                if time.time_ns() // 1_000_000 >= frame.envelope.expires_at_ms:
+                    self._fail_locked(
+                        command_id,
+                        ErrorCode.COMMAND_EXPIRED,
+                        "proposal did not reach the Mac within its 30-second TTL",
+                    )
+                    continue
                 if frame.envelope.gateway_session_id != session_id:
                     self._fail_locked(
                         command_id, ErrorCode.COMMAND_EXPIRED,
@@ -631,7 +638,10 @@ class RemoteMotionStore:
                 error = ErrorResponse(
                     code=code,
                     command_id=result.command_id,
-                    message="Mac rejected or failed the dispatched robot command",
+                    message=(
+                        result.error_message
+                        or "Mac rejected or failed the dispatched robot command"
+                    ),
                 )
             self._records[result.command_id] = record.model_copy(update={
                 "status": status,

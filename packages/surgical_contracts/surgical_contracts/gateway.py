@@ -273,6 +273,7 @@ class RobotCommandResult(ContractModel):
     status: ToolStatus
     controller_waypoint_id: str | None = Field(default=None, min_length=1, max_length=128)
     error_code: ErrorCode | None = None
+    error_message: str | None = Field(default=None, min_length=1, max_length=512)
     vendor_fault: VendorFault | None = None
     software_stop: SoftwareStopResult | None = None
     final_pose_robot_base: Pose6D | None = None
@@ -301,6 +302,8 @@ class RobotCommandResult(ContractModel):
             raise ValueError("final pose must use robot_base frame")
         if self.status == ToolStatus.SUCCESS and self.error_code is not None:
             raise ValueError("successful result cannot contain error_code")
+        if self.status == ToolStatus.SUCCESS and self.error_message is not None:
+            raise ValueError("successful result cannot contain error_message")
         if self.status != ToolStatus.SUCCESS and self.error_code is None:
             raise ValueError("non-success result requires error_code")
         if self.status == ToolStatus.SUCCESS and self.software_stop is not None:

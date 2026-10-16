@@ -4,6 +4,7 @@ from __future__ import annotations
 import ipaddress
 import secrets
 import threading
+import time
 from typing import Callable
 from urllib.parse import urlparse
 
@@ -170,7 +171,9 @@ class CloudTransport:
         *,
         secret: bytes,
         gateway_id: str,
-        command_handler: Callable[[RobotCommandEnvelope, str], RobotCommandResult] | None = None,
+        command_handler: Callable[
+            [RobotCommandEnvelope, str], RobotCommandResult
+        ] | None = None,
     ) -> None:
         self.url = validate_cloud_url(url)
         if len(secret) < 32:
@@ -183,6 +186,7 @@ class CloudTransport:
         self._message_sequence = 0
         self._rejections = RejectOnlyLedger()
         self._command_lock = threading.Lock()
+        self._command_context = threading.local()
         self._command_thread: threading.Thread | None = None
         self._command_result: GatewayCommandResultFrame | None = None
         self._active_command_id: str | None = None
@@ -192,6 +196,17 @@ class CloudTransport:
 
         if self._connection is not None:
             raise RuntimeError("cloud connection is already open")
+        with self._command_lock:
+            if (
+                self._active_command_id is not None
+                or (
+                    self._command_thread is not None
+                    and self._command_thread.is_alive()
+                )
+            ):
+                raise RuntimeError(
+                    "previous remote command thread has not exited"
+                )
         connection = connect(self.url, open_timeout=3, close_timeout=1, max_size=64 * 1024)
         try:
             challenge = parse_wire_json(connection.recv(timeout=3))
@@ -232,35 +247,98 @@ class CloudTransport:
         return session_id
 
     def close(self) -> None:
-        if self._connection is not None:
-            self._connection.close()
+        connection = self._connection
         self._connection = None
         self.session_id = None
         self._message_sequence = 0
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                # Command ownership cleanup below is mandatory even when the
+                # WebSocket implementation itself fails during close.
+                pass
+
+        # A lost WebSocket does not cancel a WayPoint already handed to the
+        # controller.  Do not reconnect (and therefore do not accept another
+        # motion command) until the old command handler has fully unwound.
+        with self._command_lock:
+            command_thread = self._command_thread
+        if (
+            command_thread is not None
+            and command_thread is not threading.current_thread()
+        ):
+            while command_thread.is_alive():
+                command_thread.join(timeout=0.1)
         with self._command_lock:
             self._command_result = None
             self._active_command_id = None
+            if self._command_thread is command_thread:
+                self._command_thread = None
 
     def _run_command(
-        self, frame: GatewayCommandFrame, *, session_id: str,
+        self,
+        frame: GatewayCommandFrame,
+        *,
+        session_id: str,
+        received_at_ms: int,
+        received_at_monotonic_ns: int,
     ) -> None:
         assert self.command_handler is not None
+        self._command_context.received_at_monotonic_ns = received_at_monotonic_ns
         try:
-            result = self.command_handler(frame.envelope, frame.fingerprint)
-        except Exception:
-            result = RobotCommandResult(
-                gateway_session_id=frame.envelope.gateway_session_id,
-                command_id=frame.envelope.command_id,
-                command_kind=frame.envelope.command_kind,
-                status=ToolStatus.FAILED,
-                error_code=ErrorCode.INTERNAL_ERROR,
-            )
-        with self._command_lock:
-            if self.session_id == session_id and self._active_command_id == frame.envelope.command_id:
-                self._command_result = GatewayCommandResultFrame(
-                    fingerprint=frame.fingerprint,
-                    result=result,
+            try:
+                if not (
+                    frame.envelope.created_at_ms
+                    <= received_at_ms
+                    < frame.envelope.expires_at_ms
+                ):
+                    result = RobotCommandResult(
+                        gateway_session_id=frame.envelope.gateway_session_id,
+                        command_id=frame.envelope.command_id,
+                        command_kind=frame.envelope.command_kind,
+                        status=ToolStatus.FAILED,
+                        error_code=ErrorCode.COMMAND_EXPIRED,
+                        error_message=(
+                            "proposal did not reach the Mac before its 30-second TTL"
+                        ),
+                    )
+                else:
+                    result = self.command_handler(
+                        frame.envelope,
+                        frame.fingerprint,
+                    )
+            except Exception as exc:
+                result = RobotCommandResult(
+                    gateway_session_id=frame.envelope.gateway_session_id,
+                    command_id=frame.envelope.command_id,
+                    command_kind=frame.envelope.command_kind,
+                    status=ToolStatus.FAILED,
+                    error_code=ErrorCode.INTERNAL_ERROR,
+                    error_message=f"{type(exc).__name__}: {exc}"[:512],
                 )
+            with self._command_lock:
+                if (
+                    self.session_id == session_id
+                    and self._active_command_id == frame.envelope.command_id
+                ):
+                    self._command_result = GatewayCommandResultFrame(
+                        fingerprint=frame.fingerprint,
+                        result=result,
+                    )
+        finally:
+            del self._command_context.received_at_monotonic_ns
+
+    def command_received_monotonic_ns(self) -> int:
+        """Return this command worker's immutable Mac receipt timestamp."""
+        value = getattr(
+            self._command_context,
+            "received_at_monotonic_ns",
+            None,
+        )
+        if value is None:
+            raise RuntimeError("command receipt time is unavailable outside its worker")
+        return value
 
     def _flush_command_result(self) -> None:
         if self._connection is None:
@@ -300,17 +378,25 @@ class CloudTransport:
                 with self._command_lock:
                     if self._active_command_id is not None:
                         raise RuntimeError("gateway already has an active remote command")
+                    session_id = self.session_id
+                    if session_id is None:
+                        raise RuntimeError(
+                            "command arrived without an active gateway session"
+                        )
                     self._active_command_id = frame.envelope.command_id
-                session_id = self.session_id
-                if session_id is None:
-                    raise RuntimeError("command arrived without an active gateway session")
-                self._command_thread = threading.Thread(
-                    target=self._run_command,
-                    args=(frame,),
-                    kwargs={"session_id": session_id},
-                    daemon=True,
-                )
-                self._command_thread.start()
+                    received_at_ms = time.time_ns() // 1_000_000
+                    received_at_monotonic_ns = time.monotonic_ns()
+                    self._command_thread = threading.Thread(
+                        target=self._run_command,
+                        args=(frame,),
+                        kwargs={
+                            "session_id": session_id,
+                            "received_at_ms": received_at_ms,
+                            "received_at_monotonic_ns": received_at_monotonic_ns,
+                        },
+                        daemon=True,
+                    )
+                    self._command_thread.start()
                 self._connection.send(GatewayCommandAcceptedFrame(
                     command_id=frame.envelope.command_id,
                     fingerprint=frame.fingerprint,

@@ -10,7 +10,8 @@ from typing import Callable
 
 from surgical_contracts import (
     ErrorCode, GatewayCommandKind, LinkState, RobotCommandEnvelope,
-    RobotCommandResult, RobotTelemetry, SetEnabledRequest, ToolStatus,
+    MotionStepKind, MoveSequenceRequest, RobotCommandResult, RobotTelemetry,
+    SetEnabledRequest, ToolStatus,
     command_fingerprint,
     load_gateway_secret,
 )
@@ -34,7 +35,9 @@ class EdgeGateway:
         self,
         config: EdgeConfig | RealEdgeConfig,
         *,
-        command_handler: Callable[[RobotCommandEnvelope, str], RobotCommandResult] | None = None,
+        command_handler: Callable[
+            [RobotCommandEnvelope, str], RobotCommandResult
+        ] | None = None,
     ) -> None:
         self.config = config
         self.secret = load_gateway_secret(config.secret_file)
@@ -210,12 +213,40 @@ class EdgeGateway:
         self, envelope: RobotCommandEnvelope, fingerprint: str,
     ) -> RobotCommandResult:
         """Run one server-dispatched command through the Step 11 local client."""
+        # The cloud transport has already established that the proposal reached
+        # this Mac before its wire TTL.  From this point on, only a local
+        # monotonic deadline governs preflight; controller execution has the
+        # separate monotonic deadline in LocalMotionTrial.
+        local_preflight_deadline_ns: int | None = None
+        try:
+            received_at_monotonic_ns = self._cloud.command_received_monotonic_ns()
+        except RuntimeError:
+            # Direct local test calls do not pass through CloudTransport.
+            received_at_monotonic_ns = time.monotonic_ns()
+        if (
+            isinstance(self.config, RealEdgeConfig)
+            and self.config.robot_config is not None
+            and self.config.robot_config.deadlines.motion_ms is not None
+        ):
+            local_preflight_deadline_ns = (
+                received_at_monotonic_ns
+                + self.config.robot_config.deadlines.motion_ms * 1_000_000
+            )
         if not self._real or not isinstance(self.config, RealEdgeConfig):
-            return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+            return self._failed_result(
+                envelope, ErrorCode.OPERATION_NOT_ENABLED,
+                "real command execution is not enabled on this gateway",
+            )
         if command_fingerprint(envelope) != fingerprint:
-            return self._failed_result(envelope, ErrorCode.COMMAND_CONFLICT)
+            return self._failed_result(
+                envelope, ErrorCode.COMMAND_CONFLICT,
+                "command fingerprint does not match the authenticated envelope",
+            )
         if not self._controller_operation.acquire(blocking=False):
-            return self._failed_result(envelope, ErrorCode.COMMAND_CONFLICT)
+            return self._failed_result(
+                envelope, ErrorCode.COMMAND_CONFLICT,
+                "a previous controller command thread has not exited",
+            )
         self._controller_operation_active.set()
         self._command.close()
         try:
@@ -226,15 +257,32 @@ class EdgeGateway:
                 GatewayCommandKind.MOVE_TO_ENTRY,
                 GatewayCommandKind.MOVE_SEQUENCE,
             }:
-                return self._execute_remote_motion(envelope, fingerprint)
-            return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+                if local_preflight_deadline_ns is None:
+                    return self._failed_result(
+                        envelope,
+                        ErrorCode.OPERATION_NOT_ENABLED,
+                        "deadlines.motion_ms is required for remote motion",
+                    )
+                return self._execute_remote_motion(
+                    envelope,
+                    fingerprint,
+                    local_preflight_deadline_ns=local_preflight_deadline_ns,
+                )
+            return self._failed_result(
+                envelope, ErrorCode.OPERATION_NOT_ENABLED,
+                f"unsupported remote command kind: {envelope.command_kind.value}",
+            )
         except Exception as exc:
             self.audit.record(
                 "remote_command_failed",
                 command_id=envelope.command_id,
                 reason=f"{type(exc).__name__}: {exc}"[:256],
             )
-            return self._failed_result(envelope, ErrorCode.INTERNAL_ERROR)
+            return self._failed_result(
+                envelope,
+                self._classify_command_exception(exc),
+                f"{type(exc).__name__}: {exc}",
+            )
         finally:
             self.state.command_connected = False
             try:
@@ -250,7 +298,9 @@ class EdgeGateway:
 
     @staticmethod
     def _failed_result(
-        envelope: RobotCommandEnvelope, error_code: ErrorCode,
+        envelope: RobotCommandEnvelope,
+        error_code: ErrorCode,
+        error_message: str | None = None,
     ) -> RobotCommandResult:
         return RobotCommandResult(
             gateway_session_id=envelope.gateway_session_id,
@@ -258,7 +308,26 @@ class EdgeGateway:
             command_kind=envelope.command_kind,
             status=ToolStatus.FAILED,
             error_code=error_code,
+            error_message=(error_message or error_code.value)[:512],
         )
+
+    @staticmethod
+    def _classify_command_exception(exc: Exception) -> ErrorCode:
+        message = str(exc).lower()
+        if isinstance(exc, TimeoutError) or "timeout" in message or "deadline" in message:
+            return ErrorCode.ROBOT_TIMEOUT
+        if "workspace" in message:
+            return ErrorCode.OUT_OF_WORKSPACE
+        if " ik" in f" {message}" or "inverse kinematic" in message:
+            return ErrorCode.IK_FAILED
+        if any(
+            marker in message
+            for marker in ("active or unresolved", "already active", "already used")
+        ):
+            return ErrorCode.COMMAND_CONFLICT
+        if isinstance(exc, (ValueError, PermissionError)):
+            return ErrorCode.OPERATION_NOT_ENABLED
+        return ErrorCode.INTERNAL_ERROR
 
     def _sampler(self):
         gateway = self
@@ -284,14 +353,23 @@ class EdgeGateway:
 
         payload = envelope.payload
         if not isinstance(payload, SetEnabledRequest):
-            return self._failed_result(envelope, ErrorCode.INVALID_COMMAND_SCHEMA)
+            return self._failed_result(
+                envelope, ErrorCode.INVALID_COMMAND_SCHEMA,
+                "set-enabled envelope contains the wrong payload",
+            )
         config = self.config.robot_config
         if config is None:
-            return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+            return self._failed_result(
+                envelope, ErrorCode.OPERATION_NOT_ENABLED,
+                "real robot configuration is unavailable",
+            )
         sampler = self._sampler()
         before = sampler.snapshot()
         if not payload.enabled and (before.sample.moving or not before.sample.in_position):
-            return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+            return self._failed_result(
+                envelope, ErrorCode.OPERATION_NOT_ENABLED,
+                "disable requires stationary in-position 10004 feedback",
+            )
         timeout_s = config.deadlines.response_ms / 1000
         deadline = time.monotonic() + config.deadlines.startup_ms / 1000
         with LocalRealMotionClient(
@@ -299,26 +377,41 @@ class EdgeGateway:
         ) as client:
             state = read_robot_state(client.request(ReadCommand.ROBOT_STATE))
             if not payload.enabled and state.moving:
-                return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+                return self._failed_result(
+                    envelope, ErrorCode.OPERATION_NOT_ENABLED,
+                    "disable requires stationary 10003 feedback",
+                )
             if state.enabled is not payload.enabled and not client.set_enabled(
                 payload.enabled,
                 disable_stationary_confirmed=(not state.moving and not before.sample.moving),
             ):
-                return self._failed_result(envelope, ErrorCode.INTERNAL_ERROR)
+                return self._failed_result(
+                    envelope, ErrorCode.INTERNAL_ERROR,
+                    "controller rejected the group enable/disable command",
+                )
             while time.monotonic() < deadline:
                 state = read_robot_state(client.request(ReadCommand.ROBOT_STATE))
                 self.robot_status = state
                 if state.moving:
-                    return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+                    return self._failed_result(
+                        envelope, ErrorCode.OPERATION_NOT_ENABLED,
+                        "robot began moving while enable state was being confirmed",
+                    )
                 if state.enabled is payload.enabled:
                     break
                 time.sleep(0.02)
             else:
-                return self._failed_result(envelope, ErrorCode.ROBOT_TIMEOUT)
+                return self._failed_result(
+                    envelope, ErrorCode.ROBOT_TIMEOUT,
+                    "10003 did not confirm the requested enable state before deadline",
+                )
         while time.monotonic() < deadline:
             current = sampler.snapshot()
             if current.sample.moving:
-                return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+                return self._failed_result(
+                    envelope, ErrorCode.OPERATION_NOT_ENABLED,
+                    "robot began moving before 10004 enable confirmation",
+                )
             if (
                 current.sequence > before.sequence
                 and current.sample.enabled is payload.enabled
@@ -331,14 +424,21 @@ class EdgeGateway:
                     confirmed_enabled=payload.enabled,
                 )
             time.sleep(0.02)
-        return self._failed_result(envelope, ErrorCode.ROBOT_TIMEOUT)
+        return self._failed_result(
+            envelope, ErrorCode.ROBOT_TIMEOUT,
+            "10004 did not confirm the requested enable state before deadline",
+        )
 
     def _execute_remote_motion(
-        self, envelope: RobotCommandEnvelope, fingerprint: str,
+        self,
+        envelope: RobotCommandEnvelope,
+        fingerprint: str,
+        *,
+        local_preflight_deadline_ns: int,
     ) -> RobotCommandResult:
         from .command_journal import CommandJournal
         from .commissioning_runtime import (
-            make_approval, make_joint_fk, make_path_ik, read_local_observation,
+            make_approval, make_joint_fk, read_local_observation,
             read_motion_feedback,
         )
         from .fake_motion import LocalMotionTiming, LocalMotionTrial
@@ -349,7 +449,10 @@ class EdgeGateway:
 
         config = self.config.robot_config
         if config is None:
-            return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+            return self._failed_result(
+                envelope, ErrorCode.OPERATION_NOT_ENABLED,
+                "real robot configuration is unavailable",
+            )
         sampler = self._sampler()
         timeout_s = config.deadlines.response_ms / 1000
         expected_override = config.motion.controller_override
@@ -358,7 +461,10 @@ class EdgeGateway:
             before.sample.moving or before.sample.fsm_code != 33
             or not before.sample.enabled or not before.sample.in_position
         ):
-            return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+            return self._failed_result(
+                envelope, ErrorCode.OPERATION_NOT_ENABLED,
+                "10004 feedback is not enabled, stationary, READY and in-position",
+            )
 
         # SetOverride and its two-channel confirmation are completed before a
         # fresh single-use 10003 connection is opened for WayPoint.
@@ -368,20 +474,32 @@ class EdgeGateway:
             state = read_robot_state(override_client.request(ReadCommand.ROBOT_STATE))
             fsm = read_current_fsm(override_client.request(ReadCommand.CURRENT_FSM))
             if state.moving or not state.enabled or not state.in_position or fsm != 33:
-                return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+                return self._failed_result(
+                    envelope, ErrorCode.OPERATION_NOT_ENABLED,
+                    "10003 feedback is not enabled, stationary, READY and in-position",
+                )
             current_override = override_client.current_override()
             if abs(current_override - expected_override) > 1e-6:
                 if not override_client.set_override(
                     expected_override, stationary_confirmed=True,
                 ):
-                    return self._failed_result(envelope, ErrorCode.INTERNAL_ERROR)
+                    return self._failed_result(
+                        envelope, ErrorCode.INTERNAL_ERROR,
+                        "controller rejected SetOverride",
+                    )
             if abs(override_client.current_override() - expected_override) > 1e-6:
-                return self._failed_result(envelope, ErrorCode.INTERNAL_ERROR)
+                return self._failed_result(
+                    envelope, ErrorCode.INTERNAL_ERROR,
+                    "10003 ReadOverride did not confirm the configured override",
+                )
         override_deadline = time.monotonic() + config.deadlines.startup_ms / 1000
         while time.monotonic() < override_deadline:
             confirmed = sampler.snapshot()
             if confirmed.sample.moving:
-                return self._failed_result(envelope, ErrorCode.OPERATION_NOT_ENABLED)
+                return self._failed_result(
+                    envelope, ErrorCode.OPERATION_NOT_ENABLED,
+                    "robot began moving before 10004 override confirmation",
+                )
             if (
                 confirmed.sequence > before.sequence
                 and abs(confirmed.sample.override - expected_override) <= 1e-6
@@ -389,7 +507,10 @@ class EdgeGateway:
                 break
             time.sleep(0.02)
         else:
-            return self._failed_result(envelope, ErrorCode.ROBOT_TIMEOUT)
+            return self._failed_result(
+                envelope, ErrorCode.ROBOT_TIMEOUT,
+                "10004 Actual_Override did not confirm the configured override",
+            )
 
         with LocalRealMotionClient(
             config, timeout_s=timeout_s, require_local_terminal=False,
@@ -416,8 +537,17 @@ class EdgeGateway:
 
             initial = snapshot()
             approval = make_approval(config, package_version=motion_client.package_version)
-            make_path_ik(config, initial)
-            make_joint_fk(config, initial)
+            needs_joint_fk = (
+                isinstance(envelope.payload, MoveSequenceRequest)
+                and any(
+                    step.kind in {
+                        MotionStepKind.JOINT_RELATIVE,
+                        MotionStepKind.JOINT_ABSOLUTE,
+                    }
+                    for step in envelope.payload.steps
+                )
+            )
+            joint_fk = make_joint_fk(config, initial) if needs_joint_fk else None
             timing = LocalMotionTiming(
                 response_ms=config.deadlines.response_ms,
                 start_ms=config.deadlines.startup_ms,
@@ -448,21 +578,23 @@ class EdgeGateway:
                         journal=journal,
                         timing=timing,
                         approval=approval,
-                        path_ik=make_path_ik(
-                            config,
-                            observation_holder["value"].telemetry,
-                        ),
-                        joint_fk=make_joint_fk(
-                            config,
-                            observation_holder["value"].telemetry,
-                        ),
+                        # Cartesian reachability is checked by the controller.
+                        # Mac-side preflight keeps YAML workspace/step/speed
+                        # checks but intentionally performs no numerical IK.
+                        path_ik=None,
+                        joint_fk=joint_fk,
                     ),
                     snapshot=snapshot,
                     readback=readback,
                     feedback=feedback,
                     poll_interval_s=0.02,
+                    local_preflight_timeout_ms=config.deadlines.motion_ms,
                 )
-                return executor.execute(envelope, fingerprint)
+                return executor.execute(
+                    envelope,
+                    fingerprint,
+                    local_deadline_monotonic_ns=local_preflight_deadline_ns,
+                )
 
     def _wait_for_identity(self) -> None:
         deadline = time.monotonic() + 3

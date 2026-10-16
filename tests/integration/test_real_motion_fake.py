@@ -24,7 +24,7 @@ from edge_gateway.preflight import (
     fingerprint, preflight_relative, safety_state_hash,
 )
 from surgical_contracts import (
-    CoordinateFrame, DistanceUnit, GatewayCommandKind, LinkState,
+    CoordinateFrame, DistanceUnit, ErrorCode, GatewayCommandKind, LinkState,
     MotionSafetyLimits, MotionSequenceStep, MotionStepKind,
     MoveRelativeRequest, MoveSequenceRequest, Pose6D, RobotCommandEnvelope,
     RobotConnectionState, RobotProvider, RobotTelemetry, RuntimeMode,
@@ -299,6 +299,181 @@ def test_continuous_sequence_preflights_every_step_before_first_write(
             result = executor.execute(command, command_fingerprint(command))
             assert result.status == ToolStatus.FAILED
             assert_no_motion_write(fake)
+            assert journal.unresolved() == ()
+        finally:
+            journal.close()
+            client.close()
+
+
+def test_116_point_sequence_uses_local_deadline_after_timely_mac_receipt(
+    tmp_path,
+) -> None:
+    """Wire TTL may elapse during a long Mac preflight without expiring it."""
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client = FakeMotionClient(
+            "127.0.0.1", fake.command_port, timeout_s=0.1,
+        )
+        client.connect()
+        journal = CommandJournal(tmp_path / "sequence-116.journal")
+        checked = replace(
+            approval(),
+            sequence_blend_radius_mm=0.25,
+        )
+        now_ms = time.time_ns() // 1_000_000
+        steps = tuple(
+            MotionSequenceStep(
+                kind=MotionStepKind.CARTESIAN_RELATIVE,
+                translation_mm=((1.0 if index % 2 == 0 else -1.0), 0.0, 0.0),
+            )
+            for index in range(116)
+        )
+        request = MoveSequenceRequest(
+            command_id="long-sequence-116",
+            steps=steps,
+            translation_speed_mm_s=2,
+            joint_speed_deg_s=15,
+            joint_acceleration_deg_s2=30,
+        )
+        # This represents a proposal which reached the Mac before expiry, but
+        # whose original 30-second wall-clock TTL has elapsed during local work.
+        command = RobotCommandEnvelope(
+            gateway_session_id=SESSION,
+            command_id=request.command_id,
+            command_kind=GatewayCommandKind.MOVE_SEQUENCE,
+            created_at_ms=now_ms - 31_000,
+            expires_at_ms=now_ms - 1_000,
+            based_on_robot_state_sequence=10,
+            expected_start_pose_robot_base=pose(),
+            expected_tcp_name="FAKE_FLANGE",
+            expected_ucs_name="Base",
+            payload=request,
+            safety_limits=MotionSafetyLimits(
+                max_speed_mm_s=5,
+                max_step_mm=2,
+                max_rotation_deg=90,
+                max_joint_speed_deg_s=30,
+                max_joint_acceleration_deg_s2=60,
+            ),
+            operator_confirmation_id="web-long-sequence",
+        )
+        feedback_sequence = 10
+        feedback_calls = 0
+
+        def feedback():
+            nonlocal feedback_sequence, feedback_calls
+            feedback_sequence += 1
+            feedback_calls += 1
+            if feedback_calls == 1:
+                return (
+                    telemetry(
+                        sequence=feedback_sequence,
+                        moving=True,
+                        fsm=25,
+                        in_position=False,
+                    ),
+                    "116-point fake motion",
+                )
+            return (
+                telemetry(sequence=feedback_sequence),
+                "116-point fake arrival",
+            )
+
+        executor = RemoteMotionExecutor(
+            trial_factory=lambda: FakeMotionTrial(
+                client=client,
+                journal=journal,
+                timing=timing(),
+                approval=checked,
+                path_ik=None,
+            ),
+            snapshot=telemetry,
+            readback=readback,
+            feedback=feedback,
+            poll_interval_s=0.001,
+        )
+        try:
+            result = executor.execute(
+                command,
+                command_fingerprint(command),
+                local_deadline_monotonic_ns=time.monotonic_ns() + 2_000_000_000,
+            )
+            assert result.status == ToolStatus.SUCCESS
+            writes = [
+                frame
+                for frame in fake.received_commands
+                if frame.startswith(b"WayPoint,")
+            ]
+            assert len(writes) == 116
+            assert journal.unresolved() == ()
+        finally:
+            journal.close()
+            client.close()
+
+
+def test_failed_remote_motion_can_be_followed_by_success_without_restart(
+    tmp_path,
+) -> None:
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client = FakeMotionClient(
+            "127.0.0.1", fake.command_port, timeout_s=0.1,
+        )
+        client.connect()
+        journal = CommandJournal(tmp_path / "recover-without-restart.journal")
+        short_timing = replace(timing(), start_ms=20, dwell_ms=5)
+        current_attempt = 1
+        feedback_sequence = 10
+        feedback_calls = 0
+
+        def feedback():
+            nonlocal feedback_sequence, feedback_calls
+            feedback_sequence += 1
+            feedback_calls += 1
+            if current_attempt == 1:
+                return telemetry(sequence=feedback_sequence), "forced startup timeout"
+            if feedback_calls == 1:
+                return (
+                    telemetry(
+                        sequence=feedback_sequence,
+                        moving=True,
+                        fsm=25,
+                        in_position=False,
+                    ),
+                    "second attempt moving",
+                )
+            return telemetry(sequence=feedback_sequence, x=101), "second attempt arrived"
+
+        executor = RemoteMotionExecutor(
+            trial_factory=lambda: FakeMotionTrial(
+                client=client,
+                journal=journal,
+                timing=short_timing,
+                approval=approval(),
+                path_ik=None,
+            ),
+            snapshot=telemetry,
+            readback=readback,
+            feedback=feedback,
+            poll_interval_s=0.001,
+        )
+        try:
+            first = envelope("recover-first")
+            first_result = executor.execute(
+                first,
+                command_fingerprint(first),
+            )
+            assert first_result.status == ToolStatus.FAILED
+            assert first_result.error_code == ErrorCode.ROBOT_TIMEOUT
+            assert "startup deadline" in (first_result.error_message or "")
+            assert journal.unresolved() == ()
+
+            current_attempt = 2
+            feedback_calls = 0
+            second = envelope("recover-second")
+            second_result = executor.execute(
+                second,
+                command_fingerprint(second),
+            )
+            assert second_result.status == ToolStatus.SUCCESS
             assert journal.unresolved() == ()
         finally:
             journal.close()

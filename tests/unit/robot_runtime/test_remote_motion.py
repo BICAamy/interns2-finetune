@@ -11,6 +11,7 @@ from robot_runtime.remote_motion import RemoteMotionPolicy
 from surgical_contracts import (
     CommandExecutionStatus,
     CoordinateFrame,
+    ErrorCode,
     GatewayCommandKind,
     GatewayHandshake,
     GatewayHello,
@@ -177,3 +178,34 @@ def test_same_id_different_payload_and_disconnect_are_never_replayed() -> None:
     assert failed.status == CommandExecutionStatus.FAILED
     assert "will not replay" in failed.error.message
     assert provider.take_gateway_command(session_id) is None
+
+
+def test_gateway_failure_preserves_mac_error_code_and_reason() -> None:
+    _sessions, provider, session_id = enabled_provider()
+    request = MoveRelativeRequest(
+        command_id="remote-relative-detailed-failure",
+        translation_mm=(1, 0, 0),
+        frame=CoordinateFrame.ROBOT_BASE,
+        speed_mm_s=2,
+    )
+    record, _ = provider.submit(RobotCommandKind.MOVE_RELATIVE, request)
+    fingerprint = record.result["proposal"]["fingerprint"]
+    provider.confirm_command(request.command_id, fingerprint)
+    dispatched = provider.take_gateway_command(session_id)
+    assert dispatched is not None
+
+    provider.ingest_gateway_result(
+        dispatched.fingerprint,
+        RobotCommandResult(
+            gateway_session_id=session_id,
+            command_id=request.command_id,
+            command_kind=GatewayCommandKind.MOVE_RELATIVE,
+            status=ToolStatus.FAILED,
+            error_code=ErrorCode.OUT_OF_WORKSPACE,
+            error_message="ValueError: path leaves approved workspace",
+        ),
+    )
+    failed = provider.get_command(request.command_id)
+    assert failed.status == CommandExecutionStatus.FAILED
+    assert failed.error.code == ErrorCode.OUT_OF_WORKSPACE
+    assert failed.error.message == "ValueError: path leaves approved workspace"

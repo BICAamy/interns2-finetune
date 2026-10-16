@@ -235,10 +235,11 @@ def preflight_motion(
     envelope: RobotCommandEnvelope, snapshot: RobotTelemetry,
     readback: ControllerReadback, approval: MotionApproval,
     arm: LocalArm, leases: tuple[MotionLease, ...],
-    path_ik: Callable[..., tuple[float, ...] | None],
+    path_ik: Callable[..., tuple[float, ...] | None] | None,
     joint_fk: Callable[[tuple[float, ...]], Pose6D] | None = None,
     required_lease_owner: Literal["local", "remote"] = "local",
     *, now_ms: int | None = None, now_monotonic_ns: int | None = None,
+    enforce_envelope_deadline: bool = True,
 ) -> PreflightTarget:
     """Return an absolute target without I/O; consume ARM only after every check."""
     now_ms = time.time_ns() // 1_000_000 if now_ms is None else now_ms
@@ -257,7 +258,9 @@ def preflight_motion(
             raise ValueError("Cartesian-pose envelope has the wrong payload")
     else:
         raise ValueError("local trial supports Cartesian or relative-joint motion")
-    if not envelope.created_at_ms <= now_ms < envelope.expires_at_ms:
+    if enforce_envelope_deadline and not (
+        envelope.created_at_ms <= now_ms < envelope.expires_at_ms
+    ):
         raise ValueError("motion envelope expired or has a future creation time")
     if snapshot.runtime_mode != RuntimeMode.REAL:
         raise ValueError("local motion requires real runtime feedback")
@@ -426,7 +429,9 @@ def preflight_motion(
         raise ValueError("Cartesian displacement exceeds approval")
 
     # The YAML arrival position tolerance is also the maximum distance between
-    # adjacent IK/workspace samples. Longer moves therefore receive more checks.
+    # adjacent workspace samples.  A caller may provide an IK checker for the
+    # local commissioning workflow; remote real motion deliberately leaves
+    # Cartesian IK to the controller and therefore passes ``None`` here.
     segments = max(
         1,
         math.ceil(distance / approval.path_sample_step_mm),
@@ -444,22 +449,33 @@ def preflight_motion(
             point, approval.workspace_low_mm, approval.workspace_high_mm
         )):
             raise ValueError("path leaves approved workspace")
-        if orientation_distance <= 1e-12:
-            joints = path_ik(point)
-        else:
-            interpolated = tuple(
-                (1.0 - ratio) * a + ratio * b
-                for a, b in zip(start_quaternion, end_quaternion)
-            )
-            norm = math.sqrt(sum(value * value for value in interpolated))
-            quaternion = tuple(value / norm for value in interpolated)
-            joints = path_ik(point, quaternion)
-        if joints is None or len(joints) != 6 or any(not math.isfinite(value) for value in joints):
-            raise ValueError("path IK failed")
-        final_joints = tuple(float(value) for value in joints)
-        if any(not low + approval.joint_margin_deg <= value <= high - approval.joint_margin_deg
-               for value, (low, high) in zip(joints, approval.joint_soft_limits_deg)):
-            raise ValueError("path crosses joint margin")
+        if path_ik is not None:
+            if orientation_distance <= 1e-12:
+                joints = path_ik(point)
+            else:
+                interpolated = tuple(
+                    (1.0 - ratio) * a + ratio * b
+                    for a, b in zip(start_quaternion, end_quaternion)
+                )
+                norm = math.sqrt(sum(value * value for value in interpolated))
+                quaternion = tuple(value / norm for value in interpolated)
+                joints = path_ik(point, quaternion)
+            if (
+                joints is None
+                or len(joints) != 6
+                or any(not math.isfinite(value) for value in joints)
+            ):
+                raise ValueError("path IK failed")
+            final_joints = tuple(float(value) for value in joints)
+            if any(
+                not low + approval.joint_margin_deg
+                <= value
+                <= high - approval.joint_margin_deg
+                for value, (low, high) in zip(
+                    joints, approval.joint_soft_limits_deg
+                )
+            ):
+                raise ValueError("path crosses joint margin")
     arm.used = True
     return PreflightTarget(
         pose=target_pose.model_copy(update={"translation_mm": target_xyz}),
