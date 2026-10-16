@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 
 from edge_gateway.cloud_transport import CloudTransport
 from surgical_contracts import (
@@ -10,6 +11,8 @@ from surgical_contracts import (
     ErrorCode,
     GatewayCommandFrame,
     GatewayCommandKind,
+    GatewayHeartbeat,
+    LinkState,
     MotionSafetyLimits,
     MoveRelativeRequest,
     Pose6D,
@@ -29,6 +32,28 @@ class _Connection:
 
     def close(self) -> None:
         self.closed.set()
+
+
+class _ScriptedConnection:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = deque(responses)
+        self.sent: list[str] = []
+
+    def send(self, payload: str) -> None:
+        self.sent.append(payload)
+
+    def recv(self, *, timeout: float) -> str:
+        del timeout
+        return self.responses.popleft()
+
+
+def _heartbeat() -> GatewayHeartbeat:
+    return GatewayHeartbeat(
+        gateway_session_id=SESSION,
+        message_sequence=1,
+        datasheet=LinkState.CONNECTED,
+        command_socket=LinkState.CONNECTED,
+    )
 
 
 def _frame(*, now_ms: int | None = None) -> GatewayCommandFrame:
@@ -103,7 +128,6 @@ def test_disconnect_waits_for_old_command_thread_before_clearing_owner() -> None
         args=(frame,),
         kwargs={
             "session_id": SESSION,
-            "received_at_ms": time.time_ns() // 1_000_000,
             "received_at_monotonic_ns": time.monotonic_ns(),
         },
     )
@@ -129,13 +153,20 @@ def test_disconnect_waits_for_old_command_thread_before_clearing_owner() -> None
     assert transport._command_thread is None
 
 
-def test_proposal_ttl_is_checked_only_at_mac_receipt() -> None:
+def test_mac_does_not_compare_server_ttl_with_its_wall_clock() -> None:
     called = False
 
-    def handler(_envelope, _fingerprint):
+    def handler(envelope, _fingerprint):
         nonlocal called
         called = True
-        raise AssertionError("expired proposal must not reach command handler")
+        return RobotCommandResult(
+            gateway_session_id=envelope.gateway_session_id,
+            command_id=envelope.command_id,
+            command_kind=envelope.command_kind,
+            status=ToolStatus.FAILED,
+            error_code=ErrorCode.ROBOT_TIMEOUT,
+            error_message="handler ran after server authorization",
+        )
 
     now_ms = time.time_ns() // 1_000_000
     frame = _frame(now_ms=now_ms - 31_000)
@@ -150,13 +181,78 @@ def test_proposal_ttl_is_checked_only_at_mac_receipt() -> None:
     transport._run_command(
         frame,
         session_id=SESSION,
-        received_at_ms=now_ms,
         received_at_monotonic_ns=time.monotonic_ns(),
     )
 
-    assert called is False
+    assert called is True
     assert transport._command_result is not None
     result = transport._command_result.result
-    assert result.error_code == ErrorCode.COMMAND_EXPIRED
-    assert "reach the Mac" in (result.error_message or "")
+    assert result.error_code == ErrorCode.ROBOT_TIMEOUT
+    assert result.error_message == "handler ran after server authorization"
+
+
+def test_server_denial_does_not_start_mac_command_handler() -> None:
+    called = threading.Event()
+    frame = _frame()
+    connection = _ScriptedConnection([
+        frame.model_dump_json(),
+        (
+            '{"type":"ack","message_sequence":1,'
+            f'"command_id":"{frame.envelope.command_id}",'
+            '"execute":false,"error_code":"COMMAND_EXPIRED"}'
+        ),
+    ])
+    transport = CloudTransport(
+        "ws://127.0.0.1:18001/v1/gateway/connect",
+        secret=b"x" * 32,
+        gateway_id="test-gateway",
+        command_handler=lambda *_args: called.set(),
+    )
+    transport._connection = connection
+    transport.session_id = SESSION
+
+    transport._send_and_confirm(_heartbeat())
+
+    assert not called.is_set()
+    assert transport._active_command_id is None
+    assert transport._command_thread is None
+
+
+def test_mac_starts_handler_only_after_server_execution_authorization() -> None:
+    called = threading.Event()
+    frame = _frame()
+
+    def handler(envelope, _fingerprint):
+        called.set()
+        return RobotCommandResult(
+            gateway_session_id=envelope.gateway_session_id,
+            command_id=envelope.command_id,
+            command_kind=envelope.command_kind,
+            status=ToolStatus.FAILED,
+            error_code=ErrorCode.ROBOT_TIMEOUT,
+        )
+
+    connection = _ScriptedConnection([
+        frame.model_dump_json(),
+        (
+            '{"type":"ack","message_sequence":1,'
+            f'"command_id":"{frame.envelope.command_id}",'
+            '"execute":true,"error_code":null}'
+        ),
+    ])
+    transport = CloudTransport(
+        "ws://127.0.0.1:18001/v1/gateway/connect",
+        secret=b"x" * 32,
+        gateway_id="test-gateway",
+        command_handler=handler,
+    )
+    transport._connection = connection
+    transport.session_id = SESSION
+
+    transport._send_and_confirm(_heartbeat())
+
+    assert called.wait(timeout=1)
+    assert transport._command_thread is not None
+    transport._command_thread.join(timeout=1)
+    assert transport._command_result is not None
 

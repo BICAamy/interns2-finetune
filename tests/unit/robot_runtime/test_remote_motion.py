@@ -129,6 +129,11 @@ def test_proposal_is_inert_until_same_fingerprint_is_confirmed() -> None:
     assert dispatched is not None
     assert dispatched.envelope.payload.translation_mm == (1.0, 0.0, 0.0)
     assert provider.take_gateway_command(session_id) is None
+    assert provider.acknowledge_gateway_command(
+        dispatched.envelope.command_id,
+        dispatched.fingerprint,
+        session_id,
+    ) is True
 
     final_pose = dispatched.envelope.expected_start_pose_robot_base.model_copy(update={
         "translation_mm": (
@@ -193,6 +198,11 @@ def test_gateway_failure_preserves_mac_error_code_and_reason() -> None:
     provider.confirm_command(request.command_id, fingerprint)
     dispatched = provider.take_gateway_command(session_id)
     assert dispatched is not None
+    assert provider.acknowledge_gateway_command(
+        dispatched.envelope.command_id,
+        dispatched.fingerprint,
+        session_id,
+    ) is True
 
     provider.ingest_gateway_result(
         dispatched.fingerprint,
@@ -209,3 +219,32 @@ def test_gateway_failure_preserves_mac_error_code_and_reason() -> None:
     assert failed.status == CommandExecutionStatus.FAILED
     assert failed.error.code == ErrorCode.OUT_OF_WORKSPACE
     assert failed.error.message == "ValueError: path leaves approved workspace"
+
+
+def test_gateway_receipt_ttl_uses_server_monotonic_clock() -> None:
+    _sessions, provider, session_id = enabled_provider()
+    request = MoveRelativeRequest(
+        command_id="remote-relative-expired-on-delivery",
+        translation_mm=(1, 0, 0),
+        frame=CoordinateFrame.ROBOT_BASE,
+        speed_mm_s=2,
+    )
+    record, _ = provider.submit(RobotCommandKind.MOVE_RELATIVE, request)
+    fingerprint = record.result["proposal"]["fingerprint"]
+    provider.confirm_command(request.command_id, fingerprint)
+    dispatched = provider.take_gateway_command(session_id)
+    assert dispatched is not None
+
+    assert provider.remote_motion is not None
+    provider.remote_motion._delivery_deadlines_ns[request.command_id] = 0
+    assert provider.acknowledge_gateway_command(
+        request.command_id,
+        dispatched.fingerprint,
+        session_id,
+    ) is False
+    failed = provider.get_command(request.command_id)
+    assert failed.status == CommandExecutionStatus.FAILED
+    assert failed.error.code == ErrorCode.COMMAND_EXPIRED
+    assert failed.error.message == (
+        "proposal did not reach the Mac before its 30-second TTL"
+    )

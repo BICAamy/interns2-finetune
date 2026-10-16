@@ -97,6 +97,8 @@ class RemoteMotionStore:
         self._frames: dict[str, GatewayCommandFrame] = {}
         self._pending: deque[str] = deque()
         self._dispatched: set[str] = set()
+        self._delivery_deadlines_ns: dict[str, int] = {}
+        self._gateway_accepted: set[str] = set()
 
     @staticmethod
     def _request_key(
@@ -531,8 +533,60 @@ class RemoteMotionStore:
                     )
                     continue
                 self._dispatched.add(command_id)
+                # Convert the remaining server-owned wall-clock TTL to a
+                # server-local monotonic deadline.  From this point onward no
+                # decision depends on either host's wall clock.
+                remaining_ms = max(
+                    0,
+                    frame.envelope.expires_at_ms
+                    - (time.time_ns() // 1_000_000),
+                )
+                self._delivery_deadlines_ns[command_id] = (
+                    time.monotonic_ns() + remaining_ms * 1_000_000
+                )
                 return frame.model_copy(deep=True)
         return None
+
+    def acknowledge_gateway_receipt(
+        self,
+        command_id: str,
+        fingerprint: str,
+        session_id: str,
+    ) -> bool:
+        """Authorize execution after the Mac proves receipt of this frame.
+
+        Proposal TTL is server-owned.  The Mac deliberately does not compare
+        server timestamps with its own wall clock.
+        """
+        with self._lock:
+            record = self._get_locked(command_id)
+            frame = self._frames.get(command_id)
+            deadline_ns = self._delivery_deadlines_ns.get(command_id)
+            if (
+                frame is None
+                or record.status != CommandExecutionStatus.RUNNING
+                or command_id not in self._dispatched
+                or fingerprint != frame.fingerprint
+                or session_id != frame.envelope.gateway_session_id
+                or deadline_ns is None
+            ):
+                raise RobotRuntimeServiceError(
+                    ErrorCode.COMMAND_CONFLICT,
+                    "gateway receipt does not match the dispatched proposal",
+                    status_code=409,
+                    command_id=command_id,
+                )
+            if time.monotonic_ns() >= deadline_ns:
+                self._fail_locked(
+                    command_id,
+                    ErrorCode.COMMAND_EXPIRED,
+                    "proposal did not reach the Mac before its 30-second TTL",
+                )
+                self._delivery_deadlines_ns.pop(command_id, None)
+                return False
+            self._gateway_accepted.add(command_id)
+            self._delivery_deadlines_ns.pop(command_id, None)
+            return True
 
     def finish(self, fingerprint: str, result: RobotCommandResult) -> None:
         with self._lock:
@@ -541,6 +595,7 @@ class RemoteMotionStore:
             if (
                 record.status != CommandExecutionStatus.RUNNING
                 or result.command_id not in self._dispatched
+                or result.command_id not in self._gateway_accepted
                 or fingerprint != frame.fingerprint
                 or result.gateway_session_id != frame.envelope.gateway_session_id
                 or result.command_kind != frame.envelope.command_kind

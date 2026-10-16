@@ -181,6 +181,20 @@ class HuayanRealProvider:
             return None
         return self.remote_motion.take_for_gateway(session_id)
 
+    def acknowledge_gateway_command(
+        self,
+        command_id: str,
+        fingerprint: str,
+        session_id: str,
+    ) -> bool:
+        if self.remote_motion is None:
+            raise self._unavailable()
+        return self.remote_motion.acknowledge_gateway_receipt(
+            command_id,
+            fingerprint,
+            session_id,
+        )
+
     def ingest_gateway_result(self, fingerprint: str, result: RobotCommandResult) -> None:
         if self.remote_motion is None:
             raise self._unavailable()

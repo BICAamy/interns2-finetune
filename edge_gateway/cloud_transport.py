@@ -281,33 +281,22 @@ class CloudTransport:
         frame: GatewayCommandFrame,
         *,
         session_id: str,
-        received_at_ms: int,
         received_at_monotonic_ns: int,
     ) -> None:
         assert self.command_handler is not None
         self._command_context.received_at_monotonic_ns = received_at_monotonic_ns
         try:
             try:
-                if not (
-                    frame.envelope.created_at_ms
-                    <= received_at_ms
-                    < frame.envelope.expires_at_ms
-                ):
-                    result = RobotCommandResult(
-                        gateway_session_id=frame.envelope.gateway_session_id,
-                        command_id=frame.envelope.command_id,
-                        command_kind=frame.envelope.command_kind,
-                        status=ToolStatus.FAILED,
-                        error_code=ErrorCode.COMMAND_EXPIRED,
-                        error_message=(
-                            "proposal did not reach the Mac before its 30-second TTL"
-                        ),
-                    )
-                else:
-                    result = self.command_handler(
-                        frame.envelope,
-                        frame.fingerprint,
-                    )
+                # created_at_ms/expires_at_ms are stamped by the server.  The
+                # Mac must never compare them with its own wall clock: even a
+                # small host clock skew can make a freshly received proposal
+                # look expired.  The server authorizes execution in the ACK;
+                # once authorized, all local deadlines use this immutable
+                # Mac monotonic receipt timestamp.
+                result = self.command_handler(
+                    frame.envelope,
+                    frame.fingerprint,
+                )
             except Exception as exc:
                 result = RobotCommandResult(
                     gateway_session_id=frame.envelope.gateway_session_id,
@@ -384,24 +373,54 @@ class CloudTransport:
                             "command arrived without an active gateway session"
                         )
                     self._active_command_id = frame.envelope.command_id
-                    received_at_ms = time.time_ns() // 1_000_000
                     received_at_monotonic_ns = time.monotonic_ns()
+                self._connection.send(GatewayCommandAcceptedFrame(
+                    command_id=frame.envelope.command_id,
+                    fingerprint=frame.fingerprint,
+                ).model_dump_json())
+                authorization = parse_wire_json(
+                    self._connection.recv(timeout=3)
+                )
+                if (
+                    authorization.get("type") != "ack"
+                    or authorization.get("message_sequence")
+                    != payload.message_sequence
+                    or authorization.get("command_id")
+                    != frame.envelope.command_id
+                    or not isinstance(authorization.get("execute"), bool)
+                ):
+                    raise ValueError(
+                        "gateway command execution authorization is missing or mismatched"
+                    )
+                if authorization["execute"] is not True:
+                    # The server remains the source of truth for the failed
+                    # command record.  No result is emitted because no Mac
+                    # command handler (and therefore no robot write) ran.
+                    with self._command_lock:
+                        if self._active_command_id == frame.envelope.command_id:
+                            self._active_command_id = None
+                            self._command_thread = None
+                            self._command_result = None
+                    return
+                with self._command_lock:
+                    if (
+                        self.session_id != session_id
+                        or self._active_command_id != frame.envelope.command_id
+                    ):
+                        raise RuntimeError(
+                            "gateway session changed before command authorization"
+                        )
                     self._command_thread = threading.Thread(
                         target=self._run_command,
                         args=(frame,),
                         kwargs={
                             "session_id": session_id,
-                            "received_at_ms": received_at_ms,
                             "received_at_monotonic_ns": received_at_monotonic_ns,
                         },
                         daemon=True,
                     )
                     self._command_thread.start()
-                self._connection.send(GatewayCommandAcceptedFrame(
-                    command_id=frame.envelope.command_id,
-                    fingerprint=frame.fingerprint,
-                ).model_dump_json())
-                continue
+                return
             if response.get("type") != "ack" or response.get("message_sequence") != payload.message_sequence:
                 raise ValueError("gateway acknowledgement is missing or mismatched")
             return

@@ -262,10 +262,30 @@ def create_app(
                             or accepted.fingerprint != pending_command.fingerprint
                         ):
                             raise GatewaySessionError("unsolicited command acceptance")
+                        authorize = getattr(
+                            runtime_provider,
+                            "acknowledge_gateway_command",
+                            None,
+                        )
+                        if authorize is None:
+                            raise GatewaySessionError(
+                                "provider cannot authorize command execution"
+                            )
+                        execute = authorize(
+                            accepted.command_id,
+                            accepted.fingerprint,
+                            hello.handshake.gateway_session_id,
+                        )
                         await websocket.send_json({
                             "type": "ack",
                             "message_sequence": pending_ack_sequence,
                             "command_id": accepted.command_id,
+                            "execute": execute,
+                            "error_code": (
+                                None
+                                if execute
+                                else ErrorCode.COMMAND_EXPIRED.value
+                            ),
                         })
                         pending_ack_sequence = None
                         pending_command = None
