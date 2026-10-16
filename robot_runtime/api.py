@@ -186,6 +186,20 @@ def create_app(
     def state() -> SimulationTelemetry | RobotTelemetry:
         return runtime_provider.get_telemetry()
 
+    if selected == RuntimeMode.SIMULATION:
+        @router.post("/v1/suggestions/random-motion")
+        def random_motion_suggestion():
+            from simulation.entry_point_env.config import EntryPointEnvConfig
+            from simulation.entry_point_env.random_commands import generate_random_commands
+
+            snapshot = runtime_provider.get_telemetry()
+            if snapshot.state.active_command_id or snapshot.state.estop or snapshot.state.motion_state == "moving":
+                raise RobotRuntimeServiceError(ErrorCode.OPERATION_NOT_ENABLED, "机械臂尚未空闲", status_code=409)
+            try:
+                return generate_random_commands(EntryPointEnvConfig.from_yaml(), snapshot.joint_positions_deg)
+            except ValueError as error:
+                raise RobotRuntimeServiceError(ErrorCode.OPERATION_NOT_ENABLED, str(error), status_code=409) from error
+
     if selected == RuntimeMode.REAL:
         @router.get("/v1/mirror")
         def mirror_status() -> dict[str, Any]:
@@ -297,6 +311,13 @@ def create_app(
                 disconnected = getattr(runtime_provider, "gateway_disconnected", None)
                 if disconnected is not None and opened_session_id is not None:
                     disconnected(opened_session_id)
+
+    @router.get("/v1/visualization/joint-labels")
+    def joint_labels():
+        getter = getattr(runtime_provider, 'get_joint_labels', None)
+        if selected != RuntimeMode.SIMULATION or getter is None:
+            return {"available": False, "labels": []}
+        return getter()
 
     @router.get("/v1/camera", response_model=SimulationCameraState)
     def camera_state() -> SimulationCameraState:

@@ -27,6 +27,7 @@ from .config import DEFAULT_CONFIG_PATH, EntryPointEnvConfig
 from .controller import ContinuousTrajectoryController, SimulationStep
 from .kinematics import KinematicSnapshot
 from .renderer import TrajectoryRenderer
+from .joint_labels import project_joint_labels
 from .visual_theme import apply_opengl_background
 
 
@@ -42,6 +43,7 @@ class EntryPointObservation:
     trajectory_mm: tuple[tuple[float, float, float], ...]
     joint_positions_deg: tuple[float, float, float, float, float, float]
     rgb: np.ndarray | None
+    joint_labels: tuple[dict[str, Any], ...] = ()
 
 
 class EntryPointReachEnv(SofaEnv):
@@ -60,6 +62,7 @@ class EntryPointReachEnv(SofaEnv):
         self.controller = ContinuousTrajectoryController(self.config)
         self.camera_controller = OrbitCameraController()
         self._trajectory_renderer = TrajectoryRenderer()
+        self._last_joint_labels: tuple[dict[str, Any], ...] = ()
         self._last_step = self.controller.snapshot()
         resolved_model_dir = Path(
             model_dir
@@ -304,6 +307,10 @@ class EntryPointReachEnv(SofaEnv):
         tcp_scene = self._mm_to_scene(self.controller.get_state().tcp_position.as_tuple())
         entry = self.controller.entry_point
         entry_scene = self._mm_to_scene(entry.as_tuple()) if entry is not None else None
+        self._last_joint_labels = project_joint_labels(
+            self.controller.kinematic_snapshot.link_transforms, frame.shape,
+            lambda point: world_to_pixel_coordinates(point, self._camera_object),
+        )
         return self._trajectory_renderer.render(
             frame,
             trajectory_scene=trajectory_scene,
@@ -319,6 +326,7 @@ class EntryPointReachEnv(SofaEnv):
             trajectory_mm=self.controller.trajectory_mm,
             joint_positions_deg=self.controller.joint_positions_deg,
             rgb=self._render_overlay(base_frame),
+            joint_labels=self._last_joint_labels,
         )
 
     def scene_tcp_position_mm(self) -> tuple[float, float, float]:

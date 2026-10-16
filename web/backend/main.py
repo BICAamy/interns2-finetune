@@ -12,6 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from .api import router as api_router
 from .gesture.routes import router as gesture_router
 from .runtime import WebRuntime
+from .manual_control import router as manual_router
+from .random_commands import router as random_commands_router
 from .sessions import SessionConflict, SessionNotFound
 from .websocket import router as websocket_router
 
@@ -34,8 +36,12 @@ def create_app(
         try:
             yield
         finally:
-            if provided_runtime is None:
-                selected.close()
+            try:
+                if hasattr(selected, 'manual'):
+                    await selected.manual.shutdown()
+            finally:
+                if provided_runtime is None:
+                    selected.close()
 
     app = FastAPI(
         title="InternS2 Surgical Navigation Web Console",
@@ -66,6 +72,8 @@ def create_app(
         )
 
     app.include_router(api_router)
+    app.include_router(manual_router)
+    app.include_router(random_commands_router)
     app.include_router(gesture_router)
     app.include_router(websocket_router)
 

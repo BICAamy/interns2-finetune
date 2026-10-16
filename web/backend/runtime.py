@@ -70,6 +70,7 @@ from .simulation_proxy import (
     SimulationProxyError,
 )
 from .sessions import SessionConflict, SessionStore
+from .manual_control import ManualController
 
 
 class CommandParser(Protocol):
@@ -385,6 +386,7 @@ class WebRuntime:
             asr_settings or ASRSettings.from_env(),
             transcriber=speech_transcriber,
         )
+        self.manual = ManualController(self)
 
     @classmethod
     def from_env(cls, env_file: str | Path | None = None) -> "WebRuntime":
@@ -528,6 +530,8 @@ class WebRuntime:
     async def set_robot_mode(
         self, session_id: str, *, mode: RuntimeMode,
     ) -> SessionSnapshot:
+        self.manual.assert_task_allowed(self._session_mode(session_id))
+        self.manual.assert_task_allowed(mode)
         session = self.store.snapshot(session_id)
         if session.status in _BUSY_STATUSES or session.pending_confirmation:
             raise SessionConflict("当前任务尚未结束，不能切换机械臂模式")
@@ -596,14 +600,16 @@ class WebRuntime:
             ),
         )
 
-    @staticmethod
     def _apply_mode(
+        self,
         record: Any,
         mode: RuntimeMode,
         *,
         current_tcp: dict[str, Any] | None,
         notice: str | None,
     ) -> None:
+        self.manual.assert_task_allowed(record.robot_mode)
+        self.manual.assert_task_allowed(mode)
         record.robot_mode = mode
         record.mode_notice = notice
         record.current_tcp = current_tcp
@@ -1039,6 +1045,7 @@ class WebRuntime:
         parse_token = uuid4().hex
 
         def begin(record) -> None:
+            self.manual.assert_task_allowed(record.robot_mode)
             if record.status in _BUSY_STATUSES:
                 raise SessionConflict("session already has a pending or active command")
             record.status = SessionStatus.PARSING
@@ -1280,6 +1287,7 @@ class WebRuntime:
         selected: dict[str, Any] = {}
 
         def begin(record) -> None:
+            self.manual.assert_task_allowed(record.robot_mode)
             if record.pending_command is None:
                 raise SessionConflict("session has no command awaiting confirmation")
             if selected_mode == RuntimeMode.REAL:
@@ -1366,6 +1374,7 @@ class WebRuntime:
         selected_mode, _parser, _robot, _observer, orchestrator = (
             self._resources_for_session(session_id)
         )
+        await self.manual.stop_external(selected_mode)
         if selected_mode == RuntimeMode.REAL:
             raise SessionConflict(
                 "真实模式的所有运动都通过网页确认的 MotionSequence 执行；"

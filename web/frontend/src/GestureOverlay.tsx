@@ -143,7 +143,7 @@ export default function GestureOverlay() {
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) return;
 
-    // Mirror the frame before sending it to InternS2 so image left/right
+    // Mirror the frame before sending it to 天府·慧研 so image left/right
     // matches the operator's own left/right and the visible preview.
     context.save();
     context.translate(width, 0);
@@ -275,7 +275,7 @@ export default function GestureOverlay() {
       <div className="gesture-overlay-heading">
         <div>
           <strong>手势控制</strong>
-          <span>InternS2 视觉识别 · 操作者自身视角</span>
+          <span>天府·慧研 视觉识别 · 操作者自身视角</span>
         </div>
         <button onClick={() => setCollapsed((value) => !value)}>
           {collapsed ? "展开" : "收起"}
@@ -304,7 +304,7 @@ export default function GestureOverlay() {
             <div className={`gesture-result ${result.decision}`}>
               <strong>{gestureLabels[result.recognition.gesture]}</strong>
               <span>
-                置信度 {(result.recognition.confidence * 100).toFixed(1)}% · InternS2 {result.recognition.latency_ms} ms
+                置信度 {(result.recognition.confidence * 100).toFixed(1)}% · 天府·慧研 {result.recognition.latency_ms} ms
               </span>
               <p>{result.message}</p>
             </div>

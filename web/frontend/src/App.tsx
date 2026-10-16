@@ -1,3 +1,5 @@
+import ManualControl from "./ManualControl";
+import { agentThemeMenu } from "./AgentThemeMenu";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { api, fileToDataUrl, openSessionSocket } from "./api";
@@ -114,6 +116,9 @@ export default function App() {
   const [enableBusy, setEnableBusy] = useState(false);
   const [trajectoryClearBusy, setTrajectoryClearBusy] = useState(false);
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
+  const [randomMotionSummary, setRandomMotionSummary] = useState("");
+  const [randomMotionBusy, setRandomMotionBusy] = useState(false);
+  const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const [image, setImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
@@ -272,6 +277,11 @@ export default function App() {
   const activeModeSettings = modeSettings[runtimeMode];
   const workspaceLow = activeModeSettings?.workspace_low_mm;
   const workspaceHigh = activeModeSettings?.workspace_high_mm;
+  const canGenerateRandomMotion = Boolean(
+    runtimeMode === "simulation" && session && !isBusy && !modeBusy && !randomMotionBusy &&
+    !session.pending_confirmation && telemetry?.connected && !telemetry.moving &&
+    !telemetry.estop && telemetry.current_tcp,
+  );
   const videoUrl = session
     ? api.videoUrl(session.session_id, videoAttempt, runtimeMode)
     : "";
@@ -484,6 +494,23 @@ export default function App() {
   }
 
 
+  async function fillRandomMotion() {
+    if (!canGenerateRandomMotion || !session) return;
+    setRandomMotionBusy(true);
+    setRequestError(null);
+    try {
+      const generated = await api.randomMotion(session.session_id);
+      setPrompt(generated.prompt);
+      setRandomMotionSummary(`${generated.name} · ${generated.stepCount} 步 · 可编辑后解析`);
+      promptRef.current?.focus({ preventScroll: true });
+      promptRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    } catch (error) {
+      setRequestError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRandomMotionBusy(false);
+    }
+  }
+
   async function submit() {
     if (!session || !canSubmit) return;
     setRequestError(null);
@@ -513,114 +540,24 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell robot-workbench">
       <AmbientWaveBackground />
-      <header className="topbar">
-        <div className="brand">
-          <div className="brand-mark">IS</div>
-          <div>
-            <h1>InternS2 手术导航控制台</h1>
-            <p>{runtimeMode === "real" ? "真实机械臂 · 实际反馈数字孪生" : runtimeMode === "simulation" ? "E05-Pro 仿真定位" : "正在确认机器人运行模式"}</p>
-          </div>
-        </div>
-        <div className="topbar-actions">
-          <label className="mode-picker">
-            <span>运行模式</span>
-            <select
-              value={runtimeMode}
-              disabled={!session || modeBusy || isBusy || session?.pending_confirmation}
-              onChange={(event) => void selectRobotMode(
-                event.target.value as "simulation" | "real",
-              )}
-            >
-              {availableModes.includes("simulation") && (
-                <option value="simulation">仿真</option>
-              )}
-              {availableModes.includes("real") && (
-                <option value="real">真实机械臂</option>
-              )}
-            </select>
-          </label>
-          <span className={`connection ${connected ? "online" : "offline"}`}>
-            {runtimeMode === "real" ? `网关 ${telemetry?.connections.gateway ?? "未知"} · DataSheet ${telemetry?.connections.datasheet ?? "未知"}` : connected ? "状态已连接" : "状态连接中"}
-          </span>
-          <span className={`connection ${videoConnected ? "online" : "offline"}`}>
-            {videoConnected ? "数字孪生画面已连接" : "视频连接中"}
-          </span>
-          {runtimeMode === "real" && (
-            <>
-              <button
-                className="button primary"
-                disabled={!session || enableBusy || telemetry?.enabled === true || realStale}
-                onClick={() => void setRobotEnabled(true)}
-              >
-                {enableBusy ? "处理中…" : "使能"}
-              </button>
-              <button
-                className="button secondary"
-                disabled={!session || enableBusy || telemetry?.enabled !== true || telemetry?.moving === true || realStale}
-                onClick={() => void setRobotEnabled(false)}
-              >
-                {enableBusy ? "处理中…" : "去使能"}
-              </button>
-            </>
-          )}
-          <button
-            className="button stop"
-            disabled={!session || runtimeMode !== "simulation"}
-            onClick={() => session && run(() => api.action(session.session_id, "stop"))}
-          >
-            停止
-          </button>
-          <button
-            className="button estop"
-            disabled={!session || runtimeMode !== "simulation"}
-            onClick={() => session && run(() => api.action(session.session_id, "estop"))}
-          >
-            紧急停止
-          </button>
-        </div>
+      <header className="tianfu-banner agent-masthead">
+        <div className="tianfu-brand"><span className="tianfu-brand-content"><span className="tianfu-logo"><img src="/tianfu-logo.jpg" alt="" width="48" height="48"/></span><span>天府·慧研</span></span><span className="agent-masthead-title">智能实验机械臂Agent</span></div>
+        <div className="tianfu-banner-actions" dangerouslySetInnerHTML={{__html: agentThemeMenu}}/>
       </header>
-
-      <main>
-        <section className={`status-banner ${statusTone}`}>
-          <div className="status-pulse" />
-          <div>
-            <span>当前状态</span>
-            <strong>{session?.status_label ?? "正在创建安全会话"}</strong>
-            {session?.message && <p className="operation-message">{session.message}</p>}
-          </div>
-          <div className="session-meta">
-            <span>{runtimeMode === "real" ? `真实 / ${telemetry?.enabled ? "已使能" : "未使能"}` : runtimeMode === "simulation" ? "仿真模式" : "模式未确认"}</span>
-            <code>{session?.session_id.slice(-10) ?? "—"}</code>
-          </div>
-        </section>
-
-        {(requestError || session?.error) && (
-          <section className="error-banner">
-            <strong>{requestError ?? String(session?.error?.code ?? "任务错误")}</strong>
-            <span>{String(session?.error?.message ?? "")}</span>
-          </section>
-        )}
-
-        {session?.mode_notice && (
-          <section className="mode-notice" role="status">
-            <strong>{session.mode_notice}</strong>
-          </section>
-        )}
-
-        <div className="dashboard-grid">
-          <section className="panel simulation-panel">
+      <main className="robot-workspace">
+        <div className="dashboard-grid workbench-grid">
+          <section className="panel simulation-panel" aria-label="机器人实时画面">
             <div className="panel-heading">
               <div>
-                <span className="eyebrow">01 · 真机仿真</span>
-                <h2>E05-Pro 实时画面与任务控制</h2>
+                <span className="eyebrow">实时画面</span>
+                <h2>E05-Pro 数字孪生</h2>
               </div>
               <span className={`step-badge ${telemetry?.connected ? "live" : ""}`}>
                 {telemetry?.connected ? (runtimeMode === "real" ? `FRESH · ${Math.round(telemetry.source_age_ms ?? 0)} ms` : `${telemetry.simulation_fps ?? 0} FPS`) : (telemetry?.freshness ?? "遥测断开").toUpperCase()}
               </span>
             </div>
-            <div className="simulation-layout">
               <div
                 ref={videoStageRef}
                 className={`video-stage ${cameraDragging ? "dragging" : ""} ${realStale ? "stale" : ""}`}
@@ -688,15 +625,94 @@ export default function App() {
                 {runtimeMode === "real" && telemetry?.mirror_warning && <div className="calibration-warning">{telemetry.mirror_warning}</div>}
                 {cameraError && <div className="camera-error">{cameraError}</div>}
               </div>
+            <div className="viewer-connections" aria-label="连接状态">
+          <span className={`connection ${connected ? "online" : "offline"}`}>
+            {runtimeMode === "real" ? `网关 ${telemetry?.connections.gateway ?? "未知"} · DataSheet ${telemetry?.connections.datasheet ?? "未知"}` : connected ? "状态已连接" : "状态连接中"}
+          </span>
+          <span className={`connection ${videoConnected ? "online" : "offline"}`}>
+            {videoConnected ? "数字孪生画面已连接" : "视频连接中"}
+          </span>
+            </div>
+          </section>
+          <aside className="panel command-console" aria-label="任务操作台">
+            <div className="command-controls">
+              <div className="command-console-heading">
+                <div><span>任务控制</span><h3>实验指令</h3></div>
+          <label className="mode-picker">
+            <span>运行模式</span>
+            <select
+              value={runtimeMode}
+              disabled={!session || modeBusy || isBusy || session?.pending_confirmation}
+              onChange={(event) => void selectRobotMode(
+                event.target.value as "simulation" | "real",
+              )}
+            >
+              {availableModes.includes("simulation") && (
+                <option value="simulation">仿真</option>
+              )}
+              {availableModes.includes("real") && (
+                <option value="real">真实机械臂</option>
+              )}
+            </select>
+          </label>
+              </div>
+              <div className="robot-action-buttons">
+          {runtimeMode === "real" && (
+            <>
+              <button
+                className="button primary"
+                disabled={!session || enableBusy || telemetry?.enabled === true || realStale}
+                onClick={() => void setRobotEnabled(true)}
+              >
+                {enableBusy ? "处理中…" : "使能"}
+              </button>
+              <button
+                className="button secondary"
+                disabled={!session || enableBusy || telemetry?.enabled !== true || telemetry?.moving === true || realStale}
+                onClick={() => void setRobotEnabled(false)}
+              >
+                {enableBusy ? "处理中…" : "去使能"}
+              </button>
+            </>
+          )}
+          <button
+            className="button stop"
+            disabled={!session || runtimeMode !== "simulation"}
+            onClick={() => session && run(() => api.action(session.session_id, "stop"))}
+          >
+            停止
+          </button>
+          <button
+            className="button estop"
+            disabled={!session || runtimeMode !== "simulation"}
+            onClick={() => session && run(() => api.action(session.session_id, "estop"))}
+          >
+            紧急停止
+          </button>
+              </div>
+            </div>
+            <div className="command-console-scroll">
+        <section className={`status-banner ${statusTone}`}>
+          <div className="status-pulse" />
+          <div>
+            <span>当前状态</span>
+            <strong>{session?.status_label ?? "正在创建安全会话"}</strong>
+            {session?.message && <p className="operation-message">{session.message}</p>}
+          </div>
 
-              <aside className="command-console">
-                <div className="command-console-heading">
-                  <div>
-                    <span>任务控制</span>
-                    <h3>医生指令</h3>
-                  </div>
-                  <span className="step-badge">文本 + 可选图像</span>
-                </div>
+        </section>
+        {(requestError || session?.error) && (
+          <section className="error-banner">
+            <strong>{requestError ?? String(session?.error?.code ?? "任务错误")}</strong>
+            <span>{String(session?.error?.message ?? "")}</span>
+          </section>
+        )}
+
+        {session?.mode_notice && (
+          <section className="mode-notice" role="status">
+            <strong>{session.mode_notice}</strong>
+          </section>
+        )}
                 {workspaceLow && workspaceHigh && (
                   <div className="workspace-range" aria-label="Base 坐标系可移动范围">
                     <div>
@@ -711,11 +727,13 @@ export default function App() {
                     ))}
                   </div>
                 )}
+                <div className="instruction-format">文本 + 可选图像</div>
                 <textarea
+              ref={promptRef}
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
               disabled={isBusy}
-              aria-label="手术导航文本指令"
+              aria-label="实验机械臂文本指令"
             />
             <label className="upload-zone">
               <input
@@ -785,17 +803,28 @@ export default function App() {
                 <code>fingerprint {proposal.fingerprint}</code>
               )}
             </div>
-              </aside>
-            </div>
-          </section>
-
-        </div>
-      </main>
-
+          <div className="session-meta">
+            <span>{runtimeMode === "real" ? `真实 / ${telemetry?.enabled ? "已使能" : "未使能"}` : runtimeMode === "simulation" ? "仿真模式" : "模式未确认"}</span>
+            <code>{session?.session_id.slice(-10) ?? "—"}</code>
+          </div>
       <footer>
-        <span>InternS2 Surgical Navigation · {runtimeMode === "real" ? "REAL / WEB CONTROL" : "SIMULATION"}</span>
+        <span>天府·慧研 智能实验机械臂Agent · {runtimeMode === "real" ? "REAL / WEB CONTROL" : "SIMULATION"}</span>
         <strong>{runtimeMode === "real" ? "使能状态来自真实反馈 · 解析后按配置自动执行" : "当前版本未执行穿刺"}</strong>
       </footer>
+            </div>
+            <div className="random-command-footer">
+              <button type="button" className="random-command-button" disabled={!canGenerateRandomMotion} onClick={fillRandomMotion}>
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M3 6h3c5 0 7 12 12 12h3m-4-4 4 4-4 4M3 18h3c2 0 3-2 4-4m4-4c1-2 2-4 4-4h3m-4-4 4 4-4 4" />
+                </svg>
+                <span><strong>{randomMotionBusy ? "正在生成…" : "生成随机指令"}</strong><small aria-live="polite">{randomMotionBusy ? "正在试算平移与关节旋转" : randomMotionSummary || "多步立体轨迹 · 仅填入输入框"}</small></span>
+                <span className="random-command-arrow" aria-hidden="true">↗</span>
+              </button>
+            </div>
+          </aside>
+        </div>
+      </main>
+      <ManualControl sessionId={session?.session_id ?? null} runtimeMode={runtimeMode} telemetry={telemetry} />
     </div>
   );
 }

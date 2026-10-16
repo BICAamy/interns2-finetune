@@ -19,12 +19,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload.message || `请求失败（HTTP ${response.status}）`);
+    throw new Error(payload.message || payload.detail || `请求失败（HTTP ${response.status}）`);
   }
   return payload as T;
 }
 
 export const api = {
+  randomMotion: (sessionId: string) =>
+    request<{ name: string; prompt: string; stepCount: number }>(`/api/sessions/${sessionId}/commands/random-suggestion`, { method: "POST" }),
   health: () => request<{
     runtime_mode: "simulation" | "real";
     default_robot_mode: "simulation" | "real";

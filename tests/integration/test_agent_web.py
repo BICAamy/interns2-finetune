@@ -513,7 +513,7 @@ def test_built_react_application_is_served_from_the_same_origin():
     with TestClient(app) as static_client:
         response = static_client.get("/")
         assert response.status_code == 200
-        assert "InternS2 手术导航控制台" in response.text
+        assert "智能实验机械臂Agent" in response.text
 
 
 def test_telemetry_is_enriched_and_trajectory_is_downsampled():

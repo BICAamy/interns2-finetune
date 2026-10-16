@@ -287,6 +287,8 @@ class GestureCoordinator:
         }
 
         def accept(record) -> None:
+            if hasattr(self.runtime, 'manual'):
+                self.runtime.manual.assert_task_allowed(record.robot_mode)
             if record.status in _BUSY_STATUSES or record.pending_command is not None:
                 raise RuntimeError("session became busy during gesture acceptance")
             record.status = SessionStatus.AWAITING_CONFIRMATION

@@ -160,6 +160,7 @@ class SimulationWorker:
         self._telemetry: SimulationTelemetry | None = None
         self._camera_state: SimulationCameraState | None = None
         self._latest_frame: Any | None = None
+        self._joint_labels: list[dict[str, Any]] = []
         self._frame_sequence = 0
         self._active_command: QueuedCommand | None = None
         self._initialization_error: str | None = None
@@ -792,6 +793,11 @@ class SimulationWorker:
             frame = self._latest_frame.copy() if self._latest_frame is not None else None
             return self._frame_sequence, frame
 
+    def get_joint_labels(self) -> dict[str, Any]:
+        with self._lock:
+            return {"available": True, "frame_sequence": self._frame_sequence,
+                    "labels": [dict(label) for label in self._joint_labels]}
+
     def _capture_locked(self, snapshot: Any) -> None:
         state = self._external_state(snapshot.state)
         joints = tuple(float(value) for value in snapshot.joint_positions_deg)
@@ -802,6 +808,7 @@ class SimulationWorker:
         frame = getattr(snapshot, "rgb", None)
         if frame is not None:
             self._latest_frame = frame.copy()
+            self._joint_labels = [dict(label) for label in getattr(snapshot, 'joint_labels', ())]
             self._frame_sequence += 1
             self._frame_condition.notify_all()
         sequence = 0 if self._telemetry is None else self._telemetry.sequence + 1

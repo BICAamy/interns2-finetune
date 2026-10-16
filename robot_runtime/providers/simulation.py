@@ -42,6 +42,9 @@ class SimulationProvider:
     def get_camera_state(self) -> SimulationCameraState:
         return self.worker.get_camera_state()
 
+    def get_joint_labels(self) -> dict[str, Any]:
+        return self.worker.get_joint_labels()
+
     def control_camera(
         self, request: SimulationCameraControlRequest
     ) -> SimulationCameraState:
