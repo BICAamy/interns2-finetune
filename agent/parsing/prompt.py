@@ -46,6 +46,8 @@ def build_system_prompt(settings: AgentSettings) -> str:
    - 角度单位“度/°”绝不表示笛卡尔移动；方向词附近出现角度时必须按第 8 条旋转处理。
    单轴相对移动在步骤中填写 axis、direction、distance_mm。两个或三个轴同时移动时，
    使用 delta_mm=[dX,dY,dZ]，各分量保留正负号，未移动的轴填 0。
+   使用 delta_mm 时必须省略 axis、direction、distance_mm；使用单轴字段时必须省略
+   delta_mm，二者绝不能同时填写。
 6. 相对移动距离规则：
    - 明确距离填写 distance_mm，value_source=user_provided。
    - “一点/一些/稍微”省略 distance_mm，value_source=configured_default；运行时采用
@@ -201,6 +203,10 @@ def build_submit_surgical_task_tool() -> dict[str, Any]:
                                         "distance_mm": {"type": "number", "exclusiveMinimum": 0},
                                         "delta_mm": {
                                             "type": "array",
+                                            "description": (
+                                                "Complete Base XYZ delta; when present omit "
+                                                "axis, direction and distance_mm"
+                                            ),
                                             "items": {"type": "number"},
                                             "minItems": 3,
                                             "maxItems": 3,

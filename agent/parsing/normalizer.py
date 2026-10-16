@@ -610,12 +610,29 @@ class CommandNormalizer:
             )
 
         # Keep the commas in ``X=...,Y=...,Z=...`` together while ordinary
-        # sentence commas remain valid sequence separators.
+        # sentence commas remain valid sequence separators.  A bare numeric
+        # triple is also an unambiguous Base XYZ target when it immediately
+        # follows an absolute-motion verb such as ``去往`` or ``移动到``.
         coordinate_comma = "__COORD_COMMA__"
         protected_text = re.sub(
             r"(?<=\d)[,，](?=(?:Δ)?[YyZz]\s*[=:：])",
             coordinate_comma,
             text.strip(),
+        )
+
+        def protect_absolute_tuple(match: re.Match[str]) -> str:
+            return match.group(0).replace(",", coordinate_comma).replace(
+                "，", coordinate_comma
+            )
+
+        protected_text = re.sub(
+            r"(?:去往|前往|移动到|运动到|到达|到|至)\s*[（(]\s*"
+            r"-?\d+(?:\.\d+)?\s*[,，]\s*"
+            r"-?\d+(?:\.\d+)?\s*[,，]\s*"
+            r"-?\d+(?:\.\d+)?\s*[）)](?:\s*(?:毫米|mm))?",
+            protect_absolute_tuple,
+            protected_text,
+            flags=re.IGNORECASE,
         )
         clauses = [
             part.replace(coordinate_comma, ",").strip()
@@ -683,6 +700,27 @@ class CommandNormalizer:
                         float(cartesian_absolute.group(1)),
                         float(cartesian_absolute.group(2)),
                         float(cartesian_absolute.group(3)),
+                    ],
+                    "frame": CoordinateFrame.ROBOT_BASE.value,
+                    "value_source": DistanceSource.USER_PROVIDED.value,
+                })
+                continue
+
+            bare_cartesian_absolute = re.fullmatch(
+                r"(?:机械臂|TCP)?(?:去往|前往|移动到|运动到|到达|到|至)"
+                r"[（(](-?\d+(?:\.\d+)?)[,，]"
+                r"(-?\d+(?:\.\d+)?)[,，]"
+                r"(-?\d+(?:\.\d+)?)[）)](?:毫米|mm)?",
+                compact,
+                flags=re.IGNORECASE,
+            )
+            if bare_cartesian_absolute is not None:
+                steps.append({
+                    "kind": MotionStepKind.CARTESIAN_ABSOLUTE.value,
+                    "target_position_mm": [
+                        float(bare_cartesian_absolute.group(1)),
+                        float(bare_cartesian_absolute.group(2)),
+                        float(bare_cartesian_absolute.group(3)),
                     ],
                     "frame": CoordinateFrame.ROBOT_BASE.value,
                     "value_source": DistanceSource.USER_PROVIDED.value,
@@ -941,10 +979,11 @@ class CommandNormalizer:
         vector_value = value.get("delta_mm")
         vector: tuple[float, float, float] | None = None
         if vector_value is not None:
-            if any(value.get(name) is not None for name in ("axis", "direction", "distance_mm")):
-                raise self._invalid(
-                    "relative_motion cannot mix an XYZ vector with axis fields"
-                )
+            # Some OpenAI-compatible model servers populate both alternatives
+            # from the flat tool schema.  A complete delta_mm vector already
+            # defines the motion without ambiguity, so canonicalize it and
+            # discard redundant axis/direction/distance fields before the
+            # strict shared contract is built.
             if not isinstance(vector_value, (list, tuple)) or len(vector_value) != 3:
                 raise self._invalid("relative_motion.delta_mm must contain [dx, dy, dz]")
             parsed_vector: list[float] = []

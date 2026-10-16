@@ -128,6 +128,54 @@ class InternS2AgentTests(unittest.TestCase):
         self.assertEqual(steps[3].rotation_deg, -70.0)
         self.assertEqual(client.chat.completions.requests, [])
 
+    def test_relative_rotation_absolute_tuple_sequence_uses_fast_path(self):
+        client = FakeInternS2Client(calls=[])
+        agent = InternS2Agent(
+            make_settings(),
+            client=client,
+            command_id_factory=lambda: "cmd-relative-absolute-sequence",
+        )
+
+        result = agent.parse_command(
+            "往前50mm，向右转40度，然后去往（300, 500, 400），"
+            "然后向左转40度"
+        )
+
+        self.assertEqual(result.command.intent, CommandIntent.MOVE_SEQUENCE)
+        steps = result.command.motion_sequence.steps
+        self.assertEqual(len(steps), 4)
+        self.assertEqual(steps[0].translation_mm, (50.0, 0.0, 0.0))
+        self.assertEqual(steps[1].joint_index, 1)
+        self.assertEqual(steps[1].rotation_deg, -40.0)
+        self.assertEqual(steps[2].target_position_mm, (300.0, 500.0, 400.0))
+        self.assertEqual(steps[2].frame, CoordinateFrame.ROBOT_BASE)
+        self.assertEqual(steps[3].joint_index, 1)
+        self.assertEqual(steps[3].rotation_deg, 40.0)
+        self.assertEqual(client.chat.completions.requests, [])
+
+    def test_model_delta_vector_discards_redundant_axis_fields(self):
+        arguments = base_arguments(
+            "move_sequence",
+            motion_steps=[{
+                "kind": "cartesian_relative",
+                "axis": "x",
+                "direction": "positive",
+                "distance_mm": 50,
+                "delta_mm": [50, 0, 0],
+                "frame": "robot_base",
+                "value_source": "user_provided",
+            }],
+        )
+        agent, _client = make_agent(arguments)
+
+        command = agent.parse_command("执行已给出的结构化相对位移").command
+
+        self.assertEqual(command.intent, CommandIntent.MOVE_SEQUENCE)
+        self.assertEqual(
+            command.motion_sequence.steps[0].translation_mm,
+            (50.0, 0.0, 0.0),
+        )
+
     def test_chinese_numbers_split_rotation_and_terminal_punctuation_use_fast_path(self):
         client = FakeInternS2Client(calls=[])
         agent = InternS2Agent(
