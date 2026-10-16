@@ -11,10 +11,11 @@ from fastapi.testclient import TestClient
 from agent.config import AgentSettings
 from agent.parsing.normalizer import CommandNormalizer
 from robot_runtime.api import create_app
+from robot_runtime.provider import ProviderCapabilities
 from simulation.entry_point_env.config import EntryPointEnvConfig
 from simulation.entry_point_env.controller import ContinuousTrajectoryController
 from simulation.entry_point_env.random_commands import generate_random_commands
-from surgical_contracts import MoveSequenceRequest, RuntimeMode
+from surgical_contracts import MoveSequenceRequest, RuntimeMode, SourceFreshness
 from web.backend.random_commands import router
 from web.backend.sessions import SessionStore
 from web.backend.models import SessionStatus
@@ -68,6 +69,48 @@ def test_runtime_suggestion_does_not_submit_commands(monkeypatch):
     assert calls == [CONFIG.robot.initial_joint_positions_deg]
 
 
+def test_real_runtime_suggestion_uses_fresh_actual_joints_and_is_read_only(
+    monkeypatch,
+):
+    import simulation.entry_point_env.random_commands as generator
+
+    snapshot = SimpleNamespace(
+        active_command_id=None,
+        potentially_moving=False,
+        moving=False,
+        freshness=SourceFreshness.FRESH,
+        physical_estop_active=False,
+        vendor_fault=None,
+        joint_positions_deg=CONFIG.robot.initial_joint_positions_deg,
+    )
+    calls = []
+    monkeypatch.setattr(
+        generator,
+        'generate_random_commands',
+        lambda config, joints: calls.append(joints) or {
+            'prompt': '向前移动 20 毫米。',
+            'stepCount': 1,
+        },
+    )
+    provider = SimpleNamespace(
+        mode=RuntimeMode.REAL,
+        capabilities=ProviderCapabilities(),
+        get_telemetry=lambda: snapshot,
+    )
+    with TestClient(
+        create_app(
+            provider=provider,
+            mode=RuntimeMode.REAL,
+            manage_provider=False,
+        )
+    ) as client:
+        assert client.post('/v1/suggestions/random-motion').status_code == 200
+        snapshot.moving = True
+        assert client.post('/v1/suggestions/random-motion').status_code == 409
+
+    assert calls == [CONFIG.robot.initial_joint_positions_deg]
+
+
 def test_web_suggestion_is_read_only_and_refuses_changed_pose(monkeypatch):
     import web.backend.random_commands as web_random
     store = SessionStore()
@@ -102,3 +145,55 @@ def test_web_suggestion_is_read_only_and_refuses_changed_pose(monkeypatch):
         assert client.post(f'/api/sessions/{session.session_id}/commands/random-suggestion').status_code == 409
         assert len(calls) == count
     assert set(calls) == {'/v1/suggestions/random-motion', '/v1/state'}
+
+
+def test_web_suggestion_uses_real_runtime_for_real_session(monkeypatch):
+    import web.backend.random_commands as web_random
+
+    store = SessionStore()
+    session = store.create(robot_mode=RuntimeMode.REAL)
+    positions = list(CONFIG.robot.initial_joint_positions_deg)
+    requested_bases = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            requested_bases.append(kwargs['base_url'])
+
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+
+        async def post(self, path):
+            return httpx.Response(200, json={
+                'name': '真机随机混合运动',
+                'prompt': '向前移动 20 毫米。',
+                'stepCount': 1,
+                'start_joint_positions_deg': positions,
+            })
+
+        async def get(self, path):
+            return httpx.Response(
+                200,
+                json={
+                    'active_command_id': None,
+                    'joint_positions_deg': positions,
+                },
+                request=httpx.Request('GET', 'http://real' + path),
+            )
+
+    monkeypatch.setattr(web_random.httpx, 'AsyncClient', Client)
+    app = FastAPI()
+    app.state.runtime = SimpleNamespace(
+        store=store,
+        _robots={RuntimeMode.REAL: SimpleNamespace(base_url='http://real')},
+        manual=SimpleNamespace(assert_task_allowed=lambda mode: None),
+    )
+    app.include_router(router)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f'/api/sessions/{session.session_id}/commands/random-suggestion'
+        )
+
+    assert response.status_code == 200
+    assert response.json()['prompt'] == '向前移动 20 毫米。'
+    assert requested_bases == ['http://real']

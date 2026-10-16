@@ -278,7 +278,7 @@ export default function App() {
   const workspaceLow = activeModeSettings?.workspace_low_mm;
   const workspaceHigh = activeModeSettings?.workspace_high_mm;
   const canGenerateRandomMotion = Boolean(
-    runtimeMode === "simulation" && session && !isBusy && !modeBusy && !randomMotionBusy &&
+    session && !isBusy && !modeBusy && !randomMotionBusy &&
     !session.pending_confirmation && telemetry?.connected && !telemetry.moving &&
     !telemetry.estop && telemetry.current_tcp,
   );

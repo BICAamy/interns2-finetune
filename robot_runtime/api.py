@@ -35,6 +35,7 @@ from surgical_contracts import (
     RobotHealth,
     RobotTelemetry,
     RuntimeMode,
+    SourceFreshness,
     PROTOCOL_VERSION,
     SimulationHeartbeat,
     SimulationCameraControlRequest,
@@ -186,19 +187,45 @@ def create_app(
     def state() -> SimulationTelemetry | RobotTelemetry:
         return runtime_provider.get_telemetry()
 
-    if selected == RuntimeMode.SIMULATION:
-        @router.post("/v1/suggestions/random-motion")
-        def random_motion_suggestion():
-            from simulation.entry_point_env.config import EntryPointEnvConfig
-            from simulation.entry_point_env.random_commands import generate_random_commands
+    @router.post("/v1/suggestions/random-motion")
+    def random_motion_suggestion():
+        """Generate a read-only suggestion from the selected robot's joints."""
+        from simulation.entry_point_env.config import EntryPointEnvConfig
+        from simulation.entry_point_env.random_commands import generate_random_commands
 
-            snapshot = runtime_provider.get_telemetry()
-            if snapshot.state.active_command_id or snapshot.state.estop or snapshot.state.motion_state == "moving":
-                raise RobotRuntimeServiceError(ErrorCode.OPERATION_NOT_ENABLED, "机械臂尚未空闲", status_code=409)
-            try:
-                return generate_random_commands(EntryPointEnvConfig.from_yaml(), snapshot.joint_positions_deg)
-            except ValueError as error:
-                raise RobotRuntimeServiceError(ErrorCode.OPERATION_NOT_ENABLED, str(error), status_code=409) from error
+        snapshot = runtime_provider.get_telemetry()
+        if selected == RuntimeMode.SIMULATION:
+            busy = (
+                snapshot.state.active_command_id
+                or snapshot.state.estop
+                or snapshot.state.motion_state == "moving"
+            )
+        else:
+            busy = (
+                snapshot.active_command_id
+                or snapshot.potentially_moving
+                or snapshot.moving
+                or snapshot.freshness != SourceFreshness.FRESH
+                or snapshot.physical_estop_active is not False
+                or snapshot.vendor_fault is not None
+            )
+        if busy or snapshot.joint_positions_deg is None:
+            raise RobotRuntimeServiceError(
+                ErrorCode.OPERATION_NOT_ENABLED,
+                "机械臂尚未空闲",
+                status_code=409,
+            )
+        try:
+            return generate_random_commands(
+                EntryPointEnvConfig.from_yaml(),
+                snapshot.joint_positions_deg,
+            )
+        except ValueError as error:
+            raise RobotRuntimeServiceError(
+                ErrorCode.OPERATION_NOT_ENABLED,
+                str(error),
+                status_code=409,
+            ) from error
 
     if selected == RuntimeMode.REAL:
         @router.get("/v1/mirror")
