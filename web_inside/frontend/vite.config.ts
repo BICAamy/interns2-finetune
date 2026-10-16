@@ -2,6 +2,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
+  // A relative asset base lets the same internal build run at `/` when it is
+  // selected alone and at `/inside/` when both frontends are enabled.
+  base: "./",
   plugins: [react()],
   server: {
     port: 5173,

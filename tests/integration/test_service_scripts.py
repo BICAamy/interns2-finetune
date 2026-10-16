@@ -67,6 +67,30 @@ class ServiceScriptsTest(unittest.TestCase):
         self.assertNotIn("[1/4] Starting", output)
         self.assertNotIn("unbound variable", output)
 
+    def test_invalid_web_variant_is_rejected_before_launch(self) -> None:
+        environment = os.environ.copy()
+        environment["INTERNS2_WEB_VARIANT"] = "unsupported"
+        result = subprocess.run(
+            ["bash", str(SERVICE_SCRIPTS / "start_all.sh"), "--check-config"],
+            cwd=APP_ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be web, web_inside, or both", output)
+        self.assertNotIn("[1/4] Starting", output)
+
+    def test_web_variants_share_one_backend_and_control_plane(self) -> None:
+        content = (SERVICE_SCRIPTS / "start_all.sh").read_text(encoding="utf-8")
+        self.assertIn('WEB_VARIANT="${INTERNS2_WEB_VARIANT:-web}"', content)
+        self.assertIn("web|web_inside|both", content)
+        self.assertEqual(content.count("-m web.backend.main"), 1)
+        self.assertNotIn("-m web_inside.backend.main", content)
+        self.assertIn("http://127.0.0.1:8000/inside/", content)
+
     def test_interns2_api_mode_reads_a_secret_file(self) -> None:
         helper = SERVICE_SCRIPTS / "interns2_config.sh"
         with tempfile.TemporaryDirectory() as directory:

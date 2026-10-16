@@ -9,6 +9,7 @@ LOG_DIR="$APP_ROOT/logs/services"
 SERVICE_STATE_DIR="${SERVICE_STATE_DIR:-$APP_ROOT/run/services}"
 SUPERVISOR_PID_FILE="$SERVICE_STATE_DIR/start_all.pid"
 INFERENCE_MODE_FILE="$SERVICE_STATE_DIR/inference_mode"
+WEB_VARIANT_FILE="$SERVICE_STATE_DIR/web_variant"
 
 # shellcheck source=scripts/services/interns2_config.sh
 source "$SCRIPT_DIR/interns2_config.sh"
@@ -51,7 +52,7 @@ clear_supervisor_state() {
         IFS= read -r recorded_pid < "$SUPERVISOR_PID_FILE" || true
     fi
     if [[ "$recorded_pid" == "$$" ]]; then
-        rm -f -- "$SUPERVISOR_PID_FILE" "$INFERENCE_MODE_FILE"
+        rm -f -- "$SUPERVISOR_PID_FILE" "$INFERENCE_MODE_FILE" "$WEB_VARIANT_FILE"
     fi
 }
 
@@ -86,6 +87,13 @@ fail() {
     exit 1
 }
 
+WEB_VARIANT="${INTERNS2_WEB_VARIANT:-web}"
+case "$WEB_VARIANT" in
+    web|web_inside|both) ;;
+    *) fail "INTERNS2_WEB_VARIANT must be web, web_inside, or both." ;;
+esac
+export INTERNS2_WEB_VARIANT="$WEB_VARIANT"
+
 ENV_ROBOT_MODE="${ROBOT_MODE:-}"
 ROBOT_MODE="real"
 REAL_CONFIG_INPUT="configs/robot-real.local.yaml"
@@ -115,6 +123,7 @@ while (( $# > 0 )); do
             ;;
         --help|-h)
             echo "Usage: $0 [--robot-mode simulation|real] [--real-config PATH] [--check-config]"
+            echo "Environment: INTERNS2_WEB_VARIANT=web|web_inside|both (default: web)"
             exit 0
             ;;
         *) fail "Unknown argument: $1" ;;
@@ -346,6 +355,7 @@ echo
 echo "BUNDLE_ROOT = $BUNDLE_ROOT"
 echo "APP_ROOT    = $APP_ROOT"
 echo "INFERENCE   = $INTERNS2_INFERENCE_MODE ($INTERNS2_BASE_URL)"
+echo "WEB UI      = $WEB_VARIANT"
 if [[ "$INTERNS2_INFERENCE_MODE" == local ]]; then
     echo "MODEL_DIR   = $MODEL_DIR"
 elif [[ -n "${INTERNS2_MODEL:-}" ]]; then
@@ -405,8 +415,14 @@ test -d "$E05_MODEL_DIR" \
 test -f "$APP_ROOT/models/asr/faster-whisper-small/model.bin" \
     || fail "ASR model is missing."
 
-test -f "$APP_ROOT/web/frontend/dist/index.html" \
-    || fail "frontend dist is missing. Build web/frontend first."
+if [[ "$WEB_VARIANT" == web || "$WEB_VARIANT" == both ]]; then
+    test -f "$APP_ROOT/web/frontend/dist/index.html" \
+        || fail "demo frontend dist is missing. Build web/frontend first."
+fi
+if [[ "$WEB_VARIANT" == web_inside || "$WEB_VARIANT" == both ]]; then
+    test -f "$APP_ROOT/web_inside/frontend/dist/index.html" \
+        || fail "internal frontend dist is missing. Build web_inside/frontend first."
+fi
 
 if [[ "$INTERNS2_INFERENCE_MODE" == local ]] && ! check_model; then
     echo
@@ -446,12 +462,17 @@ else
     fi
 fi
 echo "ASR             = OK"
-echo "frontend dist   = OK"
+case "$WEB_VARIANT" in
+    web) echo "demo frontend   = OK" ;;
+    web_inside) echo "internal frontend = OK" ;;
+    both) echo "frontends       = demo + internal OK" ;;
+esac
 echo
 
 trap cleanup INT TERM EXIT
 printf '%s\n' "$$" > "$SUPERVISOR_PID_FILE"
 printf '%s\n' "$INTERNS2_INFERENCE_MODE" > "$INFERENCE_MODE_FILE"
+printf '%s\n' "$WEB_VARIANT" > "$WEB_VARIANT_FILE"
 
 
 # --------------------------------------------------
@@ -797,7 +818,18 @@ if [[ "$ROBOT_MODE" == real ]]; then
     echo " robot-simulation   : http://127.0.0.1:8003 (web default/fallback)"
 fi
 echo " planner-adapter    : http://127.0.0.1:8002"
-echo " agent-web          : http://127.0.0.1:8000"
+case "$WEB_VARIANT" in
+    web)
+        echo " agent-web (demo)   : http://127.0.0.1:8000/"
+        ;;
+    web_inside)
+        echo " agent-web (inside) : http://127.0.0.1:8000/"
+        ;;
+    both)
+        echo " agent-web (demo)   : http://127.0.0.1:8000/"
+        echo " agent-web (inside) : http://127.0.0.1:8000/inside/"
+        ;;
+esac
 echo
 echo " Logs:"
 if [[ "$INTERNS2_INFERENCE_MODE" == local ]]; then

@@ -543,7 +543,7 @@ export default function App() {
     <div className="app-shell robot-workbench">
       <AmbientWaveBackground />
       <header className="tianfu-banner agent-masthead">
-        <div className="tianfu-brand"><span className="tianfu-brand-content"><span className="tianfu-logo"><img src="/tianfu-logo.jpg" alt="" width="48" height="48"/></span><span>天府·慧研</span></span><span className="agent-masthead-title">智能实验机械臂Agent</span></div>
+        <div className="tianfu-brand"><span className="tianfu-brand-content"><span className="tianfu-logo"><img src="/assets/tianfu-logo.jpg" alt="" width="48" height="48"/></span><span>天府·慧研</span></span><span className="agent-masthead-title">智能实验机械臂Agent</span></div>
         <div className="tianfu-banner-actions" dangerouslySetInnerHTML={{__html: agentThemeMenu}}/>
       </header>
       <main className="robot-workspace">

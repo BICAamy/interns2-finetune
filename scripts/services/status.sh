@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 APP_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 BUNDLE_ROOT="$(cd "$APP_ROOT/.." && pwd -P)"
 PYTHON="$BUNDLE_ROOT/runtime/envs/agent-web/bin/python"
+SERVICE_STATE_DIR="${SERVICE_STATE_DIR:-$APP_ROOT/run/services}"
+WEB_VARIANT_FILE="$SERVICE_STATE_DIR/web_variant"
 
 # shellcheck source=scripts/services/interns2_config.sh
 source "$SCRIPT_DIR/interns2_config.sh"
@@ -15,6 +17,12 @@ test -x "$PYTHON" || {
 }
 
 interns2_configure "$APP_ROOT" || exit 1
+
+INTERNS2_ACTIVE_WEB_VARIANT="unknown"
+if [[ -r "$WEB_VARIANT_FILE" ]]; then
+    IFS= read -r INTERNS2_ACTIVE_WEB_VARIANT < "$WEB_VARIANT_FILE" || true
+fi
+export INTERNS2_ACTIVE_WEB_VARIANT
 
 "$PYTHON" - <<'PY'
 import json
@@ -29,6 +37,7 @@ api_key = os.environ["INTERNS2_API_KEY"]
 print("==================================================")
 print(" Surgical Navigation Service Status")
 print("==================================================")
+print(f"WEB UI = {os.environ.get('INTERNS2_ACTIVE_WEB_VARIANT', 'unknown')}")
 
 headers = {}
 if api_key != "EMPTY":

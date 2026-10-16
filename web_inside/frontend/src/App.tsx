@@ -14,8 +14,9 @@ import type {
   SimulationTelemetry,
 } from "./types";
 
-const SESSION_KEY = "interns2-surgical-session";
+const SESSION_KEY = "interns2-surgical-session-inside";
 const DEFAULT_PROMPT = "请画出一张正面是爱心，侧面是星星的图案";
+const TIANFU_LOGO_URL = "./assets/tianfu-logo.jpg";
 
 const busyStatuses = new Set([
   "parsing",
@@ -716,7 +717,7 @@ export default function App() {
     <div className="app-shell robot-workbench">
       <AmbientWaveBackground />
       <header className="tianfu-banner agent-masthead">
-        <div className="tianfu-brand"><span className="tianfu-brand-content"><span className="tianfu-logo"><img src="/tianfu-logo.jpg" alt="" width="48" height="48"/></span><span>天府·慧研</span></span><span className="agent-masthead-title">智能实验机械臂Agent</span></div>
+        <div className="tianfu-brand"><span className="tianfu-brand-content"><span className="tianfu-logo"><img src={TIANFU_LOGO_URL} alt="" width="48" height="48"/></span><span>天府·慧研</span></span><span className="agent-masthead-title">智能实验机械臂Agent</span></div>
         <div className="tianfu-banner-actions" dangerouslySetInnerHTML={{__html: agentThemeMenu}}/>
       </header>
       <main className="robot-workspace">
