@@ -17,9 +17,13 @@ from surgical_contracts import (
     GatewayHello,
     LinkState,
     MoveRelativeRequest,
+    MotionStopConfirmation,
+    RobotActionRequest,
     RobotCommandResult,
     RobotCommandKind,
     RobotConnectionState,
+    SoftwareStopResult,
+    StopDelivery,
     ToolStatus,
     hello_auth_tag,
 )
@@ -219,6 +223,55 @@ def test_gateway_failure_preserves_mac_error_code_and_reason() -> None:
     assert failed.status == CommandExecutionStatus.FAILED
     assert failed.error.code == ErrorCode.OUT_OF_WORKSPACE
     assert failed.error.message == "ValueError: path leaves approved workspace"
+
+
+def test_software_stop_preempts_running_motion_and_returns_real_stopped_state() -> None:
+    _sessions, provider, session_id = enabled_provider()
+    motion = MoveRelativeRequest(
+        command_id="remote-motion-before-stop",
+        translation_mm=(1, 0, 0),
+        frame=CoordinateFrame.ROBOT_BASE,
+        speed_mm_s=2,
+    )
+    proposed, _ = provider.submit(RobotCommandKind.MOVE_RELATIVE, motion)
+    fingerprint = proposed.result["proposal"]["fingerprint"]
+    provider.confirm_command(motion.command_id, fingerprint)
+    assert provider.take_gateway_command(session_id) is not None
+
+    stop_request = RobotActionRequest(command_id="real-software-stop")
+    stop_record, created = provider.submit(RobotCommandKind.STOP, stop_request)
+    assert created is True
+    assert stop_record.status == CommandExecutionStatus.RUNNING
+    dispatched_stop = provider.take_gateway_command(session_id)
+    assert dispatched_stop is not None
+    assert (
+        dispatched_stop.envelope.command_kind
+        == GatewayCommandKind.SOFTWARE_STOP_REQUEST
+    )
+    assert provider.acknowledge_gateway_command(
+        stop_request.command_id,
+        dispatched_stop.fingerprint,
+        session_id,
+    ) is True
+    provider.ingest_gateway_result(
+        dispatched_stop.fingerprint,
+        RobotCommandResult(
+            gateway_session_id=session_id,
+            command_id=stop_request.command_id,
+            command_kind=GatewayCommandKind.SOFTWARE_STOP_REQUEST,
+            status=ToolStatus.SUCCESS,
+            software_stop=SoftwareStopResult(
+                delivery=StopDelivery.SENT,
+                motion_stop=MotionStopConfirmation.CONFIRMED,
+            ),
+        ),
+    )
+    completed = provider.get_command(stop_request.command_id)
+    assert completed.status == CommandExecutionStatus.SUCCEEDED
+    assert completed.result["operation"] == RobotCommandKind.STOP.value
+    assert completed.result["state"]["mode"] == "real"
+    assert completed.result["state"]["motion_state"] == "stopped"
+    assert completed.result["state"]["estop"] is False
 
 
 def test_gateway_receipt_ttl_uses_server_monotonic_clock() -> None:

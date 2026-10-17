@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import threading
 import time
 from typing import Callable
 
@@ -14,11 +15,14 @@ from surgical_contracts import (
     MoveJointRelativeRequest,
     MoveRelativeRequest,
     MoveSequenceRequest,
+    MotionStopConfirmation,
     MotionSequenceStep,
     MotionStepKind,
     RobotCommandEnvelope,
     RobotCommandResult,
     RobotTelemetry,
+    SoftwareStopResult,
+    StopDelivery,
     ToolStatus,
     command_fingerprint,
 )
@@ -66,6 +70,10 @@ class RemoteMotionExecutor:
         self._local_preflight_timeout_ms = local_preflight_timeout_ms
         self._used_fingerprints: set[str] = set()
         self._active = False
+        self._trial_lock = threading.RLock()
+        self._active_trial: LocalMotionTrial | None = None
+        self._terminal_state: str | None = None
+        self._done = threading.Event()
 
     def execute(
         self,
@@ -102,6 +110,8 @@ class RemoteMotionExecutor:
             )
 
         self._active = True
+        self._terminal_state = None
+        self._done.clear()
         self._used_fingerprints.add(fingerprint)
         try:
             if envelope.command_kind != GatewayCommandKind.MOVE_SEQUENCE:
@@ -122,6 +132,49 @@ class RemoteMotionExecutor:
             return self._exception_failure(envelope, exc)
         finally:
             self._active = False
+            self._done.set()
+
+    def request_authenticated_stop(
+        self,
+        stop_command_id: str,
+        *,
+        timeout_s: float,
+    ) -> SoftwareStopResult:
+        """Interrupt the currently owned motion through its existing 10003 client.
+
+        The stop shares the active trial instead of opening another controller
+        socket.  Completion is reported only after the motion worker observes
+        fresh stationary READY feedback.
+        """
+
+        if timeout_s <= 0:
+            raise ValueError("software stop timeout must be positive")
+        with self._trial_lock:
+            trial = self._active_trial
+            if trial is None or not trial.potentially_moving:
+                return SoftwareStopResult(
+                    delivery=StopDelivery.NOT_SENT,
+                    motion_stop=MotionStopConfirmation.UNCONFIRMED,
+                )
+            requested = trial.request_authenticated_stop(
+                stop_command_id,
+                authenticated=True,
+            )
+        if requested.delivery != StopDelivery.SENT:
+            return requested
+        if not self._done.wait(timeout_s):
+            return SoftwareStopResult(
+                delivery=StopDelivery.SENT,
+                motion_stop=MotionStopConfirmation.UNCONFIRMED,
+            )
+        return SoftwareStopResult(
+            delivery=StopDelivery.SENT,
+            motion_stop=(
+                MotionStopConfirmation.CONFIRMED
+                if self._terminal_state == "stopped"
+                else MotionStopConfirmation.UNCONFIRMED
+            ),
+        )
 
     def _execute_continuous_sequence(
         self,
@@ -150,6 +203,8 @@ class RemoteMotionExecutor:
                 expires_monotonic_ns=expires_ns,
             )
             trial = self._trial_factory()
+            with self._trial_lock:
+                self._active_trial = trial
             predicted = start
             planned: list[
                 tuple[RobotCommandEnvelope, RobotTelemetry, PreflightTarget]
@@ -237,19 +292,24 @@ class RemoteMotionExecutor:
             self._verify_sequence_start_unchanged(
                 start, readback, fresh, fresh_readback, trial,
             )
-            state = trial.submit_preflighted_sequence(
-                envelope,
-                fresh,
-                fresh_readback,
-                lease,
-                frames,
-                planned[-1][2],
-            )
+            with self._trial_lock:
+                state = trial.submit_preflighted_sequence(
+                    envelope,
+                    fresh,
+                    fresh_readback,
+                    lease,
+                    frames,
+                    planned[-1][2],
+                )
             return self._wait_for_trial(envelope, trial, state, fresh.sequence)
         except Exception as exc:
             if trial is not None and trial.potentially_moving:
                 trial.request_stop(reason="continuous remote sequence failed")
             return self._exception_failure(envelope, exc)
+        finally:
+            with self._trial_lock:
+                if self._active_trial is trial:
+                    self._active_trial = None
 
     def _sequence_child(
         self,
@@ -398,15 +458,18 @@ class RemoteMotionExecutor:
                 expires_monotonic_ns=expires_ns,
             )
             trial = self._trial_factory()
-            state = trial.submit(
-                envelope,
-                snapshot,
-                readback,
-                arm,
-                (lease,),
-                required_lease_owner="remote",
-                enforce_envelope_deadline=False,
-            )
+            with self._trial_lock:
+                self._active_trial = trial
+            with self._trial_lock:
+                state = trial.submit(
+                    envelope,
+                    snapshot,
+                    readback,
+                    arm,
+                    (lease,),
+                    required_lease_owner="remote",
+                    enforce_envelope_deadline=False,
+                )
             return self._wait_for_trial(
                 envelope, trial, state, snapshot.sequence,
             )
@@ -414,6 +477,10 @@ class RemoteMotionExecutor:
             if trial is not None and trial.potentially_moving:
                 trial.request_stop(reason="remote motion executor failed")
             return self._exception_failure(envelope, exc)
+        finally:
+            with self._trial_lock:
+                if self._active_trial is trial:
+                    self._active_trial = None
 
     def _wait_for_trial(
         self,
@@ -430,7 +497,9 @@ class RemoteMotionExecutor:
             if sample.sequence <= last_sequence:
                 continue
             last_sequence = sample.sequence
-            state = trial.observe(sample, feedback_debug=debug)
+            with self._trial_lock:
+                state = trial.observe(sample, feedback_debug=debug)
+        self._terminal_state = state
         final_sample, _debug = self._feedback()
         if state == "succeeded":
             prepare_next = getattr(trial.client, "prepare_next_waypoint", None)

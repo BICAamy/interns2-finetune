@@ -216,9 +216,15 @@ def create_app(
                 status_code=409,
             )
         try:
+            suggestion_config = EntryPointEnvConfig.from_yaml()
             return generate_random_commands(
-                EntryPointEnvConfig.from_yaml(),
+                suggestion_config,
                 snapshot.joint_positions_deg,
+                additional_joint_positions_deg=(
+                    (suggestion_config.robot.initial_joint_positions_deg,)
+                    if selected == RuntimeMode.REAL
+                    else ()
+                ),
             )
         except ValueError as error:
             raise RobotRuntimeServiceError(

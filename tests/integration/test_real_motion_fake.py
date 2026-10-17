@@ -26,9 +26,10 @@ from edge_gateway.preflight import (
 from surgical_contracts import (
     CoordinateFrame, DistanceUnit, ErrorCode, GatewayCommandKind, LinkState,
     MotionSafetyLimits, MotionSequenceStep, MotionStepKind,
+    MotionStopConfirmation,
     MoveRelativeRequest, MoveSequenceRequest, Pose6D, RobotCommandEnvelope,
     RobotConnectionState, RobotProvider, RobotTelemetry, RuntimeMode,
-    SourceFreshness, ToolStatus, command_fingerprint,
+    SourceFreshness, StopDelivery, ToolStatus, command_fingerprint,
 )
 from tests.fakes.huayan_controller import (
     CommandAction, FakeHuayanController, datasheet_document, datasheet_frame,
@@ -301,6 +302,90 @@ def test_continuous_sequence_preflights_every_step_before_first_write(
             assert_no_motion_write(fake)
             assert journal.unresolved() == ()
         finally:
+            journal.close()
+            client.close()
+
+
+def test_authenticated_remote_stop_interrupts_active_trial_and_confirms_feedback(
+    tmp_path,
+) -> None:
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client = FakeMotionClient(
+            "127.0.0.1", fake.command_port, timeout_s=0.1,
+        )
+        client.connect()
+        journal = CommandJournal(tmp_path / "remote-priority-stop.journal")
+        feedback_sequence = 10
+
+        def feedback():
+            nonlocal feedback_sequence
+            feedback_sequence += 1
+            stop_seen = any(
+                frame.startswith(b"GrpStop,")
+                for frame in fake.received_commands
+            )
+            if stop_seen:
+                return telemetry(sequence=feedback_sequence), "stopped after GrpStop"
+            return (
+                telemetry(
+                    sequence=feedback_sequence,
+                    moving=True,
+                    fsm=25,
+                    in_position=False,
+                ),
+                "moving before GrpStop",
+            )
+
+        executor = RemoteMotionExecutor(
+            trial_factory=lambda: FakeMotionTrial(
+                client=client,
+                journal=journal,
+                timing=timing(),
+                approval=approval(),
+                path_ik=ik,
+            ),
+            snapshot=telemetry,
+            readback=readback,
+            feedback=feedback,
+            poll_interval_s=0.001,
+        )
+        command = envelope("remote-motion-to-stop")
+        result_holder = {}
+        worker = threading.Thread(
+            target=lambda: result_holder.setdefault(
+                "result",
+                executor.execute(
+                    command,
+                    command_fingerprint(command),
+                    local_deadline_monotonic_ns=(
+                        time.monotonic_ns() + 2_000_000_000
+                    ),
+                ),
+            ),
+        )
+        try:
+            worker.start()
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline and not any(
+                frame.startswith(b"WayPoint,")
+                for frame in fake.received_commands
+            ):
+                time.sleep(0.001)
+            stop = executor.request_authenticated_stop(
+                "priority-stop-1",
+                timeout_s=1,
+            )
+            worker.join(timeout=1)
+            assert stop.delivery == StopDelivery.SENT
+            assert stop.motion_stop == MotionStopConfirmation.CONFIRMED
+            assert any(
+                frame.startswith(b"GrpStop,")
+                for frame in fake.received_commands
+            )
+            assert worker.is_alive() is False
+            assert result_holder["result"].status == ToolStatus.FAILED
+        finally:
+            worker.join(timeout=1)
             journal.close()
             client.close()
 

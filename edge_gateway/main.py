@@ -11,7 +11,8 @@ from typing import Callable
 from surgical_contracts import (
     ErrorCode, GatewayCommandKind, LinkState, RobotCommandEnvelope,
     MotionStepKind, MoveSequenceRequest, RobotCommandResult, RobotTelemetry,
-    SetEnabledRequest, ToolStatus,
+    MotionStopConfirmation, SetEnabledRequest, SoftwareStopResult,
+    StopDelivery, ToolStatus,
     command_fingerprint,
     load_gateway_secret,
 )
@@ -56,6 +57,8 @@ class EdgeGateway:
         )
         self._controller_operation = threading.Lock()
         self._controller_operation_active = threading.Event()
+        self._active_executor_lock = threading.Lock()
+        self._active_remote_executor = None
         installed_handler = command_handler
         if self._real and installed_handler is None:
             installed_handler = self._execute_real_command
@@ -64,6 +67,7 @@ class EdgeGateway:
             secret=self.secret,
             gateway_id=config.gateway_id,
             command_handler=installed_handler,
+            stop_handler=(self._execute_software_stop if self._real else None),
         )
         self.robot_model: str | None = None
         self.package_version: str | None = None
@@ -296,6 +300,86 @@ class EdgeGateway:
             self._controller_operation_active.clear()
             self._controller_operation.release()
 
+    def _execute_software_stop(
+        self,
+        envelope: RobotCommandEnvelope,
+        fingerprint: str,
+    ) -> RobotCommandResult:
+        """Pre-empt the active owned motion with Huayan ``GrpStop,0,;``.
+
+        This deliberately bypasses ``_controller_operation``: the motion
+        thread owns the 10003 client, and the executor serializes the stop on
+        that same client.  Opening a second command socket here would make
+        request/reply ownership ambiguous.
+        """
+
+        from surgical_contracts import (
+            MotionStopConfirmation,
+            SoftwareStopRequest,
+            StopDelivery,
+            ToolStatus,
+        )
+
+        if (
+            command_fingerprint(envelope) != fingerprint
+            or envelope.command_kind != GatewayCommandKind.SOFTWARE_STOP_REQUEST
+            or not isinstance(envelope.payload, SoftwareStopRequest)
+        ):
+            return self._failed_result(
+                envelope,
+                ErrorCode.COMMAND_CONFLICT,
+                "software stop envelope or fingerprint is invalid",
+            )
+        config = (
+            self.config.robot_config
+            if isinstance(self.config, RealEdgeConfig)
+            else None
+        )
+        if config is None:
+            return self._failed_result(
+                envelope,
+                ErrorCode.OPERATION_NOT_ENABLED,
+                "real robot configuration is unavailable",
+            )
+        with self._active_executor_lock:
+            executor = self._active_remote_executor
+        if executor is None:
+            return self._failed_result(
+                envelope,
+                ErrorCode.COMMAND_CONFLICT,
+                "no active Mac-owned motion can be stopped",
+            )
+        stop = executor.request_authenticated_stop(
+            envelope.command_id,
+            timeout_s=(
+                config.deadlines.stop_ack_ms
+                + config.deadlines.response_ms
+            ) / 1000 + 0.1,
+        )
+        confirmed = (
+            stop.delivery == StopDelivery.SENT
+            and stop.motion_stop == MotionStopConfirmation.CONFIRMED
+        )
+        if not confirmed:
+            return RobotCommandResult(
+                gateway_session_id=envelope.gateway_session_id,
+                command_id=envelope.command_id,
+                command_kind=envelope.command_kind,
+                status=ToolStatus.FAILED,
+                error_code=ErrorCode.ROBOT_TIMEOUT,
+                error_message=(
+                    "GrpStop delivery or stationary confirmation was not established"
+                ),
+                software_stop=stop,
+            )
+        return RobotCommandResult(
+            gateway_session_id=envelope.gateway_session_id,
+            command_id=envelope.command_id,
+            command_kind=envelope.command_kind,
+            status=ToolStatus.SUCCESS,
+            software_stop=stop,
+        )
+
     @staticmethod
     def _failed_result(
         envelope: RobotCommandEnvelope,
@@ -309,6 +393,15 @@ class EdgeGateway:
             status=ToolStatus.FAILED,
             error_code=error_code,
             error_message=(error_message or error_code.value)[:512],
+            software_stop=(
+                SoftwareStopResult(
+                    delivery=StopDelivery.UNKNOWN,
+                    motion_stop=MotionStopConfirmation.UNCONFIRMED,
+                )
+                if envelope.command_kind
+                == GatewayCommandKind.SOFTWARE_STOP_REQUEST
+                else None
+            ),
         )
 
     @staticmethod
@@ -590,11 +683,24 @@ class EdgeGateway:
                     poll_interval_s=0.02,
                     local_preflight_timeout_ms=config.deadlines.motion_ms,
                 )
-                return executor.execute(
-                    envelope,
-                    fingerprint,
-                    local_deadline_monotonic_ns=local_preflight_deadline_ns,
-                )
+                with self._active_executor_lock:
+                    if self._active_remote_executor is not None:
+                        return self._failed_result(
+                            envelope,
+                            ErrorCode.COMMAND_CONFLICT,
+                            "another remote motion executor is active",
+                        )
+                    self._active_remote_executor = executor
+                try:
+                    return executor.execute(
+                        envelope,
+                        fingerprint,
+                        local_deadline_monotonic_ns=local_preflight_deadline_ns,
+                    )
+                finally:
+                    with self._active_executor_lock:
+                        if self._active_remote_executor is executor:
+                            self._active_remote_executor = None
 
     def _wait_for_identity(self) -> None:
         deadline = time.monotonic() + 3

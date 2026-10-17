@@ -1,4 +1,5 @@
 import copy
+from dataclasses import replace
 import random
 from types import SimpleNamespace
 
@@ -15,7 +16,12 @@ from robot_runtime.provider import ProviderCapabilities
 from simulation.entry_point_env.config import EntryPointEnvConfig
 from simulation.entry_point_env.controller import ContinuousTrajectoryController
 from simulation.entry_point_env.random_commands import generate_random_commands
-from surgical_contracts import MoveSequenceRequest, RuntimeMode, SourceFreshness
+from surgical_contracts import (
+    MotionSequenceStep,
+    MoveSequenceRequest,
+    RuntimeMode,
+    SourceFreshness,
+)
 from web.backend.random_commands import router
 from web.backend.sessions import SessionStore
 from web.backend.models import SessionStatus
@@ -60,7 +66,14 @@ def test_runtime_suggestion_does_not_submit_commands(monkeypatch):
     import simulation.entry_point_env.random_commands as generator
     snapshot = SimpleNamespace(state=SimpleNamespace(active_command_id=None, estop=False, motion_state='idle'), joint_positions_deg=CONFIG.robot.initial_joint_positions_deg)
     calls = []
-    monkeypatch.setattr(generator, 'generate_random_commands', lambda config, joints: calls.append(joints) or {'prompt': '向前移动 200 毫米。', 'stepCount': 1})
+    monkeypatch.setattr(
+        generator,
+        'generate_random_commands',
+        lambda config, joints, **_kwargs: calls.append(joints) or {
+            'prompt': '向前移动 200 毫米。',
+            'stepCount': 1,
+        },
+    )
     provider = SimpleNamespace(mode=RuntimeMode.SIMULATION, get_telemetry=lambda: snapshot)
     with TestClient(create_app(provider=provider, manage_provider=False)) as client:
         assert client.post('/v1/suggestions/random-motion').status_code == 200
@@ -87,7 +100,7 @@ def test_real_runtime_suggestion_uses_fresh_actual_joints_and_is_read_only(
     monkeypatch.setattr(
         generator,
         'generate_random_commands',
-        lambda config, joints: calls.append(joints) or {
+        lambda config, joints, **kwargs: calls.append((joints, kwargs)) or {
             'prompt': '向前移动 20 毫米。',
             'stepCount': 1,
         },
@@ -108,7 +121,47 @@ def test_real_runtime_suggestion_uses_fresh_actual_joints_and_is_read_only(
         snapshot.moving = True
         assert client.post('/v1/suggestions/random-motion').status_code == 409
 
-    assert calls == [CONFIG.robot.initial_joint_positions_deg]
+    assert calls == [(
+        CONFIG.robot.initial_joint_positions_deg,
+        {
+            'additional_joint_positions_deg': (
+                CONFIG.robot.initial_joint_positions_deg,
+            ),
+        },
+    )]
+
+
+def test_real_suggestion_is_also_valid_from_simulation_default():
+    actual_real_joints = (
+        5.886, -14.438, 91.087, -1.975, 57.745, -55.569,
+    )
+    suggestion = generate_random_commands(
+        CONFIG,
+        actual_real_joints,
+        rng=random.Random(3),
+        additional_joint_positions_deg=(
+            CONFIG.robot.initial_joint_positions_deg,
+        ),
+    )
+    steps = tuple(
+        MotionSequenceStep.model_validate(step)
+        for step in suggestion['steps']
+    )
+    for start in (
+        actual_real_joints,
+        CONFIG.robot.initial_joint_positions_deg,
+    ):
+        controller = ContinuousTrajectoryController(replace(
+            CONFIG,
+            robot=replace(CONFIG.robot, initial_joint_positions_deg=start),
+        ))
+        controller.move_sequence(MoveSequenceRequest(
+            command_id=f'portable-{start[0]}',
+            steps=steps,
+            translation_speed_mm_s=70,
+            joint_speed_deg_s=15,
+            joint_acceleration_deg_s2=30,
+        ))
 
 
 def test_web_suggestion_is_read_only_and_refuses_changed_pose(monkeypatch):

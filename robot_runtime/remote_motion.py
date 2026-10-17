@@ -25,6 +25,7 @@ from surgical_contracts import (
     GatewayCommandKind,
     LinkState,
     MotionSafetyLimits,
+    MotionStopConfirmation,
     MoveRelativeRequest,
     MoveRelativeResult,
     MoveSequenceRequest,
@@ -32,16 +33,23 @@ from surgical_contracts import (
     MotionStepKind,
     MoveToEntryRequest,
     MoveToEntryResult,
+    MotionState,
     Point3D,
+    RobotActionRequest,
+    RobotActionResult,
     RobotCommandEnvelope,
     RobotCommandKind,
     RobotCommandRecord,
     RobotCommandResult,
     RobotMotionProposal,
+    RobotState,
     RobotTelemetry,
+    RuntimeMode,
     SetEnabledRequest,
     SetEnabledResult,
+    SoftwareStopRequest,
     SourceFreshness,
+    StopDelivery,
     ToolStatus,
     command_fingerprint,
 )
@@ -460,6 +468,76 @@ class RemoteMotionStore:
             self._pending.append(request.command_id)
             return record.model_copy(deep=True), True
 
+    def software_stop(
+        self,
+        request: RobotActionRequest,
+    ) -> tuple[RobotCommandRecord, bool]:
+        """Queue an authenticated controller stop ahead of ordinary commands.
+
+        A stop is deliberately allowed while a motion record is RUNNING.  It
+        is the sole command that may pre-empt that record; it still uses the
+        typed gateway envelope and at-most-once receipt handshake.
+        """
+
+        with self._lock:
+            existing = self._records.get(request.command_id)
+            request_key = request.model_dump(mode="json")
+            if existing is not None:
+                if existing.request != request_key:
+                    raise RobotRuntimeServiceError(
+                        ErrorCode.COMMAND_CONFLICT,
+                        "command_id was already used with different arguments",
+                        status_code=409,
+                        command_id=request.command_id,
+                    )
+                return existing.model_copy(deep=True), False
+            if len(self._records) >= self._max_records:
+                raise RobotRuntimeServiceError(
+                    ErrorCode.COMMAND_CONFLICT,
+                    "remote command idempotency ledger is full",
+                    status_code=503,
+                    command_id=request.command_id,
+                )
+            state = self._telemetry()
+            if (
+                state.gateway_session_id is None
+                or state.connections.gateway != LinkState.CONNECTED
+                or state.connections.command_socket != LinkState.CONNECTED
+            ):
+                raise RobotRuntimeServiceError(
+                    ErrorCode.OPERATION_NOT_ENABLED,
+                    "authenticated Mac command channel is unavailable for software stop",
+                    status_code=409,
+                    command_id=request.command_id,
+                )
+            now_ms = time.time_ns() // 1_000_000
+            payload = SoftwareStopRequest(command_id=request.command_id)
+            envelope = RobotCommandEnvelope(
+                gateway_session_id=state.gateway_session_id,
+                command_id=request.command_id,
+                command_kind=GatewayCommandKind.SOFTWARE_STOP_REQUEST,
+                created_at_ms=now_ms,
+                expires_at_ms=now_ms + self.policy.proposal_ttl_ms,
+                based_on_robot_state_sequence=state.sequence,
+                payload=payload,
+            )
+            frame = GatewayCommandFrame(
+                fingerprint=command_fingerprint(envelope),
+                envelope=envelope,
+            )
+            record = RobotCommandRecord(
+                command_id=request.command_id,
+                kind=RobotCommandKind.STOP,
+                status=CommandExecutionStatus.RUNNING,
+                submitted_at_ms=now_ms,
+                updated_at_ms=now_ms,
+                request=request_key,
+            )
+            self._records[request.command_id] = record
+            self._frames[request.command_id] = frame
+            self._pending.appendleft(request.command_id)
+            return record.model_copy(deep=True), True
+
     def confirm(self, command_id: str, fingerprint: str) -> RobotCommandRecord:
         with self._lock:
             record = self._get_locked(command_id)
@@ -625,6 +703,52 @@ class RemoteMotionStore:
                     requested_enabled=requested.enabled,
                     confirmed_enabled=result.confirmed_enabled,
                     message="10003 and a newer 10004 frame confirmed the requested state",
+                )
+                status = CommandExecutionStatus.SUCCEEDED
+                error = None
+            elif (
+                result.command_kind == GatewayCommandKind.SOFTWARE_STOP_REQUEST
+                and result.status == ToolStatus.SUCCESS
+            ):
+                state = self._telemetry()
+                pose = state.actual_pose_robot_base
+                if (
+                    pose is None
+                    or result.software_stop is None
+                    or result.software_stop.delivery != StopDelivery.SENT
+                    or result.software_stop.motion_stop
+                    != MotionStopConfirmation.CONFIRMED
+                ):
+                    raise RobotRuntimeServiceError(
+                        ErrorCode.INTERNAL_ERROR,
+                        "successful software stop is missing confirmed delivery/feedback",
+                        command_id=result.command_id,
+                    )
+                final_point = Point3D(
+                    x=pose.translation_mm[0],
+                    y=pose.translation_mm[1],
+                    z=pose.translation_mm[2],
+                    frame=CoordinateFrame.ROBOT_BASE,
+                    unit=DistanceUnit.MILLIMETER,
+                    source=CoordinateSource.STRUCTURED_DATA,
+                )
+                payload = RobotActionResult(
+                    command_id=result.command_id,
+                    operation=RobotCommandKind.STOP,
+                    status=ToolStatus.SUCCESS,
+                    state=RobotState(
+                        mode=RuntimeMode.REAL,
+                        tcp=self.policy.tcp_name,
+                        tcp_position=final_point,
+                        orientation_xyzw=pose.quaternion_xyzw,
+                        motion_state=MotionState.STOPPED,
+                        estop=bool(state.physical_estop_active),
+                        active_command_id=None,
+                    ),
+                    message=(
+                        "Controller GrpStop delivery and stationary feedback confirmed; "
+                        "this is not a physical emergency stop"
+                    ),
                 )
                 status = CommandExecutionStatus.SUCCEEDED
                 error = None

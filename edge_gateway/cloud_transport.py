@@ -13,6 +13,7 @@ from surgical_contracts import (
     DistanceUnit,
     ErrorCode,
     GatewayCommandFrame,
+    GatewayCommandKind,
     GatewayCommandAcceptedFrame,
     GatewayCommandResultFrame,
     GatewayHandshake,
@@ -21,6 +22,7 @@ from surgical_contracts import (
     GatewayStateFrame,
     LinkState,
     MotionState,
+    MotionStopConfirmation,
     Pose6D,
     PROTOCOL_VERSION,
     RobotCommandEnvelope,
@@ -30,6 +32,8 @@ from surgical_contracts import (
     RobotTelemetry,
     RuntimeMode,
     SourceFreshness,
+    SoftwareStopResult,
+    StopDelivery,
     ToolStatus,
     VendorFault,
     hello_auth_tag,
@@ -174,6 +178,9 @@ class CloudTransport:
         command_handler: Callable[
             [RobotCommandEnvelope, str], RobotCommandResult
         ] | None = None,
+        stop_handler: Callable[
+            [RobotCommandEnvelope, str], RobotCommandResult
+        ] | None = None,
     ) -> None:
         self.url = validate_cloud_url(url)
         if len(secret) < 32:
@@ -181,6 +188,7 @@ class CloudTransport:
         self.secret = secret
         self.gateway_id = gateway_id
         self.command_handler = command_handler
+        self.stop_handler = stop_handler
         self.session_id: str | None = None
         self._connection = None
         self._message_sequence = 0
@@ -190,6 +198,9 @@ class CloudTransport:
         self._command_thread: threading.Thread | None = None
         self._command_result: GatewayCommandResultFrame | None = None
         self._active_command_id: str | None = None
+        self._stop_thread: threading.Thread | None = None
+        self._stop_result: GatewayCommandResultFrame | None = None
+        self._active_stop_id: str | None = None
 
     def connect(self, *, device_sn: str, robot_model: str, package_version: str) -> str:
         from websockets.sync.client import connect
@@ -199,9 +210,14 @@ class CloudTransport:
         with self._command_lock:
             if (
                 self._active_command_id is not None
+                or self._active_stop_id is not None
                 or (
                     self._command_thread is not None
                     and self._command_thread.is_alive()
+                )
+                or (
+                    self._stop_thread is not None
+                    and self._stop_thread.is_alive()
                 )
             ):
                 raise RuntimeError(
@@ -264,17 +280,25 @@ class CloudTransport:
         # motion command) until the old command handler has fully unwound.
         with self._command_lock:
             command_thread = self._command_thread
+            stop_thread = self._stop_thread
         if (
             command_thread is not None
             and command_thread is not threading.current_thread()
         ):
             while command_thread.is_alive():
                 command_thread.join(timeout=0.1)
+        if stop_thread is not None and stop_thread is not threading.current_thread():
+            while stop_thread.is_alive():
+                stop_thread.join(timeout=0.1)
         with self._command_lock:
             self._command_result = None
             self._active_command_id = None
+            self._stop_result = None
+            self._active_stop_id = None
             if self._command_thread is command_thread:
                 self._command_thread = None
+            if self._stop_thread is stop_thread:
+                self._stop_thread = None
 
     def _run_command(
         self,
@@ -282,8 +306,10 @@ class CloudTransport:
         *,
         session_id: str,
         received_at_monotonic_ns: int,
+        is_stop: bool = False,
     ) -> None:
-        assert self.command_handler is not None
+        handler = self.stop_handler if is_stop else self.command_handler
+        assert handler is not None
         self._command_context.received_at_monotonic_ns = received_at_monotonic_ns
         try:
             try:
@@ -293,7 +319,7 @@ class CloudTransport:
                 # look expired.  The server authorizes execution in the ACK;
                 # once authorized, all local deadlines use this immutable
                 # Mac monotonic receipt timestamp.
-                result = self.command_handler(
+                result = handler(
                     frame.envelope,
                     frame.fingerprint,
                 )
@@ -305,16 +331,29 @@ class CloudTransport:
                     status=ToolStatus.FAILED,
                     error_code=ErrorCode.INTERNAL_ERROR,
                     error_message=f"{type(exc).__name__}: {exc}"[:512],
+                    software_stop=(
+                        SoftwareStopResult(
+                            delivery=StopDelivery.UNKNOWN,
+                            motion_stop=MotionStopConfirmation.UNCONFIRMED,
+                        )
+                        if frame.envelope.command_kind
+                        == GatewayCommandKind.SOFTWARE_STOP_REQUEST
+                        else None
+                    ),
                 )
             with self._command_lock:
-                if (
-                    self.session_id == session_id
-                    and self._active_command_id == frame.envelope.command_id
-                ):
-                    self._command_result = GatewayCommandResultFrame(
+                active_id = (
+                    self._active_stop_id if is_stop else self._active_command_id
+                )
+                if self.session_id == session_id and active_id == frame.envelope.command_id:
+                    result_frame = GatewayCommandResultFrame(
                         fingerprint=frame.fingerprint,
                         result=result,
                     )
+                    if is_stop:
+                        self._stop_result = result_frame
+                    else:
+                        self._command_result = result_frame
         finally:
             del self._command_context.received_at_monotonic_ns
 
@@ -333,7 +372,8 @@ class CloudTransport:
         if self._connection is None:
             raise RuntimeError("cloud is disconnected")
         with self._command_lock:
-            frame = self._command_result
+            is_stop = self._stop_result is not None
+            frame = self._stop_result if is_stop else self._command_result
         if frame is None:
             return
         self._connection.send(frame.model_dump_json())
@@ -344,9 +384,14 @@ class CloudTransport:
         ):
             raise ValueError("gateway command result acknowledgement is missing")
         with self._command_lock:
-            if self._command_result == frame:
+            if is_stop and self._stop_result == frame:
+                self._stop_result = None
+                self._active_stop_id = None
+                self._stop_thread = None
+            elif not is_stop and self._command_result == frame:
                 self._command_result = None
                 self._active_command_id = None
+                self._command_thread = None
 
     def _send_and_confirm(self, payload: GatewayStateFrame | GatewayHeartbeat) -> None:
         if self._connection is None:
@@ -357,7 +402,12 @@ class CloudTransport:
             response = parse_wire_json(self._connection.recv(timeout=3))
             if response.get("type") == "command":
                 frame = GatewayCommandFrame.model_validate(response)
-                if self.command_handler is None:
+                is_stop = (
+                    frame.envelope.command_kind
+                    == GatewayCommandKind.SOFTWARE_STOP_REQUEST
+                )
+                handler = self.stop_handler if is_stop else self.command_handler
+                if handler is None:
                     rejection = self._rejections.reject(
                         frame.envelope, active_session_id=self.session_id,
                     )
@@ -365,14 +415,20 @@ class CloudTransport:
                         f"gateway has no command executor for {rejection.command_id}"
                     )
                 with self._command_lock:
-                    if self._active_command_id is not None:
+                    if is_stop:
+                        if self._active_stop_id is not None:
+                            raise RuntimeError("gateway already has an active software stop")
+                    elif self._active_command_id is not None:
                         raise RuntimeError("gateway already has an active remote command")
                     session_id = self.session_id
                     if session_id is None:
                         raise RuntimeError(
                             "command arrived without an active gateway session"
                         )
-                    self._active_command_id = frame.envelope.command_id
+                    if is_stop:
+                        self._active_stop_id = frame.envelope.command_id
+                    else:
+                        self._active_command_id = frame.envelope.command_id
                     received_at_monotonic_ns = time.monotonic_ns()
                 self._connection.send(GatewayCommandAcceptedFrame(
                     command_id=frame.envelope.command_id,
@@ -397,7 +453,14 @@ class CloudTransport:
                     # command record.  No result is emitted because no Mac
                     # command handler (and therefore no robot write) ran.
                     with self._command_lock:
-                        if self._active_command_id == frame.envelope.command_id:
+                        if (
+                            is_stop
+                            and self._active_stop_id == frame.envelope.command_id
+                        ):
+                            self._active_stop_id = None
+                            self._stop_thread = None
+                            self._stop_result = None
+                        elif self._active_command_id == frame.envelope.command_id:
                             self._active_command_id = None
                             self._command_thread = None
                             self._command_result = None
@@ -405,21 +468,28 @@ class CloudTransport:
                 with self._command_lock:
                     if (
                         self.session_id != session_id
-                        or self._active_command_id != frame.envelope.command_id
+                        or (
+                            self._active_stop_id if is_stop else self._active_command_id
+                        ) != frame.envelope.command_id
                     ):
                         raise RuntimeError(
                             "gateway session changed before command authorization"
                         )
-                    self._command_thread = threading.Thread(
+                    worker = threading.Thread(
                         target=self._run_command,
                         args=(frame,),
                         kwargs={
                             "session_id": session_id,
                             "received_at_monotonic_ns": received_at_monotonic_ns,
+                            "is_stop": is_stop,
                         },
                         daemon=True,
                     )
-                    self._command_thread.start()
+                    if is_stop:
+                        self._stop_thread = worker
+                    else:
+                        self._command_thread = worker
+                    worker.start()
                 return
             if response.get("type") != "ack" or response.get("message_sequence") != payload.message_sequence:
                 raise ValueError("gateway acknowledgement is missing or mismatched")

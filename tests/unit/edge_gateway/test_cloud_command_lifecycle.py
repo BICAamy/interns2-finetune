@@ -14,10 +14,14 @@ from surgical_contracts import (
     GatewayHeartbeat,
     LinkState,
     MotionSafetyLimits,
+    MotionStopConfirmation,
     MoveRelativeRequest,
     Pose6D,
     RobotCommandEnvelope,
     RobotCommandResult,
+    SoftwareStopRequest,
+    SoftwareStopResult,
+    StopDelivery,
     ToolStatus,
     command_fingerprint,
 )
@@ -90,6 +94,24 @@ def _frame(*, now_ms: int | None = None) -> GatewayCommandFrame:
             max_joint_acceleration_deg_s2=60,
         ),
         operator_confirmation_id="web-confirmed",
+    )
+    return GatewayCommandFrame(
+        fingerprint=command_fingerprint(envelope),
+        envelope=envelope,
+    )
+
+
+def _stop_frame() -> GatewayCommandFrame:
+    now_ms = time.time_ns() // 1_000_000
+    request = SoftwareStopRequest(command_id="priority-stop")
+    envelope = RobotCommandEnvelope(
+        gateway_session_id=SESSION,
+        command_id=request.command_id,
+        command_kind=GatewayCommandKind.SOFTWARE_STOP_REQUEST,
+        created_at_ms=now_ms,
+        expires_at_ms=now_ms + 30_000,
+        based_on_robot_state_sequence=2,
+        payload=request,
     )
     return GatewayCommandFrame(
         fingerprint=command_fingerprint(envelope),
@@ -255,4 +277,49 @@ def test_mac_starts_handler_only_after_server_execution_authorization() -> None:
     assert transport._command_thread is not None
     transport._command_thread.join(timeout=1)
     assert transport._command_result is not None
+
+
+def test_authenticated_stop_runs_while_motion_command_remains_active() -> None:
+    called = threading.Event()
+    frame = _stop_frame()
+
+    def stop_handler(envelope, _fingerprint):
+        called.set()
+        return RobotCommandResult(
+            gateway_session_id=envelope.gateway_session_id,
+            command_id=envelope.command_id,
+            command_kind=envelope.command_kind,
+            status=ToolStatus.SUCCESS,
+            software_stop=SoftwareStopResult(
+                delivery=StopDelivery.SENT,
+                motion_stop=MotionStopConfirmation.CONFIRMED,
+            ),
+        )
+
+    connection = _ScriptedConnection([
+        frame.model_dump_json(),
+        (
+            '{"type":"ack","message_sequence":1,'
+            f'"command_id":"{frame.envelope.command_id}",'
+            '"execute":true,"error_code":null}'
+        ),
+    ])
+    transport = CloudTransport(
+        "ws://127.0.0.1:18001/v1/gateway/connect",
+        secret=b"x" * 32,
+        gateway_id="test-gateway",
+        command_handler=lambda *_args: None,
+        stop_handler=stop_handler,
+    )
+    transport._connection = connection
+    transport.session_id = SESSION
+    transport._active_command_id = "motion-still-running"
+
+    transport._send_and_confirm(_heartbeat())
+
+    assert called.wait(timeout=1)
+    assert transport._active_command_id == "motion-still-running"
+    assert transport._stop_thread is not None
+    transport._stop_thread.join(timeout=1)
+    assert transport._stop_result is not None
 

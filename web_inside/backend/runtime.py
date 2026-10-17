@@ -1375,15 +1375,19 @@ class WebRuntime:
             self._resources_for_session(session_id)
         )
         await self.manual.stop_external(selected_mode)
-        if selected_mode == RuntimeMode.REAL:
-            raise SessionConflict(
-                "真实模式的所有运动都通过网页确认的 MotionSequence 执行；"
-                "网页暂不发送停止或急停，请使用现场物理装置"
-            )
+        # Huayan exposes GrpStop as a direct controller stop, not as a
+        # physical/latching E-stop.  Both real-mode buttons therefore request
+        # the same authenticated software stop while the UI keeps the red
+        # button as the operator's fastest path to it.
+        real_software_stop = selected_mode == RuntimeMode.REAL
         command = ParsedCommand(
             command_id=f"web-{'estop' if emergency else 'stop'}-{uuid4().hex}",
             intent=(
-                CommandIntent.EMERGENCY_STOP if emergency else CommandIntent.STOP
+                CommandIntent.STOP
+                if real_software_stop
+                else CommandIntent.EMERGENCY_STOP
+                if emergency
+                else CommandIntent.STOP
             ),
         )
 
@@ -1391,8 +1395,18 @@ class WebRuntime:
             record.parse_token = None
             record.pending_command = None
             record.active_command_id = command.command_id
-            record.status = SessionStatus.ESTOP if emergency else SessionStatus.STOPPING
-            record.message = "正在执行急停" if emergency else "正在停止机械臂"
+            record.status = (
+                SessionStatus.ESTOP
+                if emergency and not real_software_stop
+                else SessionStatus.STOPPING
+            )
+            record.message = (
+                "正在请求控制器直接停止（非物理急停）"
+                if emergency and real_software_stop
+                else "正在执行急停"
+                if emergency
+                else "正在停止机械臂"
+            )
 
         self.store.mutate(session_id, begin)
         self.store.bind_command(session_id, command.command_id)

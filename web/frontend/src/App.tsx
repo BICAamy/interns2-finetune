@@ -677,14 +677,14 @@ export default function App() {
           )}
           <button
             className="button stop"
-            disabled={!session || runtimeMode !== "simulation"}
+            disabled={!session}
             onClick={() => session && run(() => api.action(session.session_id, "stop"))}
           >
             停止
           </button>
           <button
             className="button estop"
-            disabled={!session || runtimeMode !== "simulation"}
+            disabled={!session}
             onClick={() => session && run(() => api.action(session.session_id, "estop"))}
           >
             紧急停止
