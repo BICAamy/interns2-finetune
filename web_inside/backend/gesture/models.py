@@ -55,6 +55,7 @@ class GestureRecognition(GestureModel):
 
 class GestureDecision(str, Enum):
     ACCEPTED = "accepted"
+    PAUSED = "paused"
     IGNORED = "ignored"
     SUPPRESSED_VOICE = "suppressed_voice"
     SUPPRESSED_BUSY = "suppressed_busy"
@@ -86,3 +87,12 @@ class VoiceActivityResponse(GestureModel):
 class GestureResetResponse(GestureModel):
     schema_version: Literal["1.0"] = "1.0"
     reset: Literal[True] = True
+
+
+class GestureControlResponse(GestureModel):
+    schema_version: Literal["1.0"] = "1.0"
+    active: bool
+    mode: Literal["simulation", "real"]
+    moving: bool
+    gesture: GestureName | None = None
+    reason: str = ""

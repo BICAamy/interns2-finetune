@@ -6,6 +6,8 @@ import type { ManualDirection, ManualKind } from "./manualKeyboard";
 import "./ManualControl.css";
 import {JOINT_COLORS} from "./jointLabelLayout";
 
+const CONTROL_PANEL_EVENT = "interns2:control-panel-open";
+
 type Status = {
   available:boolean; mode:string; reason:string; occupied:boolean; owned_by_session:boolean;
   moving:boolean; stopping:boolean; fault:string|null;
@@ -159,6 +161,14 @@ export default function ManualControl({sessionId,runtimeMode,telemetry}:{
       headers:{"Content-Type":"application/json"},body:JSON.stringify({token:current})}).catch(()=>{});
   },[sessionId,runtimeMode]);
 
+  useEffect(()=>{
+    const onPanelOpen=(event:Event)=>{
+      if((event as CustomEvent<string>).detail==="gesture"&&open)void release(true);
+    };
+    window.addEventListener(CONTROL_PANEL_EVENT,onPanelOpen);
+    return()=>window.removeEventListener(CONTROL_PANEL_EVENT,onPanelOpen);
+  },[open,sessionId]);
+
   const directionButton=(kind:ManualKind,axis:number,direction:-1|1,label:string,key:string)=>{
     const value:ManualDirection={kind,axis,direction};
     const down=(event:PointerEvent<HTMLButtonElement>)=>{
@@ -177,7 +187,7 @@ export default function ManualControl({sessionId,runtimeMode,telemetry}:{
   const point=telemetry?.actual_tcp_robot_base?.translation_mm??(telemetry?.current_tcp?[telemetry.current_tcp.x,telemetry.current_tcp.y,telemetry.current_tcp.z]:null);
   return <>
     {!open&&<button ref={fab} type="button" className="manual-fab" aria-label="🎮 手动控制" aria-expanded={false} aria-controls="manual-control-drawer"
-      onClick={()=>{setOpen(true);setError("");}}>
+      onClick={()=>{window.dispatchEvent(new CustomEvent(CONTROL_PANEL_EVENT,{detail:"manual"}));setOpen(true);setError("");}}>
       <span aria-hidden="true">🎮</span><strong>手动控制</strong>
     </button>}
     {open&&<aside className="manual-drawer" id="manual-control-drawer" aria-label="手动控制面板" tabIndex={-1} ref={drawer}>

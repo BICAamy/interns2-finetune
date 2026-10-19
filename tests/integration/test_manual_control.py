@@ -113,7 +113,7 @@ def test_auto_task_and_manual_control_are_mutually_exclusive():
         runtime.store.mutate(sid,lambda r:setattr(r,'status',SessionStatus.READY))
         token=(await ctl.acquire(sid))['token']
         with pytest.raises(SessionConflict):ctl.assert_task_allowed(RuntimeMode.SIMULATION)
-        ctl.assert_task_allowed(RuntimeMode.REAL)
+        with pytest.raises(SessionConflict):ctl.assert_task_allowed(RuntimeMode.REAL)
         await ctl.release(sid,token)
         ctl.assert_task_allowed(RuntimeMode.SIMULATION)
         await ctl.shutdown()
@@ -191,8 +191,18 @@ def test_manual_large_increment_limit_is_still_enforced():
         _,ctl,sid,transport,_=setup()
         token=(await ctl.acquire(sid))['token']
         for sequence,kind in enumerate(('translation','rotation','joint'),1):
+            configured_max = (
+                ctl.policy.max_relative_translation_mm
+                if kind == 'translation'
+                else ctl.policy.max_rotation_deg
+            )
             with pytest.raises(HTTPException):
-                await ctl.input(sid,ManualInput(token=token,sequence=sequence,kind=kind,amount=21))
+                await ctl.input(sid,ManualInput(
+                    token=token,
+                    sequence=sequence,
+                    kind=kind,
+                    amount=configured_max + 1,
+                ))
         assert transport.commands==[]
         await ctl.release(sid,token);await ctl.shutdown()
     asyncio.run(case())

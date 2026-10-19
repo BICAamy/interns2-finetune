@@ -1,8 +1,9 @@
-"""Independent, leased manual motion. Never calls a parser or text orchestrator.
+"""Independent, leased direct motion for the internal control panels.
 
-The current Mac gateway has no interruptible web-jog channel. Real mode is
-explicitly unavailable here until that gateway is upgraded; no legacy command
-or stop semantics are changed to pretend otherwise.
+Manual and gesture control share this single-owner lease.  Real motion still
+uses the normal robot-runtime proposal boundary, but the internal direct-control
+lease confirms each short-lived proposal itself; it never enters the text
+parser or the browser task-confirmation flow.
 """
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
 
 LEASE_SECONDS = 2.0
 HOLD_SECONDS = 0.45
+GESTURE_HOLD_SECONDS = 2.0
 BUSY = {"parsing", "awaiting_confirmation", "executing", "moving_to_entry",
         "verifying_entry", "moving_relative", "planning", "stopping", "paused"}
 
@@ -51,6 +53,8 @@ class Lease:
     session_id: str
     token: str
     expires: float
+    mode: RuntimeMode = RuntimeMode.SIMULATION
+    owner: Literal["manual", "gesture"] = "manual"
     sequence: int = 0
     hold_until: float = 0
     desired: ManualInput | None = None
@@ -58,19 +62,33 @@ class Lease:
     stopping: bool = False
     active: bool = False
     fault: str | None = None
+    external_stopped: bool = False
     submitted: asyncio.Event = field(default_factory=asyncio.Event)
     transport: object | None = None
 
 
 class ManualTransport:
     """Submit/ack and completion are separate, so stop cannot overtake submit."""
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, *, confirm_proposals: bool = False):
         self.client = httpx.AsyncClient(base_url=base_url, timeout=2, trust_env=False)
+        self.confirm_proposals = confirm_proposals
 
     async def submit(self, command: MoveSequenceRequest) -> dict:
         response = await self.client.post('/v1/commands/move-sequence', json=command.model_dump(mode='json'))
         response.raise_for_status()
-        return response.json()
+        record = response.json()
+        if self.confirm_proposals and record.get('status') == 'queued':
+            proposal = (record.get('result') or {}).get('proposal') or {}
+            fingerprint = proposal.get('fingerprint')
+            if not isinstance(fingerprint, str) or not fingerprint:
+                raise RuntimeError('真机点动 proposal 缺少 fingerprint')
+            response = await self.client.post(
+                f'/v1/commands/{command.command_id}/confirm',
+                json={'fingerprint': fingerprint},
+            )
+            response.raise_for_status()
+            record = response.json()
+        return record
 
     async def record(self, command_id: str) -> dict:
         response = await self.client.get('/v1/commands/'+command_id)
@@ -101,13 +119,51 @@ class ManualController:
         self.lease: Lease | None = None
         self.watchdog: asyncio.Task | None = None
         self.policy = load_simulation_motion_policy()
-        self.transport_factory = transport_factory or (lambda: ManualTransport(
-            self.runtime._robots[RuntimeMode.SIMULATION].base_url))
+        self.transport_factory = transport_factory
+
+    def _transport(self, mode: RuntimeMode):
+        if self.transport_factory is not None:
+            # Test/dedicated transports intentionally keep the historical
+            # zero-argument factory contract.
+            return self.transport_factory()
+        robot = self.runtime._robots.get(mode)
+        base_url = getattr(robot, 'base_url', None)
+        if not isinstance(base_url, str) or not base_url:
+            raise SessionConflict(f"{mode.value} 运行时没有可用的控制地址")
+        return ManualTransport(
+            base_url,
+            confirm_proposals=mode == RuntimeMode.REAL,
+        )
+
+    def _policy_values(self, mode: RuntimeMode) -> dict[str, float]:
+        real_config = getattr(self.runtime, '_real_config', None)
+        if mode == RuntimeMode.REAL and real_config is not None:
+            real = real_config
+            return {
+                'translation_step': float(real.limits.max_step_mm),
+                'rotation_step': float(real.limits.max_rotation_deg),
+                'translation_speed': float(real.motion.speed_mm_s),
+                'angular_speed': float(real.motion.joint_speed_deg_s),
+                'angular_acceleration': float(real.motion.joint_acceleration_deg_s2),
+                'default_step': float(real.motion.default_relative_step_mm),
+            }
+        return {
+            'translation_step': float(self.policy.max_relative_translation_mm),
+            'rotation_step': float(self.policy.max_rotation_deg),
+            'translation_speed': float(self.policy.move_speed_mm_s),
+            'angular_speed': float(self.policy.joint_speed_deg_s),
+            'angular_acceleration': float(self.policy.joint_acceleration_deg_s2),
+            'default_step': float(self.policy.default_relative_step_mm),
+        }
+
+    def default_translation_step(self, session_id: str) -> float:
+        return self._policy_values(self._mode(session_id))['default_step']
 
     def assert_task_allowed(self, mode: RuntimeMode) -> None:
         # Called inside SessionStore.mutate's RLock, also held during acquisition.
-        if self.lease is not None and mode == RuntimeMode.SIMULATION:
-            raise SessionConflict("仿真机械臂正在由手动面板控制，请先释放手动控制权")
+        if self.lease is not None:
+            label = "手势" if self.lease.owner == "gesture" else "手动"
+            raise SessionConflict(f"机械臂正在由{label}面板控制，请先退出该控制模式")
 
     def _mode(self, session_id: str) -> RuntimeMode:
         return self.runtime._session_mode(session_id)
@@ -119,54 +175,70 @@ class ManualController:
             raise SessionConflict("手动控制权已失效，请重新接管")
         return lease
 
-    def _busy(self) -> bool:
-        return any(r.robot_mode == RuntimeMode.SIMULATION and
+    def _busy(self, mode: RuntimeMode) -> bool:
+        return any(r.robot_mode == mode and
                    (r.status.value in BUSY or r.pending_command is not None)
                    for r in self.runtime.store._records.values())
 
     def status(self, session_id: str) -> dict:
         mode = self._mode(session_id)
         lease = self.lease
+        limits = self._policy_values(mode)
+        available = mode in self.runtime._robots
         return {
-            "available": mode == RuntimeMode.SIMULATION,
+            "available": available,
             "mode": mode.value,
-            "reason": ("" if mode == RuntimeMode.SIMULATION else
-                       "Mac 网关尚未启用手动停止与超时停机，本轮未升级网关，真机手动控制未开放"),
+            "reason": "" if available else f"{mode.value} 运行时未启动",
             "occupied": lease is not None,
             "owned_by_session": lease is not None and lease.session_id == session_id,
+            "owner": lease.owner if lease else None,
             "moving": bool(lease and lease.active),
             "stopping": bool(lease and lease.stopping),
             "fault": lease.fault if lease else None,
             "limits": {
-                "translation_step": min(20.0, self.policy.max_relative_translation_mm),
-                "rotation_step": min(20.0, self.policy.max_rotation_deg),
-                "translation_speed": self.policy.move_speed_mm_s,
-                "angular_speed": self.policy.joint_speed_deg_s,
+                "translation_step": limits['translation_step'],
+                "rotation_step": limits['rotation_step'],
+                "translation_speed": limits['translation_speed'],
+                "angular_speed": limits['angular_speed'],
             },
         }
 
-    async def acquire(self, session_id: str) -> dict:
-        if self._mode(session_id) != RuntimeMode.SIMULATION:
+    async def acquire(
+        self,
+        session_id: str,
+        *,
+        owner: Literal["manual", "gesture"] = "manual",
+    ) -> dict:
+        mode = self._mode(session_id)
+        if mode not in self.runtime._robots:
             raise SessionConflict(self.status(session_id)["reason"])
         with self.runtime.store._lock:
             if self.lease is not None:
                 raise SessionConflict("机械臂已有手动控制者，请等待其释放")
-            if self._busy():
+            if self._busy(mode):
                 raise SessionConflict("已有文本或手势任务待确认/执行，不能接管手动控制")
-            lease = Lease(session_id, secrets.token_urlsafe(32), self.clock()+LEASE_SECONDS)
+            lease = Lease(
+                session_id,
+                secrets.token_urlsafe(32),
+                self.clock()+LEASE_SECONDS,
+                mode=mode,
+                owner=owner,
+            )
             self.lease = lease
         try:
             view = await asyncio.to_thread(self.runtime.get_robot_telemetry, session_id)
             if not view.connected or view.estop or view.motion_state in {"moving", "estop"}:
                 raise SessionConflict("机械臂未连接、尚未静止或处于急停状态，不能接管")
-            if self._mode(session_id) != RuntimeMode.SIMULATION:
+            if mode == RuntimeMode.REAL and view.enabled is not True:
+                raise SessionConflict("真实机械臂尚未使能，不能接管直接控制")
+            if self._mode(session_id) != mode:
                 raise SessionConflict("接管期间运行模式已改变")
+            lease.transport = self._transport(mode)
         except Exception:
             self.lease = None
             raise
         if self.watchdog is None or self.watchdog.done():
             self.watchdog = asyncio.create_task(self._watch())
-        lease.transport = self.transport_factory()
         return {**self.status(session_id), "token": lease.token}
 
     async def heartbeat(self, session_id: str, token: str) -> dict:
@@ -188,15 +260,18 @@ class ManualController:
         if command.kind is None:
             await self._stop(lease)
             return self.status(session_id)
+        if lease.external_stopped:
+            raise SessionConflict("直接控制已被停止/急停，请退出面板后重新接管")
         if lease.fault or lease.stopping:
             raise SessionConflict("上次停止尚未确认或动作失败，请先释放控制权")
-        if self._mode(session_id) != RuntimeMode.SIMULATION:
+        if self._mode(session_id) != lease.mode:
             await self._stop(lease)
             raise SessionConflict("模式已变化，手动输入已停止")
         if command.kind != "joint" and command.axis > 2:
             raise HTTPException(422, "XYZ/姿态轴只能为 0、1、2")
-        maximum = (min(20.0, self.policy.max_relative_translation_mm)
-                   if command.kind == "translation" else min(20.0, self.policy.max_rotation_deg))
+        limits = self._policy_values(lease.mode)
+        maximum = (limits['translation_step']
+                   if command.kind == "translation" else limits['rotation_step'])
         if command.amount > maximum:
             raise HTTPException(422, "点动步长超出当前配置限制")
         if lease.desired is not None and lease.active:
@@ -205,15 +280,22 @@ class ManualController:
                 await self._stop(lease)
                 raise SessionConflict("改变运动方向前请先松开控制")
         lease.desired = command
-        lease.hold_until = self.clock()+HOLD_SECONDS
+        lease.hold_until = self.clock()+(
+            GESTURE_HOLD_SECONDS if lease.owner == "gesture" else HOLD_SECONDS
+        )
         if lease.task is None or lease.task.done():
             lease.task = asyncio.create_task(self._run(lease))
         return self.status(session_id)
 
-    def _request(self, command: ManualInput) -> MoveSequenceRequest:
+    def _request(
+        self,
+        command: ManualInput,
+        mode: RuntimeMode = RuntimeMode.SIMULATION,
+    ) -> MoveSequenceRequest:
         amount = command.amount
-        speed = self.policy.move_speed_mm_s * command.speed_scale
-        angular = self.policy.joint_speed_deg_s * command.speed_scale
+        limits = self._policy_values(mode)
+        speed = limits['translation_speed'] * command.speed_scale
+        angular = limits['angular_speed'] * command.speed_scale
         # Honor the chosen finite increment (up to the manual/policy limit).
         # Only one segment is in flight; release/watchdog interrupts it through
         # the same acknowledged stop path rather than shrinking every segment.
@@ -229,7 +311,7 @@ class ManualController:
                                       joint_index=command.axis+1, rotation_deg=value)
         return MoveSequenceRequest(command_id=f"manual-{uuid4().hex}", steps=(step,),
                                    translation_speed_mm_s=speed, joint_speed_deg_s=angular,
-                                   joint_acceleration_deg_s2=self.policy.joint_acceleration_deg_s2)
+                                   joint_acceleration_deg_s2=limits['angular_acceleration'])
 
     async def _run(self, lease: Lease) -> None:
         try:
@@ -239,7 +321,7 @@ class ManualController:
                     lease.desired = None; break
                 lease.active = True
                 lease.submitted.clear()
-                request = self._request(command)
+                request = self._request(command, lease.mode)
                 try:
                     record = await lease.transport.submit(request)
                 finally:
@@ -300,8 +382,9 @@ class ManualController:
         return self.status(session_id)
 
     async def stop_external(self, mode: RuntimeMode) -> None:
-        if mode == RuntimeMode.SIMULATION and self.lease is not None:
+        if self.lease is not None and self.lease.mode == mode:
             await self._stop(self.lease)
+            self.lease.external_stopped = True
 
     async def _watch(self) -> None:
         while self.lease is not None:

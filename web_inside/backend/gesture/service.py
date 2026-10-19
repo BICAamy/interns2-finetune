@@ -197,31 +197,6 @@ class InternS2GestureRecognizer:
             raise GestureRecognitionError(
                 f"InternS2 gesture recognition failed: {type(error).__name__}"
             ) from error
-        choice0 = response.choices[0] if getattr(response, "choices", None) else None
-        message0 = getattr(choice0, "message", None)
-
-        print("\n========== STEP14 GESTURE DEBUG ==========", flush=True)
-        print(
-            "finish_reason =",
-            repr(getattr(choice0, "finish_reason", None)),
-            flush=True,
-        )
-        print(
-            "content =",
-            repr(getattr(message0, "content", None)),
-            flush=True,
-        )
-        print(
-            "reasoning_content =",
-            repr(getattr(message0, "reasoning_content", None)),
-            flush=True,
-        )
-        print(
-            "tool_calls =",
-            repr(getattr(message0, "tool_calls", None)),
-            flush=True,
-        )
-        print("========== END GESTURE DEBUG ==========\n", flush=True)
         choices = getattr(response, "choices", None)
         if not choices:
             raise GestureRecognitionError(
@@ -247,7 +222,6 @@ class InternS2GestureRecognizer:
             raise GestureRecognitionError(
                 "gesture response must be a JSON object"
             )
-        print("STEP14 parsed arguments =", repr(arguments), flush=True)
         try:
             gesture = GestureName(arguments["gesture"])
             confidence = float(arguments["confidence"])
@@ -330,7 +304,7 @@ def gesture_to_command(
             frame=CoordinateFrame.ROBOT_BASE,
             value_source=DistanceSource.CONFIGURED_DEFAULT,
         ),)),
-        needs_confirmation=True,
+        needs_confirmation=False,
         confidence=1.0,
         summary=f"手势运动序列：{gesture.value}，{distance_mm:g} mm",
     )

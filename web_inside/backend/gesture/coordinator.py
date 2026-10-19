@@ -1,23 +1,23 @@
-"""Per-session Step 14 gesture arbitration.
+"""Low-latency gesture following for the internal operator console.
 
-The browser is an untrusted perception source: it sends raw camera frames and
-voice-activity state, while agent-web owns VLM classification, stability,
-priority, cooldown, latching, and conversion to a ParsedCommand.
+The camera remains an untrusted perception source. InternS2 classifies each
+frame on the server, while this coordinator owns the direct-control lease and
+maps a recognized direction to the same short, interruptible motion channel as
+the manual panel. There is deliberately no browser confirmation in this mode.
 """
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import RLock
 import time
 from typing import Any
 from uuid import uuid4
 
-from surgical_contracts import CommandIntent
-
-from ..models import InputSource, SessionStatus
+from ..manual_control import ManualInput
 from .models import (
+    GestureControlResponse,
     GestureDecision,
     GestureFrameRequest,
     GestureFrameResponse,
@@ -33,27 +33,24 @@ from .service import (
 )
 
 
-_BUSY_STATUSES = {
-    SessionStatus.PARSING,
-    SessionStatus.AWAITING_CONFIRMATION,
-    SessionStatus.EXECUTING,
-    SessionStatus.MOVING_TO_ENTRY,
-    SessionStatus.VERIFYING_ENTRY,
-    SessionStatus.MOVING_RELATIVE,
-    SessionStatus.PLANNING,
-    SessionStatus.STOPPING,
-    SessionStatus.PAUSED,
+_DIRECTIONS: dict[GestureName, tuple[int, int]] = {
+    GestureName.FORWARD: (0, 1),
+    GestureName.BACKWARD: (0, -1),
+    GestureName.LEFT: (1, 1),
+    GestureName.RIGHT: (1, -1),
+    GestureName.UP: (2, 1),
+    GestureName.DOWN: (2, -1),
 }
 
 
 @dataclass
-class _ArbitrationState:
+class _ControlState:
+    token: str | None = None
+    sequence: int = 0
+    active_gesture: GestureName | None = None
+    safety_latch: GestureName | None = None
     voice_active: bool = False
-    last_voice_activity_s: float = -1.0
-    cooldown_until_s: float = 0.0
-    latched_gesture: GestureName | None = None
-    candidate_gesture: GestureName | None = None
-    candidate_count: int = 0
+    operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class GestureCoordinator:
@@ -68,269 +65,225 @@ class GestureCoordinator:
         self.recognizer = recognizer
         self.settings = settings or GestureSettings.from_env()
         self._lock = RLock()
-        self._states: dict[str, _ArbitrationState] = {}
+        self._states: dict[str, _ControlState] = {}
 
-    def _state(self, session_id: str) -> _ArbitrationState:
+    def _state(self, session_id: str) -> _ControlState:
         with self._lock:
-            return self._states.setdefault(session_id, _ArbitrationState())
+            return self._states.setdefault(session_id, _ControlState())
+
+    def _response(self, session_id: str) -> GestureControlResponse:
+        state = self._state(session_id)
+        manual = self.runtime.manual.status(session_id)
+        return GestureControlResponse(
+            active=state.token is not None,
+            mode=manual["mode"],
+            moving=state.active_gesture is not None and bool(manual["moving"]),
+            gesture=state.active_gesture,
+            reason=str(manual["reason"]),
+        )
+
+    def status(self, session_id: str) -> GestureControlResponse:
+        self.runtime.get_session(session_id)
+        return self._response(session_id)
+
+    async def acquire(self, session_id: str) -> GestureControlResponse:
+        self.runtime.get_session(session_id)
+        state = self._state(session_id)
+        async with state.operation_lock:
+            if state.token is not None:
+                return self._response(session_id)
+            lease = await self.runtime.manual.acquire(session_id, owner="gesture")
+            state.token = lease["token"]
+            state.sequence = 0
+            state.active_gesture = None
+            state.safety_latch = None
+        return self._response(session_id)
+
+    async def heartbeat(self, session_id: str) -> GestureControlResponse:
+        state = self._state(session_id)
+        token = state.token
+        if token is None:
+            return self._response(session_id)
+        try:
+            await self.runtime.manual.heartbeat(session_id, token)
+        except Exception:
+            lease = self.runtime.manual.lease
+            if lease is None or lease.token != token:
+                with self._lock:
+                    state.token = None
+                    state.active_gesture = None
+            raise
+        return self._response(session_id)
+
+    async def _manual_input(
+        self,
+        session_id: str,
+        state: _ControlState,
+        *,
+        gesture: GestureName | None,
+    ) -> None:
+        token = state.token
+        if token is None:
+            raise RuntimeError("手势控制尚未接管机械臂")
+        state.sequence += 1
+        if gesture is None:
+            command = ManualInput(token=token, sequence=state.sequence)
+        else:
+            axis, direction = _DIRECTIONS[gesture]
+            command = ManualInput(
+                token=token,
+                sequence=state.sequence,
+                kind="translation",
+                axis=axis,
+                direction=direction,
+                amount=self.runtime.manual.default_translation_step(session_id),
+                speed_scale=1.0,
+                continuous=True,
+            )
+        await self.runtime.manual.input(session_id, command)
+
+    async def _pause(self, session_id: str, state: _ControlState) -> bool:
+        if state.token is None or state.active_gesture is None:
+            state.active_gesture = None
+            return False
+        await self._manual_input(session_id, state, gesture=None)
+        state.active_gesture = None
+        return True
+
+    async def release(self, session_id: str) -> GestureResetResponse:
+        self.runtime.get_session(session_id)
+        state = self._state(session_id)
+        async with state.operation_lock:
+            token = state.token
+            if token is not None:
+                await self._pause(session_id, state)
+                await self.runtime.manual.release(session_id, token)
+                state.token = None
+                state.sequence = 0
+                state.active_gesture = None
+                state.safety_latch = None
+                state.voice_active = False
+        return GestureResetResponse()
 
     def set_voice_activity(self, session_id: str, active: bool) -> VoiceActivityResponse:
+        # Backwards-compatible endpoint. The explicitly opened internal gesture
+        # drawer owns the input lease until it is closed.
         self.runtime.get_session(session_id)
-        now = time.monotonic()
-        state = self._state(session_id)
-        with self._lock:
-            state.voice_active = bool(active)
-            # Record both the start and end edge. After speech/ASR finishes we
-            # preserve the conflict window so a held gesture cannot "catch up".
-            state.last_voice_activity_s = now
+        self._state(session_id).voice_active = bool(active)
         return VoiceActivityResponse(
             active=bool(active),
             observed_at_ms=time.time_ns() // 1_000_000,
         )
-
-    def reset(self, session_id: str) -> GestureResetResponse:
-        self.runtime.get_session(session_id)
-        with self._lock:
-            self._states[session_id] = _ArbitrationState()
-        return GestureResetResponse()
-
-    def _voice_conflict(self, state: _ArbitrationState, now: float) -> bool:
-        return state.voice_active or (
-            state.last_voice_activity_s >= 0
-            and now - state.last_voice_activity_s
-            <= self.settings.voice_conflict_window_s
-        )
-
-    def _latch(self, state: _ArbitrationState, gesture: GestureName) -> None:
-        state.latched_gesture = gesture
-        state.cooldown_until_s = time.monotonic() + self.settings.cooldown_s
-        state.candidate_gesture = None
-        state.candidate_count = 0
-
-    def _observe_candidate(
-        self,
-        state: _ArbitrationState,
-        gesture: GestureName,
-    ) -> int:
-        if state.candidate_gesture == gesture:
-            state.candidate_count += 1
-        else:
-            state.candidate_gesture = gesture
-            state.candidate_count = 1
-        return state.candidate_count
 
     async def submit_frame(
         self,
         session_id: str,
         request: GestureFrameRequest,
     ) -> GestureFrameResponse:
-        # Do not compare browser Date.now() with server wall-clock time: the
-        # browser and remote laboratory server are separate machines and may
-        # legitimately have clock skew. Frames are never queued; hidden pages
-        # stop sampling and reset the server latch instead.
-        session = self.runtime.get_session(session_id)
-        recognition = await asyncio.to_thread(
-            self.recognizer.recognize,
-            request.image_data_url,
-        )
-        gesture = recognition.gesture
+        self.runtime.get_session(session_id)
         state = self._state(session_id)
-        now = time.monotonic()
-
-        # A no-hand/uncertain frame is the explicit release condition for the
-        # one-shot latch and the stability accumulator.
-        if gesture in {GestureName.NONE, GestureName.UNCERTAIN}:
-            with self._lock:
-                state.latched_gesture = None
-                state.candidate_gesture = None
-                state.candidate_count = 0
-            return GestureFrameResponse(
-                recognition=recognition,
-                decision=GestureDecision.IGNORED,
-                message=(
-                    "未检测到协议手势。" if gesture == GestureName.NONE
-                    else "手势不明确，未产生任何命令。"
-                ),
-            )
-
-        safety = gesture in {GestureName.STOP, GestureName.ESTOP}
-        threshold = (
-            self.settings.safety_minimum_confidence
-            if safety
-            else self.settings.minimum_confidence
-        )
-        if recognition.confidence < threshold or not recognition.hand_detected:
-            with self._lock:
-                state.candidate_gesture = None
-                state.candidate_count = 0
-            return GestureFrameResponse(
-                recognition=recognition,
-                decision=GestureDecision.IGNORED,
-                message=f"手势置信度不足（阈值 {threshold:.2f}），未产生任何命令。",
-            )
-
-        with self._lock:
-            if state.latched_gesture == gesture:
-                return GestureFrameResponse(
-                    recognition=recognition,
-                    decision=GestureDecision.SUPPRESSED_LATCHED,
-                    message="同一手势仍在保持；必须先松开/离开画面后才能再次触发。",
-                )
-
-        # Safety gestures bypass stability/busy/cooldown/voice arbitration, but
-        # still use the one-shot latch so a held palm/circle cannot spam stops.
-        if gesture == GestureName.ESTOP:
-            snapshot = await self.runtime.stop(session_id, emergency=True)
-            with self._lock:
-                self._latch(state, gesture)
-            return GestureFrameResponse(
-                recognition=recognition,
-                decision=GestureDecision.SAFETY_ESTOP,
-                message="识别到急停手势：五指张开且掌心正对摄像头，已立即执行急停。",
-                session_snapshot=snapshot.model_dump(mode="json"),
-            )
-        if gesture == GestureName.STOP:
-            snapshot = await self.runtime.stop(session_id, emergency=False)
-            with self._lock:
-                self._latch(state, gesture)
-            return GestureFrameResponse(
-                recognition=recognition,
-                decision=GestureDecision.SAFETY_STOP,
-                message="识别到停止手势：拇指和食指组成圆圈，已立即停止机械臂。",
-                session_snapshot=snapshot.model_dump(mode="json"),
-            )
-
-        # Ordinary directions must be independently classified the same way in
-        # multiple consecutive sampled frames before they can enter arbitration.
-        with self._lock:
-            stable_count = self._observe_candidate(state, gesture)
-        if stable_count < self.settings.stable_frames:
-            return GestureFrameResponse(
-                recognition=recognition,
-                decision=GestureDecision.IGNORED,
-                message=(
-                    f"普通手势稳定性 {stable_count}/{self.settings.stable_frames}；"
-                    "继续保持该手势，尚未产生命令。"
-                ),
-            )
-
-        with self._lock:
-            if now < state.cooldown_until_s:
-                self._latch(state, gesture)
-                return GestureFrameResponse(
-                    recognition=recognition,
-                    decision=GestureDecision.SUPPRESSED_COOLDOWN,
-                    message="手势仍在冷却时间内，未重复触发。",
-                )
-            if self._voice_conflict(state, now):
-                # Voice wins this occurrence. Latch it so holding the same hand
-                # pose cannot execute immediately after speech ends.
-                self._latch(state, gesture)
-                return GestureFrameResponse(
-                    recognition=recognition,
-                    decision=GestureDecision.SUPPRESSED_VOICE,
-                    message="检测到语音输入，按优先级规则压制普通手势。",
-                )
-        if session.status in _BUSY_STATUSES or session.pending_confirmation:
-            with self._lock:
-                self._latch(state, gesture)
-            return GestureFrameResponse(
-                recognition=recognition,
-                decision=GestureDecision.SUPPRESSED_BUSY,
-                message="当前会话已有待确认或执行中的普通任务，未接受新手势。",
-            )
-
-        # Hold the stable ordinary gesture for the configured voice conflict
-        # window. If speech begins during the window, voice wins.
-        await asyncio.sleep(self.settings.voice_conflict_window_s)
-        now = time.monotonic()
-        with self._lock:
-            if self._voice_conflict(state, now):
-                self._latch(state, gesture)
-                return GestureFrameResponse(
-                    recognition=recognition,
-                    decision=GestureDecision.SUPPRESSED_VOICE,
-                    message="冲突窗口内出现语音输入，普通手势已被语音压制。",
-                )
-
-        # Re-read after the wait; another request may have changed the session.
-        session = self.runtime.get_session(session_id)
-        if session.status in _BUSY_STATUSES or session.pending_confirmation:
-            with self._lock:
-                self._latch(state, gesture)
-            return GestureFrameResponse(
-                recognition=recognition,
-                decision=GestureDecision.SUPPRESSED_BUSY,
-                message="冲突窗口结束前会话状态已变化，手势未进入执行链路。",
-            )
-
-        command = gesture_to_command(
-            gesture,
-            distance_mm=self.runtime.settings.default_relative_step_mm,
-            command_id=f"gesture-{uuid4().hex}",
-        )
-        if command is None or command.intent != CommandIntent.MOVE_SEQUENCE:
-            return GestureFrameResponse(
-                recognition=recognition,
-                decision=GestureDecision.IGNORED,
-                message="识别结果没有对应的普通相对移动命令。",
-            )
-
-        raw_output = {
-            "function": "classify_fixed_gesture",
-            "arguments": {
-                "gesture": recognition.gesture.value,
-                "confidence": recognition.confidence,
-                "hand_detected": recognition.hand_detected,
-            },
-            "model": recognition.model,
-            "tool_call_id": recognition.tool_call_id,
-        }
-
-        def accept(record) -> None:
-            if hasattr(self.runtime, 'manual'):
-                self.runtime.manual.assert_task_allowed(record.robot_mode)
-            if record.status in _BUSY_STATUSES or record.pending_command is not None:
-                raise RuntimeError("session became busy during gesture acceptance")
-            record.status = SessionStatus.AWAITING_CONFIRMATION
-            record.prompt = f"[手势] {gesture.value}"
-            record.input_source = InputSource.GESTURE
-            record.image_name = None
-            record.asr_transcription = None
-            record.pending_command = command
-            record.active_command_id = None
-            record.raw_model_output = raw_output
-            record.normalized_command = command.model_dump(mode="json")
-            record.execution_events = []
-            record.live_tool_events = []
-            record.orchestration = None
-            record.message = (
-                f"已识别手势 {gesture.value}；已生成一个 step 的 MotionSequence，"
-                f"将在 robot_base 下移动 "
-                f"{self.runtime.settings.default_relative_step_mm:g} mm。请确认后执行。"
-            )
-            record.error = None
+        token_before = state.token
+        if token_before is None:
+            raise RuntimeError("请先启动手势控制")
 
         try:
-            snapshot = self.runtime.store.mutate(session_id, accept)
-        except RuntimeError:
-            with self._lock:
-                self._latch(state, gesture)
-            return GestureFrameResponse(
-                recognition=recognition,
-                decision=GestureDecision.SUPPRESSED_BUSY,
-                message="接受手势时会话已被其他输入占用，手势未执行。",
+            recognition = await asyncio.to_thread(
+                self.recognizer.recognize,
+                request.image_data_url,
+            )
+        except Exception:
+            # Classification failure is recognition loss: stop the last
+            # direction before surfacing the error to the browser.
+            async with state.operation_lock:
+                if state.token == token_before:
+                    await self._pause(session_id, state)
+            raise
+
+        async with state.operation_lock:
+            if state.token != token_before:
+                raise RuntimeError("手势控制已退出，本帧已丢弃")
+
+            gesture = recognition.gesture
+            safety = gesture in {GestureName.STOP, GestureName.ESTOP}
+            threshold = (
+                self.settings.safety_minimum_confidence
+                if safety
+                else self.settings.minimum_confidence
+            )
+            recognized = (
+                recognition.hand_detected
+                and recognition.confidence >= threshold
+                and gesture not in {GestureName.NONE, GestureName.UNCERTAIN}
             )
 
-        with self._lock:
-            self._latch(state, gesture)
-        return GestureFrameResponse(
-            recognition=recognition,
-            decision=GestureDecision.ACCEPTED,
-            message="手势已通过稳定性检查与仲裁，并形成待确认的相对移动任务。",
-            mapped_command=command.model_dump(mode="json"),
-            session_snapshot=snapshot.model_dump(mode="json"),
-        )
+            if not recognized:
+                paused = await self._pause(session_id, state)
+                state.safety_latch = None
+                return GestureFrameResponse(
+                    recognition=recognition,
+                    decision=GestureDecision.PAUSED,
+                    message=(
+                        "未识别到有效手势，机械臂已暂停。"
+                        if paused
+                        else "未识别到有效手势，机械臂保持暂停。"
+                    ),
+                )
+
+            if gesture in {GestureName.STOP, GestureName.ESTOP}:
+                if state.safety_latch == gesture:
+                    return GestureFrameResponse(
+                        recognition=recognition,
+                        decision=GestureDecision.SUPPRESSED_LATCHED,
+                        message="安全手势仍在保持；机械臂保持停止。",
+                    )
+                # Do not put a normal direct-control stop in front of an
+                # emergency stop.  WebRuntime.stop() interrupts the shared
+                # manual lease itself, then delivers the requested stop level.
+                snapshot = await self.runtime.stop(
+                    session_id,
+                    emergency=gesture == GestureName.ESTOP,
+                )
+                state.active_gesture = None
+                state.safety_latch = gesture
+                return GestureFrameResponse(
+                    recognition=recognition,
+                    decision=(
+                        GestureDecision.SAFETY_ESTOP
+                        if gesture == GestureName.ESTOP
+                        else GestureDecision.SAFETY_STOP
+                    ),
+                    message=(
+                        "识别到张开手掌，已立即执行急停。"
+                        if gesture == GestureName.ESTOP
+                        else "识别到停止手势，已立即停止机械臂。"
+                    ),
+                    session_snapshot=snapshot.model_dump(mode="json"),
+                )
+
+            state.safety_latch = None
+            if gesture not in _DIRECTIONS:
+                paused = await self._pause(session_id, state)
+                return GestureFrameResponse(
+                    recognition=recognition,
+                    decision=GestureDecision.PAUSED,
+                    message=("该手势没有运动映射，机械臂已暂停。" if paused else "机械臂保持暂停。"),
+                )
+
+            if state.active_gesture not in {None, gesture}:
+                await self._pause(session_id, state)
+            await self._manual_input(session_id, state, gesture=gesture)
+            state.active_gesture = gesture
+            mapped = gesture_to_command(
+                gesture,
+                distance_mm=self.runtime.manual.default_translation_step(session_id),
+                command_id=f"gesture-{uuid4().hex}",
+            )
+            return GestureFrameResponse(
+                recognition=recognition,
+                decision=GestureDecision.ACCEPTED,
+                message=f"已识别 {gesture.value}，机械臂正在同步随动；无需二次确认。",
+                mapped_command=(mapped.model_dump(mode="json") if mapped is not None else None),
+            )
 
 
 def build_gesture_coordinator(runtime: Any) -> GestureCoordinator:
@@ -341,11 +294,7 @@ def build_gesture_coordinator(runtime: Any) -> GestureCoordinator:
         raise GestureRecognitionError(
             "gesture recognition requires an InternS2Agent-backed WebRuntime"
         )
-    recognizer = InternS2GestureRecognizer(
-        runtime.settings,
-        client,
-        model=model,
-    )
+    recognizer = InternS2GestureRecognizer(runtime.settings, client, model=model)
     return GestureCoordinator(
         runtime,
         recognizer=recognizer,

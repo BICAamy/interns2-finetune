@@ -1,259 +1,53 @@
-.gesture-overlay {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  z-index: 50;
-  width: min(390px, calc(100vw - 32px));
-  padding: 14px;
-  border: 1px solid rgba(125, 145, 170, 0.28);
-  border-radius: 18px;
-  background: rgba(15, 23, 34, 0.96);
-  box-shadow: 0 18px 55px rgba(0, 0, 0, 0.35);
-  color: #eef5ff;
-  backdrop-filter: blur(18px);
+.robot-workbench .gesture-fab {
+  position:fixed;right:40px;bottom:33px;z-index:85;width:60px;height:60px;padding:0;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+  border:1px solid color-mix(in srgb,var(--rw-accent) 28%,transparent);border-radius:50%;
+  background:linear-gradient(145deg,color-mix(in srgb,var(--rw-surface) 68%,transparent),color-mix(in srgb,var(--rw-accent-soft) 68%,transparent));
+  color:var(--rw-accent);backdrop-filter:blur(14px) saturate(150%);-webkit-backdrop-filter:blur(14px) saturate(150%);
+  box-shadow:0 8px 26px #2563eb20,inset 0 1px #ffffff60;cursor:pointer;font:inherit;
+  transition:background .16s ease,box-shadow .16s ease,transform .16s ease;
 }
-
-.gesture-overlay.collapsed {
-  width: 300px;
+.gesture-fab svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.gesture-fab>strong{font-size:10px;font-weight:600;line-height:1.3;white-space:nowrap}
+.robot-workbench .gesture-fab:hover{background:color-mix(in srgb,var(--rw-surface) 84%,transparent);box-shadow:0 10px 28px #2563eb30;transform:translateY(-2px)}
+.robot-workbench .gesture-drawer{
+  position:fixed;z-index:76;top:92px;right:20px;bottom:20px;width:min(464px,calc(100vw - 40px));
+  display:flex;flex-direction:column;color:var(--rw-ink);background:var(--rw-surface);
+  border:1px solid var(--rw-border);border-radius:18px;box-shadow:-10px 8px 36px #0f172a1a;
+  overflow:hidden;outline:none;animation:gesture-slide .18s ease-out;
 }
-
-.gesture-overlay-heading,
-.gesture-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.gesture-overlay-heading > div {
-  display: grid;
-  gap: 3px;
-}
-
-.gesture-overlay-heading span,
-.gesture-actions span,
-.gesture-result span {
-  color: #9fb0c4;
-  font-size: 12px;
-}
-
-.gesture-overlay-heading button {
-  border: 0;
-  border-radius: 10px;
-  padding: 7px 10px;
-  background: rgba(255, 255, 255, 0.08);
-  color: inherit;
-  cursor: pointer;
-}
-
-.gesture-camera-stage {
-  position: relative;
-  min-height: 190px;
-  margin: 12px 0;
-  overflow: hidden;
-  border-radius: 14px;
-  background: #07101b;
-  display: grid;
-  place-items: center;
-  color: #8192a6;
-}
-
-.gesture-preview {
-  width: 100%;
-  aspect-ratio: 4 / 3;
-  object-fit: cover;
-  transform: scaleX(-1);
-}
-
-.gesture-camera-stage > span {
-  position: absolute;
-}
-
-.gesture-actions {
-  margin-bottom: 10px;
-}
-
-.gesture-result,
-.gesture-error {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.06);
-}
-
-.gesture-result {
-  display: grid;
-  gap: 4px;
-}
-
-.gesture-result p {
-  margin: 3px 0 0;
-  color: #c8d5e4;
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.gesture-result.accepted {
-  outline: 1px solid rgba(69, 203, 137, 0.38);
-}
-
-.gesture-result.safety_stop,
-.gesture-result.safety_estop {
-  outline: 1px solid rgba(255, 118, 118, 0.55);
-}
-
-.gesture-error {
-  color: #ffb6b6;
-  border: 1px solid rgba(255, 100, 100, 0.28);
-}
-
-.gesture-protocol {
-  margin-top: 10px;
-  color: #b9c8d8;
-  font-size: 12px;
-}
-
-.gesture-protocol summary {
-  cursor: pointer;
-  color: #d8e6f5;
-}
-
-.gesture-protocol ol {
-  margin: 8px 0 0 20px;
-  padding: 0;
-  display: grid;
-  gap: 3px;
-}
-
-@media (max-width: 720px) {
-  .gesture-overlay {
-    right: 10px;
-    bottom: 10px;
-    width: calc(100vw - 20px);
-  }
-}
-.gesture-axis-hint {
-  display: grid;
-  gap: 4px;
-  margin: 10px 0;
-  padding: 10px 12px;
-  border: 1px solid rgba(125, 145, 170, 0.22);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.045);
-}
-
-.gesture-axis-hint strong {
-  margin-bottom: 2px;
-  color: #d8e6f5;
-  font-size: 12px;
-}
-
-.gesture-axis-hint span {
-  color: #9fb0c4;
-  font-size: 11px;
-  line-height: 1.5;
-}
-
-/* Match the application's white-and-blue visual system. */
-.gesture-overlay {
-  color: #17395f;
-  border-color: #d6e3f2;
-  background: rgba(255, 255, 255, 0.97);
-  box-shadow: 0 20px 58px rgba(18, 58, 105, 0.18);
-}
-
-.gesture-overlay-heading span,
-.gesture-actions span,
-.gesture-result span { color: #7189a5; }
-
-.gesture-overlay-heading button {
-  color: #155ba7;
-  background: #edf5ff;
-}
-
-.gesture-camera-stage {
-  color: #7189a5;
-  border: 1px solid #d8e5f2;
-  background: #edf4fc;
-}
-
-.gesture-result,
-.gesture-error { background: #f3f7fc; }
-.gesture-result p { color: #355a80; }
-.gesture-result.accepted { outline-color: rgba(22, 164, 119, 0.42); background: #eefaf5; }
-.gesture-result.safety_stop,
-.gesture-result.safety_estop { outline-color: rgba(229, 72, 95, 0.48); background: #fff2f4; }
-.gesture-error { color: #bd344c; border-color: #efc2ca; background: #fff2f4; }
-.gesture-protocol { color: #5f7894; }
-.gesture-protocol summary { color: #234d77; }
-
-.gesture-axis-hint {
-  border-color: #d9e6f3;
-  background: #f2f7fd;
-}
-
-.gesture-axis-hint strong { color: #225487; }
-.gesture-axis-hint span { color: #7189a5; }
-
-/* Floating assistant card for the aurora control-room theme. */
-.gesture-overlay {
-  right: 18px;
-  bottom: 18px;
-  overflow: hidden;
-  border-color: rgba(255, 255, 255, 0.72);
-  border-radius: 20px;
-  background:
-    radial-gradient(circle at 100% 0, rgba(37, 158, 242, 0.1), transparent 42%),
-    rgba(255, 255, 255, 0.88);
-  box-shadow:
-    0 24px 64px rgba(15, 57, 108, 0.18),
-    inset 0 1px 0 #fff;
-  backdrop-filter: blur(24px) saturate(130%);
-}
-
-.gesture-overlay::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 28px;
-  right: 28px;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(22, 139, 237, 0.52), transparent);
-}
-
-.gesture-overlay-heading strong { color: #123f70; }
-
-.gesture-overlay-heading button {
-  color: #0b63bd;
-  border: 1px solid rgba(61, 138, 213, 0.13);
-  background: rgba(235, 246, 255, 0.92);
-  transition: transform 0.18s ease, background 0.18s ease;
-}
-
-.gesture-overlay-heading button:hover {
-  background: #e2f1ff;
-  transform: translateY(-1px);
-}
-
-.gesture-camera-stage {
-  border-color: rgba(71, 127, 183, 0.18);
-  border-radius: 16px;
-  background: linear-gradient(145deg, #edf5fd, #e4effa);
-  box-shadow: inset 0 1px 3px rgba(29, 71, 115, 0.06);
-}
-
-.gesture-result,
-.gesture-error,
-.gesture-axis-hint {
-  border-radius: 13px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
-}
-
-@media (max-width: 720px) {
-  .gesture-overlay {
-    right: 8px;
-    bottom: 8px;
-    width: calc(100vw - 16px);
-    border-radius: 17px;
-  }
-}
+@keyframes gesture-slide{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}
+.gesture-header{display:flex;align-items:center;gap:12px;padding:18px 20px 12px;flex-shrink:0}
+.gesture-header>div{flex:1}.gesture-header>div>span{font-size:9px;letter-spacing:.12em;color:var(--rw-muted)}
+.robot-workbench .gesture-header h2{margin:5px 0 0;font-size:22px;color:var(--rw-ink);line-height:1.3}
+.gesture-mode{font-size:12px;color:var(--rw-accent);background:var(--rw-accent-soft);border-radius:7px;padding:6px 9px}
+.gesture-close{width:30px;height:30px;border:1px solid var(--rw-border);border-radius:8px;color:var(--rw-muted);background:var(--rw-soft);font-size:20px}
+.gesture-ownership{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 20px 14px;border-bottom:1px solid var(--rw-border);font-size:12px;flex-shrink:0;color:var(--rw-secondary)}
+.gesture-ownership button{border:1px solid var(--rw-border);border-radius:8px;background:var(--rw-accent-soft);color:var(--rw-accent);font-size:12px;padding:8px 10px}
+.gesture-scroll{flex:1;min-height:0;overflow:auto;padding:16px 20px;display:flex;flex-direction:column;gap:14px;scrollbar-width:thin;scrollbar-color:var(--rw-border) transparent}
+.gesture-camera-stage{position:relative;min-height:238px;overflow:hidden;border:1px solid var(--rw-border);border-radius:14px;background:linear-gradient(145deg,var(--rw-soft),var(--rw-accent-soft));display:grid;place-items:center}
+.gesture-preview{width:100%;aspect-ratio:4/3;object-fit:cover;transform:scaleX(-1)}
+.gesture-camera-stage>div{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;color:var(--rw-muted);background:linear-gradient(145deg,var(--rw-soft),var(--rw-accent-soft))}
+.gesture-camera-stage>div strong{font-size:13px;color:var(--rw-secondary)}.gesture-camera-stage>div span{font-size:11px}
+.gesture-live{position:absolute;left:10px;top:10px;display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:7px;background:#172438cc;color:#fff;font:9px/1.2 Consolas,monospace;letter-spacing:.1em}
+.gesture-live i{width:7px;height:7px;border-radius:50%;background:#ef334e;box-shadow:0 0 10px #ef334e}
+.gesture-follow-rule{display:grid;gap:5px;padding:11px 12px;border:1px solid var(--rw-border);border-radius:11px;background:var(--rw-accent-soft)}
+.gesture-follow-rule strong{font-size:12px;color:var(--rw-accent)}.gesture-follow-rule span{font-size:11px;color:var(--rw-secondary);line-height:1.6}.gesture-follow-rule small{font-size:10px;color:var(--rw-muted)}
+.gesture-result,.gesture-error{padding:11px 12px;border:1px solid var(--rw-border);border-radius:11px;background:var(--rw-soft)}
+.gesture-result{display:grid;gap:5px}.gesture-result>div{display:flex;justify-content:space-between;gap:8px}.gesture-result strong{font-size:13px;color:var(--rw-ink)}.gesture-result b{font-size:11px;color:var(--rw-accent)}
+.gesture-result span{font-size:10px;color:var(--rw-muted)}.gesture-result p{margin:1px 0 0;font-size:11px;line-height:1.6;color:var(--rw-secondary)}
+.gesture-result.accepted{border-color:#86d8bd;background:#effbf6}.gesture-result.paused{border-color:#d7e1ed;background:var(--rw-soft)}
+.gesture-result.safety_stop,.gesture-result.safety_estop{border-color:#efb0bc;background:#fff1f3}
+[data-theme="dark"] .gesture-result.accepted{border-color:#276c59;background:#17372f}[data-theme="dark"] .gesture-result.safety_stop,[data-theme="dark"] .gesture-result.safety_estop{border-color:#7a3948;background:#43232d}
+.gesture-error{font-size:11px;line-height:1.6;color:#a62139;border-color:#fecdd3;background:#fff1f2}
+.gesture-protocol{font-size:11px;color:var(--rw-secondary)}.gesture-protocol summary{cursor:pointer;color:var(--rw-accent)}
+.gesture-protocol-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:9px;padding:10px;border:1px solid var(--rw-border);border-radius:10px;background:var(--rw-soft)}
+.gesture-position{display:flex;flex-wrap:wrap;gap:8px 12px;font-size:10px;color:var(--rw-muted);font-variant-numeric:tabular-nums}.gesture-position b{font-weight:500;color:var(--rw-secondary)}
+.gesture-footer{padding:12px 20px 16px;border-top:1px solid var(--rw-border);flex-shrink:0;background:var(--rw-surface)}
+.gesture-stop{width:100%;min-height:38px;border:1px solid #d92d49;border-radius:9px;background:#d92d49;color:#fff;font-size:13px;font-weight:600}.gesture-stop:hover:not(:disabled){background:#bc203b}
+.gesture-footer>small{display:block;margin-top:8px;font-size:10px;text-align:center;color:var(--rw-muted)}
+.gesture-drawer :is(button,input):focus-visible,.gesture-fab:focus-visible{outline:2px solid var(--rw-accent);outline-offset:3px}
+@media(max-width:900px){.robot-workbench .gesture-fab{right:32px;bottom:29px}}
+@media(max-width:700px){.robot-workbench .gesture-drawer{top:86px;right:12px;bottom:12px;width:calc(100% - 24px)}.gesture-scroll{padding:14px 16px}.gesture-header{padding:16px 16px 12px}.gesture-ownership{padding:0 16px 12px}.gesture-footer{padding:10px 16px 16px}}
+@media(max-width:560px){.robot-workbench .gesture-fab{right:28px}}
+@media(prefers-reduced-motion:reduce){.robot-workbench .gesture-drawer{animation:none}.robot-workbench .gesture-fab{transition:none}.robot-workbench .gesture-fab:hover{transform:none}}

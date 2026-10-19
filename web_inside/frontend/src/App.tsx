@@ -1,4 +1,5 @@
 import ManualControl from "./ManualControl";
+import GestureOverlay from "./GestureOverlay";
 import { agentThemeMenu } from "./AgentThemeMenu";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
@@ -1064,6 +1065,7 @@ export default function App() {
         </div>
       </main>
       <ManualControl sessionId={session?.session_id ?? null} runtimeMode={runtimeMode} telemetry={telemetry} />
+      <GestureOverlay sessionId={session?.session_id ?? null} runtimeMode={runtimeMode} telemetry={telemetry} />
     </div>
   );
 }

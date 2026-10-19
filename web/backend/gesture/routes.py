@@ -5,15 +5,19 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from .coordinator import GestureCoordinator, build_gesture_coordinator
-from .models import (
+from web_inside.backend.gesture.coordinator import (
+    GestureCoordinator,
+    build_gesture_coordinator,
+)
+from web_inside.backend.gesture.models import (
+    GestureControlResponse,
     GestureFrameRequest,
     GestureFrameResponse,
     GestureResetResponse,
     VoiceActivityRequest,
     VoiceActivityResponse,
 )
-from .service import GestureRecognitionError
+from web_inside.backend.gesture.service import GestureRecognitionError
 
 
 router = APIRouter()
@@ -25,6 +29,36 @@ def _coordinator(request: Request) -> GestureCoordinator:
         selected = build_gesture_coordinator(request.app.state.runtime)
         request.app.state.gesture_coordinator = selected
     return selected
+
+
+@router.get(
+    "/api/sessions/{session_id}/gesture",
+    response_model=GestureControlResponse,
+)
+def gesture_status(session_id: str, request: Request) -> GestureControlResponse:
+    return _coordinator(request).status(session_id)
+
+
+@router.post(
+    "/api/sessions/{session_id}/gesture/acquire",
+    response_model=GestureControlResponse,
+)
+async def acquire_gesture_control(
+    session_id: str,
+    request: Request,
+) -> GestureControlResponse:
+    return await _coordinator(request).acquire(session_id)
+
+
+@router.post(
+    "/api/sessions/{session_id}/gesture/heartbeat",
+    response_model=GestureControlResponse,
+)
+async def heartbeat_gesture_control(
+    session_id: str,
+    request: Request,
+) -> GestureControlResponse:
+    return await _coordinator(request).heartbeat(session_id)
 
 
 @router.post(
@@ -47,6 +81,15 @@ async def submit_gesture_frame(
                 "details": {},
             },
         )
+    except RuntimeError as error:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": "GESTURE_CONTROL_INACTIVE",
+                "message": str(error),
+                "details": {},
+            },
+        )
 
 
 @router.put(
@@ -65,8 +108,8 @@ def set_voice_activity(
     "/api/sessions/{session_id}/gesture/reset",
     response_model=GestureResetResponse,
 )
-def reset_gesture_state(
+async def reset_gesture_state(
     session_id: str,
     request: Request,
 ) -> GestureResetResponse:
-    return _coordinator(request).reset(session_id)
+    return await _coordinator(request).release(session_id)

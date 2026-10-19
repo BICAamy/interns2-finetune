@@ -1,5 +1,5 @@
 .robot-workbench .manual-fab {
-  position:fixed;right:40px;bottom:33px;z-index:85;width:60px;height:60px;padding:0;
+  position:fixed;right:112px;bottom:33px;z-index:85;width:60px;height:60px;padding:0;
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
   border:1px solid color-mix(in srgb,var(--rw-accent) 28%,transparent);border-radius:50%;
   background:linear-gradient(145deg,color-mix(in srgb,var(--rw-surface) 68%,transparent),color-mix(in srgb,var(--rw-accent-soft) 68%,transparent));
@@ -64,8 +64,8 @@
 .manual-joint-name{display:inline-flex;align-items:center;gap:4px;font-weight:500}.manual-joint-name i{width:6px;height:6px;border-radius:50%;flex-shrink:0}
 .manual-joint-overlay{position:absolute;inset:0;z-index:3;pointer-events:none;overflow:hidden}
 .manual-joint-overlay text{font:600 12px Inter,"Microsoft YaHei",sans-serif;letter-spacing:0}
-@media(max-width:900px){.robot-workbench .manual-fab{right:32px;bottom:29px}}
+@media(max-width:900px){.robot-workbench .manual-fab{right:104px;bottom:29px}}
 @media(max-width:700px){.robot-workbench .manual-drawer{top:86px;right:12px;bottom:12px;width:calc(100% - 24px)}.manual-scroll{padding:14px 16px}.manual-header{padding:16px 16px 12px}.manual-ownership{padding:0 16px 12px}.manual-footer{padding:10px 16px 16px}.manual-direction kbd{font-size:9px}.manual-settings label{flex-wrap:wrap}.manual-translation{grid-template-columns:1fr 70px;gap:10px}}
-@media(max-width:560px){.robot-workbench .manual-fab{right:28px}}
+@media(max-width:560px){.robot-workbench .manual-fab{right:100px}}
 @media(prefers-reduced-motion:reduce){.robot-workbench .manual-drawer{animation:none}}
 @media(prefers-reduced-motion:reduce){.robot-workbench .manual-fab{transition:none}.robot-workbench .manual-fab:hover{transform:none}}
