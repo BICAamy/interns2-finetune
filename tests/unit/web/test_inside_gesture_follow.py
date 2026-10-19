@@ -176,6 +176,31 @@ def test_direction_change_stops_old_motion_before_starting_new_motion():
     asyncio.run(case())
 
 
+def test_stop_gesture_is_a_recoverable_pause_and_next_direction_resumes():
+    async def case():
+        runtime = Runtime()
+        selected = coordinator(
+            runtime,
+            recognition(GestureName.FORWARD),
+            recognition(GestureName.STOP),
+            recognition(GestureName.RIGHT),
+        )
+        await selected.acquire(runtime.session.session_id)
+        await selected.submit_frame(runtime.session.session_id, frame())
+        stopped = await selected.submit_frame(runtime.session.session_id, frame())
+        resumed = await selected.submit_frame(runtime.session.session_id, frame())
+        assert stopped.decision == GestureDecision.SAFETY_STOP
+        assert resumed.decision == GestureDecision.ACCEPTED
+        assert runtime.stop_calls == []
+        assert [item.kind for item in runtime.manual.inputs] == [
+            "translation",
+            None,
+            "translation",
+        ]
+
+    asyncio.run(case())
+
+
 def test_recognition_failure_stops_previous_motion_before_reporting_error():
     async def case():
         runtime = Runtime()
@@ -183,12 +208,17 @@ def test_recognition_failure_stops_previous_motion_before_reporting_error():
             runtime,
             recognition(GestureName.BACKWARD),
             GestureRecognitionError("model offline"),
+            recognition(GestureName.UP),
         )
         await selected.acquire(runtime.session.session_id)
         await selected.submit_frame(runtime.session.session_id, frame())
         with pytest.raises(GestureRecognitionError):
             await selected.submit_frame(runtime.session.session_id, frame())
         assert runtime.manual.inputs[-1].kind is None
+        resumed = await selected.submit_frame(runtime.session.session_id, frame())
+        assert resumed.decision == GestureDecision.ACCEPTED
+        assert runtime.manual.inputs[-1].kind == "translation"
+        assert runtime.manual.inputs[-1].axis == 2
 
     asyncio.run(case())
 

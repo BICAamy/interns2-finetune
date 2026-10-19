@@ -91,6 +91,29 @@ def test_hold_watchdog_stops_even_while_ownership_heartbeat_is_fresh():
     asyncio.run(case())
 
 
+def test_gesture_soft_pause_does_not_latch_external_stop_and_can_resume():
+    async def case():
+        _,ctl,sid,transport,_=setup()
+        token=(await ctl.acquire(sid,owner="gesture"))["token"]
+        await ctl.input(sid,ManualInput(
+            token=token,sequence=1,kind="translation",continuous=True,
+        ))
+        await asyncio.sleep(.01)
+        await ctl.input(sid,ManualInput(token=token,sequence=2))
+        assert ctl.lease is not None
+        assert ctl.lease.external_stopped is False
+        await ctl.input(sid,ManualInput(
+            token=token,sequence=3,kind="translation",axis=1,continuous=True,
+        ))
+        await asyncio.sleep(.01)
+        assert ctl.lease.external_stopped is False
+        assert len(transport.commands) >= 2
+        await ctl.release(sid,token)
+        await ctl.shutdown()
+
+    asyncio.run(case())
+
+
 def test_sequence_and_token_prevent_replayed_or_other_tab_inputs():
     async def case():
         _,ctl,sid,_,_=setup()

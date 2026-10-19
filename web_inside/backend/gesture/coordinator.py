@@ -229,34 +229,45 @@ class GestureCoordinator:
                     ),
                 )
 
-            if gesture in {GestureName.STOP, GestureName.ESTOP}:
+            if gesture == GestureName.STOP:
                 if state.safety_latch == gesture:
                     return GestureFrameResponse(
                         recognition=recognition,
                         decision=GestureDecision.SUPPRESSED_LATCHED,
                         message="安全手势仍在保持；机械臂保持停止。",
                     )
+                paused = await self._pause(session_id, state)
+                state.safety_latch = gesture
+                return GestureFrameResponse(
+                    recognition=recognition,
+                    decision=GestureDecision.SAFETY_STOP,
+                    message=(
+                        "识别到停止手势，机械臂已暂停；识别到新的方向后会立即继续随动。"
+                        if paused
+                        else "识别到停止手势，机械臂保持暂停；识别到新的方向后会立即继续随动。"
+                    ),
+                )
+
+            if gesture == GestureName.ESTOP:
+                if state.safety_latch == gesture:
+                    return GestureFrameResponse(
+                        recognition=recognition,
+                        decision=GestureDecision.SUPPRESSED_LATCHED,
+                        message="急停手势仍在保持；机械臂保持急停。",
+                    )
                 # Do not put a normal direct-control stop in front of an
                 # emergency stop.  WebRuntime.stop() interrupts the shared
-                # manual lease itself, then delivers the requested stop level.
+                # manual lease itself, then delivers the emergency stop.
                 snapshot = await self.runtime.stop(
                     session_id,
-                    emergency=gesture == GestureName.ESTOP,
+                    emergency=True,
                 )
                 state.active_gesture = None
                 state.safety_latch = gesture
                 return GestureFrameResponse(
                     recognition=recognition,
-                    decision=(
-                        GestureDecision.SAFETY_ESTOP
-                        if gesture == GestureName.ESTOP
-                        else GestureDecision.SAFETY_STOP
-                    ),
-                    message=(
-                        "识别到张开手掌，已立即执行急停。"
-                        if gesture == GestureName.ESTOP
-                        else "识别到停止手势，已立即停止机械臂。"
-                    ),
+                    decision=GestureDecision.SAFETY_ESTOP,
+                    message="识别到张开手掌，已立即执行急停。",
                     session_snapshot=snapshot.model_dump(mode="json"),
                 )
 
