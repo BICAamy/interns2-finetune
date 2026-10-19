@@ -249,11 +249,14 @@ class RemoteMotionExecutor:
                 self._paused_confirmed.set()
                 self._control_condition.notify_all()
                 return True
-            if trial.command_id != target_command_id:
-                return False
+            # A mixed Cartesian/joint task may be split into multiple
+            # Mac-local controller batches.  The web control command owns the
+            # parent command while the active trial is journaled under a
+            # derived batch id, so authenticate the parent above and address
+            # the currently owned trial here.
             if not trial.request_authenticated_pause(
                 control_command_id,
-                target_command_id=target_command_id,
+                target_command_id=trial.command_id,
                 authenticated=True,
             ):
                 return False
@@ -287,11 +290,11 @@ class RemoteMotionExecutor:
                 self._resumed_confirmed.set()
                 self._control_condition.notify_all()
                 return True
-            if trial is None or trial.command_id != target_command_id:
+            if trial is None or trial.command_id is None:
                 return False
             if not trial.request_authenticated_resume(
                 control_command_id,
-                target_command_id=target_command_id,
+                target_command_id=trial.command_id,
                 authenticated=True,
             ):
                 return False
@@ -366,12 +369,82 @@ class RemoteMotionExecutor:
         request: MoveSequenceRequest,
         local_deadline_monotonic_ns: int,
     ) -> RobotCommandResult:
-        """Preflight the complete path, queue it once, then verify only its end.
+        """Execute the longest safely predictable controller batches.
 
-        Intermediate points are controller blending points. They are not
-        treated as separate commands and therefore have no READY/InPos/dwell
-        gate. Safety feedback remains monitored for the whole sequence.
+        With Mac-side Cartesian IK disabled, a Cartesian target deliberately
+        retains its incoming joint estimate.  That estimate must never be
+        used to preflight a later joint target.  Split only at a
+        Cartesian-to-joint dependency boundary, finish the preceding batch,
+        then obtain fresh real joint feedback before planning the next batch.
+
+        Every batch remains a continuously queued WayPoint sequence.  Pure
+        Cartesian sequences, pure joint sequences, and joint-to-Cartesian
+        sequences therefore retain their existing controller blending.
         """
+        batches = self._feedback_synchronised_batches(request.steps)
+        final_result: RobotCommandResult | None = None
+        for batch_index, indexed_steps in enumerate(batches):
+            final_result = self._execute_continuous_batch(
+                envelope,
+                request,
+                indexed_steps,
+                batch_index=batch_index,
+                batch_count=len(batches),
+                local_deadline_monotonic_ns=local_deadline_monotonic_ns,
+            )
+            if final_result.status != ToolStatus.SUCCESS:
+                return final_result
+        if final_result is None:
+            start = self._snapshot()
+            return RobotCommandResult(
+                gateway_session_id=envelope.gateway_session_id,
+                command_id=envelope.command_id,
+                command_kind=envelope.command_kind,
+                status=ToolStatus.SUCCESS,
+                final_pose_robot_base=start.actual_pose_robot_base,
+                final_joint_positions_deg=start.joint_positions_deg,
+            )
+        return final_result
+
+    @staticmethod
+    def _feedback_synchronised_batches(
+        steps: tuple[MotionSequenceStep, ...],
+    ) -> tuple[tuple[tuple[int, MotionSequenceStep], ...], ...]:
+        """Partition only where real joint feedback is newly required."""
+
+        cartesian_kinds = {
+            MotionStepKind.CARTESIAN_RELATIVE,
+            MotionStepKind.CARTESIAN_ABSOLUTE,
+            MotionStepKind.TCP_ROTATION_RELATIVE,
+            MotionStepKind.TCP_ROTATION_ABSOLUTE,
+        }
+        joint_kinds = {
+            MotionStepKind.JOINT_RELATIVE,
+            MotionStepKind.JOINT_ABSOLUTE,
+        }
+        batches: list[list[tuple[int, MotionSequenceStep]]] = []
+        current: list[tuple[int, MotionSequenceStep]] = []
+        previous_was_cartesian = False
+        for index, step in enumerate(steps):
+            if previous_was_cartesian and step.kind in joint_kinds and current:
+                batches.append(current)
+                current = []
+            current.append((index, step))
+            previous_was_cartesian = step.kind in cartesian_kinds
+        if current:
+            batches.append(current)
+        return tuple(tuple(batch) for batch in batches)
+
+    def _execute_continuous_batch(
+        self,
+        envelope: RobotCommandEnvelope,
+        request: MoveSequenceRequest,
+        indexed_steps: tuple[tuple[int, MotionSequenceStep], ...],
+        *,
+        batch_index: int,
+        batch_count: int,
+        local_deadline_monotonic_ns: int,
+    ) -> RobotCommandResult:
         trial: LocalMotionTrial | None = None
         try:
             start = self._snapshot()
@@ -394,7 +467,7 @@ class RemoteMotionExecutor:
             planned: list[
                 tuple[RobotCommandEnvelope, RobotTelemetry, PreflightTarget]
             ] = []
-            for index, step in enumerate(request.steps):
+            for index, step in indexed_steps:
                 self._check_preflight_control(
                     local_deadline_monotonic_ns,
                     wait_while_paused=False,
@@ -470,7 +543,7 @@ class RemoteMotionExecutor:
                 for index, (child, segment_start, target) in enumerate(planned)
             )
 
-            # One fresh guard after full-path planning; there is deliberately
+            # One fresh guard after complete batch planning; there is deliberately
             # no stop/readback/preflight cycle between individual points.
             if time.monotonic_ns() >= expires_ns:
                 raise TimeoutError(
@@ -486,8 +559,16 @@ class RemoteMotionExecutor:
                     local_deadline_monotonic_ns,
                     wait_while_paused=True,
                 )
-                state = trial.submit_preflighted_sequence(
+                submitted_envelope = self._sequence_batch_envelope(
                     envelope,
+                    request,
+                    tuple(step for _index, step in indexed_steps),
+                    batch_index=batch_index,
+                    batch_count=batch_count,
+                    start=fresh,
+                )
+                state = trial.submit_preflighted_sequence(
+                    submitted_envelope,
                     fresh,
                     fresh_readback,
                     lease,
@@ -504,6 +585,32 @@ class RemoteMotionExecutor:
                 if self._active_trial is trial:
                     self._active_trial = None
                 self._control_condition.notify_all()
+
+    @staticmethod
+    def _sequence_batch_envelope(
+        parent: RobotCommandEnvelope,
+        request: MoveSequenceRequest,
+        steps: tuple[MotionSequenceStep, ...],
+        *,
+        batch_index: int,
+        batch_count: int,
+        start: RobotTelemetry,
+    ) -> RobotCommandEnvelope:
+        """Derive a unique journal identity for one authenticated batch."""
+
+        if batch_count == 1:
+            return parent
+        command_id = f"{parent.command_id[:116]}-p{batch_index + 1:02d}"
+        payload = request.model_copy(update={
+            "command_id": command_id,
+            "steps": steps,
+        })
+        return parent.model_copy(update={
+            "command_id": command_id,
+            "based_on_robot_state_sequence": start.sequence,
+            "expected_start_pose_robot_base": start.actual_pose_robot_base,
+            "payload": payload,
+        })
 
     def _sequence_child(
         self,

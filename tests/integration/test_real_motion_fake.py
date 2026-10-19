@@ -310,6 +310,137 @@ def test_continuous_sequence_preflights_every_step_before_first_write(
             client.close()
 
 
+def test_mixed_sequence_refreshes_real_joints_after_cartesian_batch(
+    tmp_path,
+) -> None:
+    """A Cartesian result must not leave stale joints for a later joint step."""
+
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client = FakeMotionClient(
+            "127.0.0.1", fake.command_port, timeout_s=0.1,
+        )
+        client.connect()
+        journal = CommandJournal(tmp_path / "mixed-feedback-batches.journal")
+        checked = replace(
+            approval(),
+            sequence_blend_radius_mm=10,
+        )
+        fast_timing = replace(timing(), stable_samples=2, dwell_ms=1)
+        now_ms = time.time_ns() // 1_000_000
+        request = MoveSequenceRequest(
+            command_id="mixed-feedback-batches",
+            steps=(
+                MotionSequenceStep(
+                    kind=MotionStepKind.CARTESIAN_RELATIVE,
+                    translation_mm=(1.0, 0.0, 0.0),
+                ),
+                MotionSequenceStep(
+                    kind=MotionStepKind.JOINT_RELATIVE,
+                    joint_index=1,
+                    rotation_deg=1.0,
+                ),
+            ),
+            translation_speed_mm_s=2,
+            joint_speed_deg_s=15,
+            joint_acceleration_deg_s2=30,
+        )
+        command = RobotCommandEnvelope(
+            gateway_session_id=SESSION,
+            command_id=request.command_id,
+            command_kind=GatewayCommandKind.MOVE_SEQUENCE,
+            created_at_ms=now_ms,
+            expires_at_ms=now_ms + 5000,
+            based_on_robot_state_sequence=10,
+            expected_start_pose_robot_base=pose(),
+            expected_tcp_name="FAKE_FLANGE",
+            expected_ucs_name="Base",
+            payload=request,
+            safety_limits=MotionSafetyLimits(
+                max_speed_mm_s=5,
+                max_step_mm=2,
+                max_rotation_deg=90,
+                max_joint_speed_deg_s=30,
+                max_joint_acceleration_deg_s2=60,
+            ),
+            operator_confirmation_id="web-mixed-feedback-batches",
+        )
+        current = telemetry()
+        feedback_sequence = current.sequence
+        moving_seen_for_write_count: set[int] = set()
+
+        def snapshot():
+            return current
+
+        def feedback():
+            nonlocal current, feedback_sequence
+            feedback_sequence += 1
+            write_count = len([
+                frame
+                for frame in fake.received_commands
+                if frame.startswith(b"WayPoint,")
+            ])
+            if write_count not in moving_seen_for_write_count:
+                moving_seen_for_write_count.add(write_count)
+                current = telemetry(
+                    sequence=feedback_sequence,
+                    x=100.5 if write_count == 1 else 101.0,
+                    moving=True,
+                    fsm=25,
+                    in_position=False,
+                    joints=(5, 0, 90, 0, 90, 0),
+                )
+                return current, f"batch {write_count} moving"
+            current = telemetry(
+                sequence=feedback_sequence,
+                x=101.0,
+                joints=(
+                    10 if write_count == 1 else 11,
+                    0,
+                    90,
+                    0,
+                    90,
+                    0,
+                ),
+            )
+            return current, f"batch {write_count} arrived"
+
+        def joint_fk(joints):
+            # If the later joint step incorrectly starts from the pre-Cartesian
+            # J1=0 estimate, reproduce the old false OUT_OF_WORKSPACE result.
+            return pose(600 if joints[0] < 5 else 101)
+
+        executor = RemoteMotionExecutor(
+            trial_factory=lambda: FakeMotionTrial(
+                client=client,
+                journal=journal,
+                timing=fast_timing,
+                approval=checked,
+                path_ik=None,
+                joint_fk=joint_fk,
+            ),
+            snapshot=snapshot,
+            readback=readback,
+            feedback=feedback,
+            poll_interval_s=0.001,
+        )
+        try:
+            result = executor.execute(command, command_fingerprint(command))
+            assert result.status == ToolStatus.SUCCESS
+            writes = [
+                frame
+                for frame in fake.received_commands
+                if frame.startswith(b"WayPoint,")
+            ]
+            assert len(writes) == 2
+            assert result.final_joint_positions_deg == (11, 0, 90, 0, 90, 0)
+            assert journal.unresolved() == ()
+            assert journal.record("mixed-feedback-batches-p01")["state"] == "succeeded"
+            assert journal.record("mixed-feedback-batches-p02")["state"] == "succeeded"
+        finally:
+            journal.close()
+            client.close()
+
+
 def test_joint_pose_reset_is_sent_as_one_simultaneous_movej(tmp_path) -> None:
     with FakeHuayanController(accept_fake_motion=True) as fake:
         client = FakeMotionClient(

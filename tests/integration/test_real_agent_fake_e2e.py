@@ -446,12 +446,13 @@ def test_web_confirmation_runs_all_real_task_motion_on_fake(
                 ] == [
                     config.motion.sequence_blend_radius_mm,
                     config.motion.sequence_blend_radius_mm,
-                    config.motion.sequence_blend_radius_mm,
+                    0.0,
                     0.0,
                 ]
-                # All four points were queued as one controller motion. The
-                # fake never entered an idle state between sequence points.
-                assert fake.motion_completion_count == completions_before_sequence + 1
+                # Mac-side Cartesian IK is disabled.  The Cartesian batch
+                # therefore finishes first so the later J1 preflight can use
+                # fresh real joint feedback instead of a stale estimate.
+                assert fake.motion_completion_count == completions_before_sequence + 2
                 after_sequence = robot_http.get_telemetry()
                 assert after_sequence.actual_pose_robot_base.translation_mm == (
                     before_sequence.actual_pose_robot_base.translation_mm[0] + 74.0,
