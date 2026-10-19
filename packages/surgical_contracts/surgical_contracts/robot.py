@@ -291,6 +291,23 @@ class MoveJointRelativeRequest(ContractModel):
         return value
 
 
+class MoveJointAbsoluteRequest(ContractModel):
+    """Mac-internal six-axis joint pose produced from one sequence step."""
+
+    schema_version: SchemaVersion = SCHEMA_VERSION
+    command_id: str = Field(min_length=1, max_length=128)
+    target_joint_positions_deg: tuple[
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+    ]
+    speed_deg_s: FiniteFloat = Field(gt=0)
+    acceleration_deg_s2: FiniteFloat = Field(gt=0)
+
+
 class MoveCartesianPoseRequest(ContractModel):
     """Mac-internal absolute Base pose produced from one sequence step."""
 

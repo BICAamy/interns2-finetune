@@ -11,7 +11,8 @@ from typing import Callable, Literal
 
 from surgical_contracts import (
     CoordinateFrame, DistanceUnit, GatewayCommandKind, LinkState,
-    MoveCartesianPoseRequest, MoveJointRelativeRequest, MoveRelativeRequest,
+    MoveCartesianPoseRequest, MoveJointAbsoluteRequest,
+    MoveJointRelativeRequest, MoveRelativeRequest,
     MoveToEntryRequest, Pose6D,
     RobotCommandEnvelope, RobotTelemetry,
     RuntimeMode, SourceFreshness, command_fingerprint,
@@ -253,6 +254,9 @@ def preflight_motion(
     elif envelope.command_kind == GatewayCommandKind.MOVE_JOINT_RELATIVE:
         if not isinstance(envelope.payload, MoveJointRelativeRequest):
             raise ValueError("joint-relative envelope has the wrong payload")
+    elif envelope.command_kind == GatewayCommandKind.MOVE_JOINT_ABSOLUTE:
+        if not isinstance(envelope.payload, MoveJointAbsoluteRequest):
+            raise ValueError("joint-absolute envelope has the wrong payload")
     elif envelope.command_kind == GatewayCommandKind.MOVE_CARTESIAN_POSE:
         if not isinstance(envelope.payload, MoveCartesianPoseRequest):
             raise ValueError("Cartesian-pose envelope has the wrong payload")
@@ -316,7 +320,10 @@ def preflight_motion(
         > approval.max_joint_acceleration_deg_s2
     ):
         raise ValueError("command requests unapproved limits")
-    if isinstance(envelope.payload, MoveJointRelativeRequest):
+    if isinstance(
+        envelope.payload,
+        (MoveJointRelativeRequest, MoveJointAbsoluteRequest),
+    ):
         if (
             envelope.payload.speed_deg_s > approval.max_joint_speed_deg_s
             or envelope.payload.acceleration_deg_s2
@@ -342,21 +349,40 @@ def preflight_motion(
         raise ValueError("actual start drifted from proposal")
     if arm.used or now_monotonic_ns >= arm.expires_monotonic_ns or arm.test_id != envelope.operator_confirmation_id or arm.command_fingerprint != fingerprint(envelope) or arm.session_id != snapshot.gateway_session_id or snapshot.sequence < arm.base_sequence or arm.safety_state_hash != safety_state_hash(snapshot, readback) or _distance(pose.translation_mm, arm.expected_start.translation_mm) > approval.max_start_drift_mm or _angle_deg(pose.quaternion_xyzw, arm.expected_start.quaternion_xyzw) > approval.max_start_rotation_deg:
         raise ValueError("local single-use ARM is missing, stale, or mismatched")
-    if isinstance(envelope.payload, MoveJointRelativeRequest):
-        rotation = float(envelope.payload.rotation_deg)
-        if abs(rotation) > approval.max_rotation_deg:
+    if isinstance(
+        envelope.payload,
+        (MoveJointRelativeRequest, MoveJointAbsoluteRequest),
+    ):
+        start_joints = tuple(float(value) for value in snapshot.joint_positions_deg)
+        if isinstance(envelope.payload, MoveJointRelativeRequest):
+            target_joints = list(start_joints)
+            target_joints[envelope.payload.joint_index - 1] += float(
+                envelope.payload.rotation_deg
+            )
+        else:
+            target_joints = [
+                float(value)
+                for value in envelope.payload.target_joint_positions_deg
+            ]
+        rotations = tuple(
+            target - start for target, start in zip(target_joints, start_joints)
+        )
+        maximum_rotation = max(abs(rotation) for rotation in rotations)
+        if maximum_rotation <= 1e-12:
+            raise ValueError("joint target equals the actual start")
+        if maximum_rotation > approval.max_rotation_deg:
             raise ValueError("joint rotation exceeds approval")
-        target_joints = [float(value) for value in snapshot.joint_positions_deg]
-        target_joints[envelope.payload.joint_index - 1] += rotation
         segments = max(
             1,
-            math.ceil(abs(rotation) / approval.max_start_rotation_deg),
+            math.ceil(maximum_rotation / approval.max_start_rotation_deg),
         )
         final_pose = pose
         for index in range(segments + 1):
             ratio = index / segments
-            sample_joints = [float(value) for value in snapshot.joint_positions_deg]
-            sample_joints[envelope.payload.joint_index - 1] += rotation * ratio
+            sample_joints = [
+                start + rotation * ratio
+                for start, rotation in zip(start_joints, rotations)
+            ]
             if any(
                 not low + approval.joint_margin_deg
                 <= value

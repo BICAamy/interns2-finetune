@@ -139,6 +139,14 @@ class MotionSequenceStep(ContractModel):
     joint_index: int | None = Field(default=None, ge=1, le=6)
     rotation_deg: FiniteFloat | None = None
     target_angle_deg: FiniteFloat | None = None
+    target_joint_positions_deg: tuple[
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+    ] | None = None
     rotation_axis: Axis | None = None
     value_source: DistanceSource = DistanceSource.USER_PROVIDED
 
@@ -152,6 +160,7 @@ class MotionSequenceStep(ContractModel):
             "joint_index": self.joint_index,
             "rotation_deg": self.rotation_deg,
             "target_angle_deg": self.target_angle_deg,
+            "target_joint_positions_deg": self.target_joint_positions_deg,
             "rotation_axis": self.rotation_axis,
         }
         required: set[str]
@@ -170,7 +179,27 @@ class MotionSequenceStep(ContractModel):
             if float(self.rotation_deg) == 0.0:
                 raise ValueError("joint_relative cannot be zero")
         elif self.kind == MotionStepKind.JOINT_ABSOLUTE:
-            required = {"joint_index", "target_angle_deg"}
+            scalar_target = (
+                self.joint_index is not None or self.target_angle_deg is not None
+            )
+            vector_target = self.target_joint_positions_deg is not None
+            if scalar_target == vector_target:
+                raise ValueError(
+                    "joint_absolute requires either joint_index/target_angle_deg "
+                    "or target_joint_positions_deg"
+                )
+            if scalar_target and (
+                self.joint_index is None or self.target_angle_deg is None
+            ):
+                raise ValueError(
+                    "joint_absolute scalar target requires joint_index and "
+                    "target_angle_deg"
+                )
+            required = (
+                {"target_joint_positions_deg"}
+                if vector_target
+                else {"joint_index", "target_angle_deg"}
+            )
         elif self.kind == MotionStepKind.TCP_ROTATION_RELATIVE:
             required = {"rotation_axis", "rotation_deg"}
             if self.rotation_deg is not None and float(self.rotation_deg) == 0.0:

@@ -12,6 +12,7 @@ from surgical_contracts import (
     ErrorCode,
     GatewayCommandKind,
     MoveCartesianPoseRequest,
+    MoveJointAbsoluteRequest,
     MoveJointRelativeRequest,
     MoveRelativeRequest,
     MoveSequenceRequest,
@@ -540,6 +541,36 @@ class RemoteMotionExecutor:
         }:
             if start.joint_positions_deg is None:
                 raise ValueError("actual joint feedback is unavailable")
+            if step.target_joint_positions_deg is not None:
+                if all(
+                    abs(float(target) - float(current)) <= 1e-9
+                    for target, current in zip(
+                        step.target_joint_positions_deg,
+                        start.joint_positions_deg,
+                    )
+                ):
+                    return None
+                payload = MoveJointAbsoluteRequest(
+                    command_id=child_id,
+                    target_joint_positions_deg=step.target_joint_positions_deg,
+                    speed_deg_s=request.joint_speed_deg_s,
+                    acceleration_deg_s2=request.joint_acceleration_deg_s2,
+                )
+                kind = GatewayCommandKind.MOVE_JOINT_ABSOLUTE
+                return RobotCommandEnvelope(
+                    gateway_session_id=parent.gateway_session_id,
+                    command_id=child_id,
+                    command_kind=kind,
+                    created_at_ms=parent.created_at_ms,
+                    expires_at_ms=parent.expires_at_ms,
+                    based_on_robot_state_sequence=start.sequence,
+                    expected_start_pose_robot_base=pose,
+                    expected_tcp_name=parent.expected_tcp_name,
+                    expected_ucs_name=parent.expected_ucs_name,
+                    payload=payload,
+                    safety_limits=parent.safety_limits,
+                    operator_confirmation_id=parent.operator_confirmation_id,
+                )
             rotation = (
                 float(step.rotation_deg)
                 if step.kind == MotionStepKind.JOINT_RELATIVE

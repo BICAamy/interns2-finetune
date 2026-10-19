@@ -18,6 +18,7 @@ from .coordinates import CoordinateFrame, MotionStepKind
 from .errors import ErrorCode
 from .robot import (
     MoveCartesianPoseRequest,
+    MoveJointAbsoluteRequest,
     MoveJointRelativeRequest,
     MoveRelativeRequest,
     MoveSequenceRequest,
@@ -41,6 +42,7 @@ class GatewayCommandKind(str, Enum):
     MOVE_TO_ENTRY = "move_to_entry"
     MOVE_RELATIVE = "move_relative"
     MOVE_JOINT_RELATIVE = "move_joint_relative"
+    MOVE_JOINT_ABSOLUTE = "move_joint_absolute"
     MOVE_CARTESIAN_POSE = "move_cartesian_pose"
     MOVE_SEQUENCE = "move_sequence"
     PAUSE_REQUEST = "pause_request"
@@ -88,6 +90,7 @@ class RobotCommandEnvelope(ContractModel):
         MoveToEntryRequest
         | MoveRelativeRequest
         | MoveCartesianPoseRequest
+        | MoveJointAbsoluteRequest
         | MoveJointRelativeRequest
         | MoveSequenceRequest
         | MotionControlRequest
@@ -108,6 +111,7 @@ class RobotCommandEnvelope(ContractModel):
             GatewayCommandKind.MOVE_RELATIVE: MoveRelativeRequest,
             GatewayCommandKind.MOVE_CARTESIAN_POSE: MoveCartesianPoseRequest,
             GatewayCommandKind.MOVE_JOINT_RELATIVE: MoveJointRelativeRequest,
+            GatewayCommandKind.MOVE_JOINT_ABSOLUTE: MoveJointAbsoluteRequest,
             GatewayCommandKind.MOVE_SEQUENCE: MoveSequenceRequest,
             GatewayCommandKind.PAUSE_REQUEST: MotionControlRequest,
             GatewayCommandKind.RESUME_REQUEST: MotionControlRequest,
@@ -179,12 +183,19 @@ class RobotCommandEnvelope(ContractModel):
                     ):
                         raise ValueError("sequence rotation exceeds safety limit")
                 return self
-            if isinstance(self.payload, MoveJointRelativeRequest):
+            if isinstance(
+                self.payload,
+                (MoveJointRelativeRequest, MoveJointAbsoluteRequest),
+            ):
                 if (
                     self.payload.speed_deg_s > self.safety_limits.max_joint_speed_deg_s
                     or self.payload.acceleration_deg_s2
                     > self.safety_limits.max_joint_acceleration_deg_s2
-                    or abs(float(self.payload.rotation_deg))
+                ):
+                    raise ValueError("joint move exceeds envelope safety limit")
+                if (
+                    isinstance(self.payload, MoveJointRelativeRequest)
+                    and abs(float(self.payload.rotation_deg))
                     > self.safety_limits.max_rotation_deg
                 ):
                     raise ValueError("joint move exceeds envelope safety limit")

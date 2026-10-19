@@ -9,6 +9,8 @@ from surgical_contracts import (
     CommandIntent,
     CoordinateFrame,
     Direction,
+    MotionSequenceStep,
+    MotionStepKind,
     ParsedCommand,
     Point3D,
     RelativeMotion,
@@ -84,6 +86,25 @@ class ParsedCommandTests(unittest.TestCase):
                 direction=Direction.POSITIVE,
                 distance_mm=1,
                 delta_mm=(1, 2, 3),
+            )
+
+    def test_joint_absolute_accepts_one_six_axis_pose_without_scalar_fields(self):
+        step = MotionSequenceStep(
+            kind=MotionStepKind.JOINT_ABSOLUTE,
+            target_joint_positions_deg=(0, 0, 60, 0, 90, 0),
+        )
+
+        self.assertIsNone(step.joint_index)
+        self.assertEqual(
+            step.target_joint_positions_deg,
+            (0.0, 0.0, 60.0, 0.0, 90.0, 0.0),
+        )
+        with self.assertRaisesRegex(ValidationError, "either"):
+            MotionSequenceStep(
+                kind=MotionStepKind.JOINT_ABSOLUTE,
+                joint_index=1,
+                target_angle_deg=0,
+                target_joint_positions_deg=(0, 0, 60, 0, 90, 0),
             )
 
     def test_clarify_can_retain_partial_non_executable_coordinates(self):

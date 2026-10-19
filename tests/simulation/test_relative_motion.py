@@ -197,7 +197,10 @@ class RelativeMotionControllerTests(unittest.TestCase):
     def test_active_motion_cannot_be_silently_replaced(self):
         controller = ContinuousTrajectoryController(CONFIG)
         controller.move_relative((-20.0, 0.0, 0.0))
-        with self.assertRaisesRegex(InvalidMotionCommand, "while it is moving"):
+        with self.assertRaisesRegex(
+            InvalidMotionCommand,
+            "cannot replace an active or paused motion command",
+        ):
             controller.move_relative((0.0, 5.0, 0.0))
 
 

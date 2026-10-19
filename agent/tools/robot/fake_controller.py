@@ -282,10 +282,18 @@ class FakeRobotController:
                 assert step.joint_index is not None and step.rotation_deg is not None
                 self._joint_positions_deg[step.joint_index - 1] += float(step.rotation_deg)
             elif step.kind == MotionStepKind.JOINT_ABSOLUTE:
-                assert step.joint_index is not None and step.target_angle_deg is not None
-                self._joint_positions_deg[step.joint_index - 1] = float(
-                    step.target_angle_deg
-                )
+                if step.target_joint_positions_deg is not None:
+                    self._joint_positions_deg = [
+                        float(value) for value in step.target_joint_positions_deg
+                    ]
+                else:
+                    assert (
+                        step.joint_index is not None
+                        and step.target_angle_deg is not None
+                    )
+                    self._joint_positions_deg[step.joint_index - 1] = float(
+                        step.target_angle_deg
+                    )
             completed_steps += 1
         self._motion_state = MotionState.IDLE
         return MoveSequenceResult(

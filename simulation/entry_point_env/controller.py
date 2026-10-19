@@ -456,6 +456,65 @@ class ContinuousTrajectoryController:
                 MotionStepKind.JOINT_RELATIVE,
                 MotionStepKind.JOINT_ABSOLUTE,
             }:
+                if step.target_joint_positions_deg is not None:
+                    target_joints_deg = np.asarray(
+                        step.target_joint_positions_deg,
+                        dtype=np.float64,
+                    )
+                    current_joints_deg = np.rad2deg(nominal_joints)
+                    rotations_deg = target_joints_deg - current_joints_deg
+                    if np.max(np.abs(rotations_deg)) > self.config.maximum_rotation_deg:
+                        raise InvalidMotionCommand(
+                            "sequence joint rotation exceeds maximum_rotation_deg"
+                        )
+                    if any(
+                        not low <= float(value) <= high
+                        for value, (low, high) in zip(
+                            target_joints_deg,
+                            self.config.robot.joint_limits_deg,
+                        )
+                    ):
+                        raise InvalidMotionCommand(
+                            "sequence joint target exceeds configured joint limit"
+                        )
+
+                    # Validate the same simultaneous, speed-clipped joint path
+                    # that ``step()`` will execute.  This avoids inventing the
+                    # unsafe J1->J2->...->J6 intermediate poses that the old
+                    # reset sequence produced.
+                    sample_joints_deg = current_joints_deg.copy()
+                    maximum_step_deg = joint_speed * self.config.time_step_s
+                    while np.max(np.abs(target_joints_deg - sample_joints_deg)) > 1e-9:
+                        sample_joints_deg += np.clip(
+                            target_joints_deg - sample_joints_deg,
+                            -maximum_step_deg,
+                            maximum_step_deg,
+                        )
+                        sample_snapshot = self.kinematics.forward(
+                            np.deg2rad(sample_joints_deg)
+                        )
+                        sample_position = self._position_from_snapshot(sample_snapshot)
+                        if not self.config.workspace.contains(sample_position):
+                            raise WorkspaceViolationError(
+                                "sequence joint path leaves the workspace"
+                            )
+
+                    nominal_joints = np.deg2rad(target_joints_deg)
+                    nominal_snapshot = self.kinematics.forward(nominal_joints)
+                    nominal_position = self._position_from_snapshot(nominal_snapshot)
+                    nominal_orientation = Rotation.from_matrix(
+                        nominal_snapshot.tcp_transform[:3, :3]
+                    )
+                    raw_targets.append(_SequenceTarget(
+                        kind=MotionCommandKind.JOINT_RELATIVE,
+                        target_position_mm=nominal_position,
+                        target_joint_positions_rad=nominal_joints.copy(),
+                        target_orientation=nominal_orientation,
+                        linear_speed_mm_s=linear_speed,
+                        joint_speed_deg_s=joint_speed,
+                    ))
+                    continue
+
                 assert step.joint_index is not None
                 joint_offset = step.joint_index - 1
                 if step.kind == MotionStepKind.JOINT_RELATIVE:

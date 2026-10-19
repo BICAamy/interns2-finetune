@@ -1652,17 +1652,10 @@ class WebRuntime:
             command_id=f"web-home-{uuid4().hex}",
             intent=CommandIntent.MOVE_SEQUENCE,
             motion_sequence=MotionSequence(
-                steps=tuple(
-                    MotionSequenceStep(
-                        kind=MotionStepKind.JOINT_ABSOLUTE,
-                        joint_index=index,
-                        target_angle_deg=angle,
-                    )
-                    for index, angle in enumerate(
-                        home_joint_positions_deg,
-                        start=1,
-                    )
-                )
+                steps=(MotionSequenceStep(
+                    kind=MotionStepKind.JOINT_ABSOLUTE,
+                    target_joint_positions_deg=home_joint_positions_deg,
+                ),)
             ),
             summary="运动恢复到统一初始关节姿态",
         )

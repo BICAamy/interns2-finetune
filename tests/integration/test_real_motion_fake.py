@@ -52,7 +52,10 @@ def pose(x: float = 100.0) -> Pose6D:
 def telemetry(*, sequence: int = 10, x: float = 100.0,
               moving: bool = False, fsm: int = 33,
               in_position: bool = True,
-              paused: bool = False) -> RobotTelemetry:
+              paused: bool = False,
+              joints: tuple[float, float, float, float, float, float] = (
+                  0, 0, 90, 0, 90, 0,
+              )) -> RobotTelemetry:
     return RobotTelemetry(
         runtime_mode=RuntimeMode.REAL, provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
         sequence=sequence, freshness=SourceFreshness.FRESH,
@@ -62,7 +65,7 @@ def telemetry(*, sequence: int = 10, x: float = 100.0,
         ),
         state_age_ms=10, gateway_session_id=SESSION, device_sn="FAKE-SN",
         robot_model="FAKE-E05", package_version="fake-v1",
-        joint_positions_deg=(0, 0, 90, 0, 90, 0),
+        joint_positions_deg=joints,
         actual_pose_robot_base=pose(x), controller_is_simulation=False,
         enabled=True, electrified=True, auto_mode=True,
         reduced_mode=True, three_position_enable=True,
@@ -301,6 +304,99 @@ def test_continuous_sequence_preflights_every_step_before_first_write(
             result = executor.execute(command, command_fingerprint(command))
             assert result.status == ToolStatus.FAILED
             assert_no_motion_write(fake)
+            assert journal.unresolved() == ()
+        finally:
+            journal.close()
+            client.close()
+
+
+def test_joint_pose_reset_is_sent_as_one_simultaneous_movej(tmp_path) -> None:
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client = FakeMotionClient(
+            "127.0.0.1", fake.command_port, timeout_s=0.1,
+        )
+        client.connect()
+        journal = CommandJournal(tmp_path / "joint-pose-reset.journal")
+        target_joints = (10.0, -10.0, 80.0, 5.0, 85.0, -5.0)
+        now_ms = time.time_ns() // 1_000_000
+        request = MoveSequenceRequest(
+            command_id="joint-pose-reset",
+            steps=(MotionSequenceStep(
+                kind=MotionStepKind.JOINT_ABSOLUTE,
+                target_joint_positions_deg=target_joints,
+            ),),
+            translation_speed_mm_s=2,
+            joint_speed_deg_s=15,
+            joint_acceleration_deg_s2=30,
+        )
+        command = RobotCommandEnvelope(
+            gateway_session_id=SESSION,
+            command_id=request.command_id,
+            command_kind=GatewayCommandKind.MOVE_SEQUENCE,
+            created_at_ms=now_ms,
+            expires_at_ms=now_ms + 5000,
+            based_on_robot_state_sequence=10,
+            expected_start_pose_robot_base=pose(),
+            expected_tcp_name="FAKE_FLANGE",
+            expected_ucs_name="Base",
+            payload=request,
+            safety_limits=MotionSafetyLimits(
+                max_speed_mm_s=5,
+                max_step_mm=2,
+                max_rotation_deg=90,
+                max_joint_speed_deg_s=30,
+                max_joint_acceleration_deg_s2=60,
+            ),
+            operator_confirmation_id="web-joint-pose-reset",
+        )
+        feedback_sequence = 10
+        feedback_calls = 0
+
+        def feedback():
+            nonlocal feedback_sequence, feedback_calls
+            feedback_sequence += 1
+            feedback_calls += 1
+            if feedback_calls == 1:
+                return (
+                    telemetry(
+                        sequence=feedback_sequence,
+                        moving=True,
+                        fsm=25,
+                        in_position=False,
+                    ),
+                    "joint reset moving",
+                )
+            return (
+                telemetry(sequence=feedback_sequence, joints=target_joints),
+                "joint reset arrived",
+            )
+
+        executor = RemoteMotionExecutor(
+            trial_factory=lambda: FakeMotionTrial(
+                client=client,
+                journal=journal,
+                timing=timing(),
+                approval=approval(),
+                path_ik=None,
+                joint_fk=lambda _joints: pose(),
+            ),
+            snapshot=telemetry,
+            readback=readback,
+            feedback=feedback,
+            poll_interval_s=0.001,
+        )
+        try:
+            result = executor.execute(command, command_fingerprint(command))
+            assert result.status == ToolStatus.SUCCESS
+            writes = [
+                frame
+                for frame in fake.received_commands
+                if frame.startswith(b"WayPoint,")
+            ]
+            assert len(writes) == 1
+            fields = writes[0].decode("ascii").split(",")
+            assert tuple(float(value) for value in fields[8:14]) == target_joints
+            assert fields[19:21] == ["0", "1"]
             assert journal.unresolved() == ()
         finally:
             journal.close()

@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from surgical_contracts import (
-    LinkState, MotionStopConfirmation, MoveJointRelativeRequest, Pose6D,
+    LinkState, MotionStopConfirmation, MoveJointAbsoluteRequest,
+    MoveJointRelativeRequest, Pose6D,
     RobotCommandEnvelope,
     RobotProvider, RobotTelemetry, RuntimeMode, SoftwareStopResult,
     SourceFreshness, StopDelivery,
@@ -188,7 +189,10 @@ class LocalMotionTrial:
         blend_radius_mm: float,
     ) -> LinearWaypoint | JointWaypoint:
         """Create a typed controller point from one already checked target."""
-        if isinstance(envelope.payload, MoveJointRelativeRequest):
+        if isinstance(
+            envelope.payload,
+            (MoveJointRelativeRequest, MoveJointAbsoluteRequest),
+        ):
             return JointWaypoint(
                 pose_xyzrpy=(
                     *target.pose.translation_mm,

@@ -18,7 +18,14 @@ from simulation.entry_point_env.visual_theme import (
     SCENE_BACKGROUND_RGBA,
     apply_opengl_background,
 )
-from surgical_contracts import CoordinateFrame, MotionState, Point3D
+from surgical_contracts import (
+    CoordinateFrame,
+    MotionSequenceStep,
+    MotionState,
+    MotionStepKind,
+    MoveSequenceRequest,
+    Point3D,
+)
 
 
 CONFIG = EntryPointEnvConfig.from_yaml()
@@ -147,6 +154,51 @@ class EntryPointControllerTests(unittest.TestCase):
         controller.move_to_entry(target, speed_mm_s=20.0)
         run_until_settled(controller)
         self.assertEqual(first_trajectory, controller.trajectory_mm)
+
+    def test_joint_pose_reset_does_not_create_serial_joint_intermediates(self):
+        controller = ContinuousTrajectoryController(CONFIG)
+        displaced_joints = (
+            14.7710665220186,
+            -62.394493438680314,
+            22.466357581289344,
+            20.571322133906506,
+            42.14046467995141,
+            -42.18065236866954,
+        )
+
+        def joint_pose(command_id: str, joints: tuple[float, ...]):
+            return MoveSequenceRequest(
+                command_id=command_id,
+                steps=(MotionSequenceStep(
+                    kind=MotionStepKind.JOINT_ABSOLUTE,
+                    target_joint_positions_deg=joints,
+                ),),
+                translation_speed_mm_s=CONFIG.default_speed_mm_s,
+                joint_speed_deg_s=CONFIG.joint_speed_deg_s,
+                joint_acceleration_deg_s2=CONFIG.joint_acceleration_deg_s2,
+            )
+
+        controller.move_sequence(joint_pose("move-away", displaced_joints))
+        run_until_settled(controller)
+        np.testing.assert_allclose(
+            controller.joint_positions_deg,
+            displaced_joints,
+            atol=1e-7,
+        )
+
+        # The old reset set J1 and then J2 separately.  Its J2 intermediate
+        # has TCP Z ~= 1070 mm and is outside the configured workspace even
+        # though this simultaneous path and the final home pose are valid.
+        home = CONFIG.robot.initial_joint_positions_deg
+        controller.move_sequence(joint_pose("return-home", home))
+        steps = run_until_settled(controller)
+
+        self.assertGreater(len(steps), 1)
+        self.assertEqual(controller.get_state().motion_state, MotionState.IDLE)
+        np.testing.assert_allclose(controller.joint_positions_deg, home, atol=1e-7)
+        self.assertTrue(
+            all(CONFIG.workspace.contains(point) for point in controller.trajectory_mm)
+        )
 
     def test_overlay_preserves_rgb_shape_and_draws_markers(self):
         frame = np.zeros((48, 64, 3), dtype=np.uint8)

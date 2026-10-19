@@ -621,9 +621,16 @@ def test_reset_discards_a_paused_task_and_runs_the_home_sequence():
         assert final.status == SessionStatus.COMPLETED
         assert robot.stop_calls == 1
         assert robot.resume_calls == 0
-        assert [
-            step.target_angle_deg for step in robot.move_sequence_calls[-1].steps
-        ] == [0.0, 0.0, 60.0, 0.0, 90.0, 0.0]
+        home_steps = robot.move_sequence_calls[-1].steps
+        assert len(home_steps) == 1
+        assert home_steps[0].target_joint_positions_deg == (
+            0.0,
+            0.0,
+            60.0,
+            0.0,
+            90.0,
+            0.0,
+        )
 
     try:
         asyncio.run(scenario())
@@ -676,15 +683,16 @@ def test_relative_confirmation_stop_estop_reset_and_websocket():
         assert robot.reset_estop_calls == 0
         assert len(robot.move_sequence_calls) == 2
         home_steps = robot.move_sequence_calls[-1].steps
-        assert [step.joint_index for step in home_steps] == [1, 2, 3, 4, 5, 6]
-        assert [step.target_angle_deg for step in home_steps] == [
+        assert len(home_steps) == 1
+        assert home_steps[0].joint_index is None
+        assert home_steps[0].target_joint_positions_deg == (
             0.0,
             0.0,
             60.0,
             0.0,
             90.0,
             0.0,
-        ]
+        )
 
 
 def test_unknown_session_never_calls_reset_tool():
