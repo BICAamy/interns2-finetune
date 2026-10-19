@@ -17,6 +17,7 @@ from surgical_contracts import (
     GatewayHello,
     LinkState,
     MoveRelativeRequest,
+    MotionControlRequest,
     MotionStopConfirmation,
     RobotActionRequest,
     RobotCommandResult,
@@ -272,6 +273,145 @@ def test_software_stop_preempts_running_motion_and_returns_real_stopped_state() 
     assert completed.result["state"]["mode"] == "real"
     assert completed.result["state"]["motion_state"] == "stopped"
     assert completed.result["state"]["estop"] is False
+
+
+def test_software_stop_accepts_confirmed_preflight_cancellation_without_robot_write() -> None:
+    _sessions, provider, session_id = enabled_provider()
+    motion = MoveRelativeRequest(
+        command_id="remote-motion-cancel-before-write",
+        translation_mm=(1, 0, 0),
+        frame=CoordinateFrame.ROBOT_BASE,
+        speed_mm_s=2,
+    )
+    proposed, _ = provider.submit(RobotCommandKind.MOVE_RELATIVE, motion)
+    provider.confirm_command(
+        motion.command_id,
+        proposed.result["proposal"]["fingerprint"],
+    )
+    dispatched_motion = provider.take_gateway_command(session_id)
+    assert dispatched_motion is not None
+    assert provider.acknowledge_gateway_command(
+        motion.command_id,
+        dispatched_motion.fingerprint,
+        session_id,
+    ) is True
+
+    stop_request = RobotActionRequest(command_id="cancel-preflight-stop")
+    provider.submit(RobotCommandKind.STOP, stop_request)
+    stop_frame = provider.take_gateway_command(session_id)
+    assert stop_frame is not None
+    assert provider.acknowledge_gateway_command(
+        stop_request.command_id,
+        stop_frame.fingerprint,
+        session_id,
+    ) is True
+    provider.ingest_gateway_result(
+        stop_frame.fingerprint,
+        RobotCommandResult(
+            gateway_session_id=session_id,
+            command_id=stop_request.command_id,
+            command_kind=GatewayCommandKind.SOFTWARE_STOP_REQUEST,
+            status=ToolStatus.SUCCESS,
+            software_stop=SoftwareStopResult(
+                delivery=StopDelivery.NOT_SENT,
+                motion_stop=MotionStopConfirmation.CONFIRMED,
+            ),
+        ),
+    )
+
+    completed = provider.get_command(stop_request.command_id)
+    assert completed.status == CommandExecutionStatus.SUCCEEDED
+    assert completed.result["state"]["motion_state"] == "stopped"
+    assert "before the first WayPoint" in completed.result["message"]
+
+
+def test_pause_and_resume_update_the_same_real_motion_record() -> None:
+    _sessions, provider, session_id = enabled_provider()
+    motion = MoveRelativeRequest(
+        command_id="remote-motion-pause-resume",
+        translation_mm=(1, 0, 0),
+        frame=CoordinateFrame.ROBOT_BASE,
+        speed_mm_s=2,
+    )
+    proposed, _ = provider.submit(RobotCommandKind.MOVE_RELATIVE, motion)
+    provider.confirm_command(
+        motion.command_id,
+        proposed.result["proposal"]["fingerprint"],
+    )
+    pause_request = MotionControlRequest(
+        command_id="real-pause-control",
+        target_command_id=motion.command_id,
+        operation="pause",
+    )
+    pause_record, created = provider.submit(RobotCommandKind.PAUSE, pause_request)
+    assert created is True
+    assert pause_record.status == CommandExecutionStatus.RUNNING
+
+    # Even if the operator clicks Stop immediately after web confirmation,
+    # the just-confirmed motion must reach the Mac before its pause frame.
+    dispatched_motion = provider.take_gateway_command(session_id)
+    assert dispatched_motion is not None
+    assert dispatched_motion.envelope.command_kind == GatewayCommandKind.MOVE_RELATIVE
+    assert provider.acknowledge_gateway_command(
+        motion.command_id,
+        dispatched_motion.fingerprint,
+        session_id,
+    ) is True
+    pause_frame = provider.take_gateway_command(session_id)
+    assert pause_frame is not None
+    assert pause_frame.envelope.command_kind == GatewayCommandKind.PAUSE_REQUEST
+    assert provider.acknowledge_gateway_command(
+        pause_request.command_id,
+        pause_frame.fingerprint,
+        session_id,
+    ) is True
+    provider.ingest_gateway_result(
+        pause_frame.fingerprint,
+        RobotCommandResult(
+            gateway_session_id=session_id,
+            command_id=pause_request.command_id,
+            command_kind=GatewayCommandKind.PAUSE_REQUEST,
+            status=ToolStatus.SUCCESS,
+        ),
+    )
+    assert provider.get_command(pause_request.command_id).status == (
+        CommandExecutionStatus.SUCCEEDED
+    )
+    assert provider.get_command(motion.command_id).status == (
+        CommandExecutionStatus.PAUSED
+    )
+
+    resume_request = MotionControlRequest(
+        command_id="real-resume-control",
+        target_command_id=motion.command_id,
+        operation="resume",
+    )
+    resume_record, created = provider.submit(RobotCommandKind.RESUME, resume_request)
+    assert created is True
+    assert resume_record.status == CommandExecutionStatus.RUNNING
+    resume_frame = provider.take_gateway_command(session_id)
+    assert resume_frame is not None
+    assert resume_frame.envelope.command_kind == GatewayCommandKind.RESUME_REQUEST
+    assert provider.acknowledge_gateway_command(
+        resume_request.command_id,
+        resume_frame.fingerprint,
+        session_id,
+    ) is True
+    provider.ingest_gateway_result(
+        resume_frame.fingerprint,
+        RobotCommandResult(
+            gateway_session_id=session_id,
+            command_id=resume_request.command_id,
+            command_kind=GatewayCommandKind.RESUME_REQUEST,
+            status=ToolStatus.SUCCESS,
+        ),
+    )
+    assert provider.get_command(resume_request.command_id).status == (
+        CommandExecutionStatus.SUCCEEDED
+    )
+    assert provider.get_command(motion.command_id).status == (
+        CommandExecutionStatus.RUNNING
+    )
 
 
 def test_gateway_receipt_ttl_uses_server_monotonic_clock() -> None:

@@ -89,6 +89,9 @@ class SimulationEnvironment(Protocol):
     def step(self) -> Any: ...
     def get_state(self) -> RobotState: ...
     def stop(self) -> RobotState: ...
+    def pause(self) -> RobotState: ...
+    def resume(self) -> RobotState: ...
+    def clear_estop(self) -> RobotState: ...
     def emergency_stop(self) -> RobotState: ...
     def get_camera_state(self) -> SimulationCameraState: ...
     def control_camera(
@@ -163,6 +166,7 @@ class SimulationWorker:
         self._joint_labels: list[dict[str, Any]] = []
         self._frame_sequence = 0
         self._active_command: QueuedCommand | None = None
+        self._deferred_motion_controls: dict[str, deque[QueuedCommand]] = {}
         self._initialization_error: str | None = None
         self._last_heartbeat_ms: int | None = None
         self._client_count = 0
@@ -245,7 +249,7 @@ class SimulationWorker:
                     if command is not None:
                         self._execute_normal(environment, command)
                         continue
-                elif not paused:
+                elif not paused and environment.get_state().motion_state != MotionState.PAUSED:
                     self._step_active(environment, active)
 
                 next_tick += tick_interval
@@ -271,6 +275,9 @@ class SimulationWorker:
                 self._frame_condition.notify_all()
             self._fail_pending_camera_controls()
             self._fail_pending_trajectory_clears()
+            self._cancel_all_deferred_motion_controls(
+                "Simulation worker stopped before the target motion started"
+            )
 
     def _get_camera_nowait(self) -> PendingCameraControl | None:
         try:
@@ -387,14 +394,28 @@ class SimulationWorker:
             else:
                 raise InvalidMotionCommand(f"unsupported normal command: {command.kind}")
 
+            if environment.get_state().motion_state == MotionState.MOVING:
+                self._execute_deferred_motion_controls(environment, command)
+            else:
+                self._cancel_deferred_motion_controls(
+                    command.command_id,
+                    "Target motion completed before pause/resume could be applied",
+                )
             with self._lock:
                 self._capture_locked(environment.controller.snapshot())
-            if environment.get_state().motion_state != MotionState.MOVING:
+            if environment.get_state().motion_state not in {
+                MotionState.MOVING,
+                MotionState.PAUSED,
+            }:
                 self._finish_active(environment, command, environment.controller.snapshot())
         except Exception as error:
             with self._lock:
                 if self._active_command == command:
                     self._active_command = None
+            self._cancel_deferred_motion_controls(
+                command.command_id,
+                "Target motion failed before pause/resume could be applied",
+            )
             self._fail(command, error)
 
     def _execute_urgent(
@@ -405,16 +426,90 @@ class SimulationWorker:
         self._mark_running(command)
         with self._lock:
             active = self._active_command
-            self._active_command = None
-        if active is not None:
-            self._cancel(active, f"Preempted by {command.kind.value}")
-        for pending in self._queue.drain_normal():
-            self._cancel(pending, f"Cancelled before execution by {command.kind.value}")
+
+        preserving_active = command.kind in {
+            RobotCommandKind.PAUSE,
+            RobotCommandKind.RESUME,
+        }
+        if preserving_active:
+            request = command.request
+            expected_operation = (
+                "pause" if command.kind == RobotCommandKind.PAUSE else "resume"
+            )
+            if request.operation != expected_operation:
+                self._fail(
+                    command,
+                    InvalidMotionCommand(
+                        f"{command.kind.value} command requires operation="
+                        f"{expected_operation!r}"
+                    ),
+                )
+                return
+
+            if active is not None and request.target_command_id == active.command_id:
+                self._execute_motion_control(environment, command, active)
+                return
+
+            with self._lock:
+                target = self._records.get(request.target_command_id)
+            if (
+                target is not None
+                and target.status == CommandExecutionStatus.QUEUED
+                and target.kind in {
+                    RobotCommandKind.MOVE_TO_ENTRY,
+                    RobotCommandKind.MOVE_RELATIVE,
+                    RobotCommandKind.MOVE_SEQUENCE,
+                }
+            ):
+                # The target was accepted before this control request, but the
+                # worker has not activated it yet. Bind the control to that
+                # exact target and apply it immediately after its trajectory is
+                # prepared, before the first simulation step is allowed.
+                with self._lock:
+                    controls = self._deferred_motion_controls.setdefault(
+                        request.target_command_id,
+                        deque(),
+                    )
+                    controls.append(command)
+                return
+
+            if active is None:
+                self._fail(
+                    command,
+                    InvalidMotionCommand(
+                        "no active or queued target motion is available for pause/resume"
+                    ),
+                )
+            else:
+                self._fail(
+                    command,
+                    InvalidMotionCommand(
+                        "pause/resume target does not match the active motion"
+                    ),
+                )
+            return
+        else:
+            with self._lock:
+                self._active_command = None
+            if active is not None:
+                self._cancel(active, f"Preempted by {command.kind.value}")
+            for pending in self._queue.drain_normal():
+                self._cancel(pending, f"Cancelled before execution by {command.kind.value}")
+                self._cancel_deferred_motion_controls(
+                    pending.command_id,
+                    f"Target cancelled before execution by {command.kind.value}",
+                )
+            self._cancel_all_deferred_motion_controls(
+                f"Target cancelled before execution by {command.kind.value}"
+            )
 
         try:
             if command.kind == RobotCommandKind.ESTOP:
                 state = environment.emergency_stop()
                 message = "Simulation emergency stop latched"
+            elif command.kind == RobotCommandKind.CLEAR_ESTOP:
+                state = environment.clear_estop()
+                message = "Simulation emergency-stop latch cleared without changing pose"
             else:
                 state = environment.stop()
                 message = "Simulation motion stopped"
@@ -430,6 +525,91 @@ class SimulationWorker:
             self._complete(command, result)
         except Exception as error:
             self._fail(command, error)
+
+    def _execute_motion_control(
+        self,
+        environment: SimulationEnvironment,
+        command: QueuedCommand,
+        active: QueuedCommand,
+    ) -> bool:
+        """Apply one target-bound pause/resume on the worker owner thread."""
+
+        try:
+            if command.kind == RobotCommandKind.PAUSE:
+                state = environment.pause()
+                self._set_active_status(active, CommandExecutionStatus.PAUSED)
+                message = "Simulation motion paused with its remaining trajectory retained"
+            elif command.kind == RobotCommandKind.RESUME:
+                state = environment.resume()
+                self._set_active_status(active, CommandExecutionStatus.RUNNING)
+                message = "Simulation motion resumed"
+            else:  # pragma: no cover - private caller invariant
+                raise InvalidMotionCommand("unsupported motion control command")
+            with self._lock:
+                self._capture_locked(environment.controller.snapshot())
+            result = RobotActionResult(
+                command_id=command.command_id,
+                operation=command.kind,
+                status=ToolStatus.SUCCESS,
+                state=self._external_state(state),
+                message=message,
+            )
+            self._complete(command, result)
+            return True
+        except Exception as error:
+            self._fail(command, error)
+            return False
+
+    def _execute_deferred_motion_controls(
+        self,
+        environment: SimulationEnvironment,
+        active: QueuedCommand,
+    ) -> None:
+        """Apply queued controls before the target's first integration step."""
+
+        with self._lock:
+            controls = self._deferred_motion_controls.pop(active.command_id, deque())
+        while controls:
+            control = controls.popleft()
+            applied = self._execute_motion_control(environment, control, active)
+            if (
+                not applied
+                and control.kind == RobotCommandKind.PAUSE
+                and environment.get_state().motion_state == MotionState.MOVING
+            ):
+                # A pause accepted for a still-queued target must never degrade
+                # into an unnoticed start. Discard the prepared trajectory if
+                # the pause cannot be established before its first step.
+                environment.stop()
+                while controls:
+                    self._cancel(
+                        controls.popleft(),
+                        "Target stopped because its queued pause could not be applied",
+                    )
+                raise InvalidMotionCommand(
+                    "queued pause could not be applied; target motion was stopped"
+                )
+
+    def _cancel_deferred_motion_controls(
+        self,
+        target_command_id: str,
+        message: str,
+    ) -> None:
+        with self._lock:
+            controls = self._deferred_motion_controls.pop(target_command_id, deque())
+        while controls:
+            self._cancel(controls.popleft(), message)
+
+    def _cancel_all_deferred_motion_controls(self, message: str) -> None:
+        with self._lock:
+            controls = [
+                control
+                for pending in self._deferred_motion_controls.values()
+                for control in pending
+            ]
+            self._deferred_motion_controls.clear()
+        for control in controls:
+            self._cancel(control, message)
 
     def _step_active(
         self,
@@ -510,6 +690,26 @@ class SimulationWorker:
             )
             self._records[command.command_id] = record
             self._emit_locked("command_started", command=record)
+
+    def _set_active_status(
+        self,
+        command: QueuedCommand,
+        status: CommandExecutionStatus,
+    ) -> None:
+        """Expose pause/resume on the original long-running command record."""
+
+        with self._lock:
+            current = self._records.get(command.command_id)
+            if current is None or current.status in {
+                CommandExecutionStatus.SUCCEEDED,
+                CommandExecutionStatus.FAILED,
+                CommandExecutionStatus.REJECTED,
+                CommandExecutionStatus.CANCELLED,
+            }:
+                return
+            self._records[command.command_id] = current.model_copy(
+                update={"status": status, "updated_at_ms": _now_ms()}
+            )
 
     def _complete(self, command: QueuedCommand, result: Any) -> None:
         payload = result.model_dump(mode="json")
@@ -738,6 +938,10 @@ class SimulationWorker:
                     self._queue.depth
                     + self._camera_queue.qsize()
                     + self._trajectory_clear_queue.qsize()
+                    + sum(
+                        len(controls)
+                        for controls in self._deferred_motion_controls.values()
+                    )
                 ),
                 active_command_id=(
                     self._active_command.command_id
@@ -824,7 +1028,7 @@ class SimulationWorker:
 
     def _external_state(self, state: RobotState) -> RobotState:
         active_id = self._active_command.command_id if self._active_command else None
-        if state.motion_state != MotionState.MOVING:
+        if state.motion_state not in {MotionState.MOVING, MotionState.PAUSED}:
             active_id = None
         return state.model_copy(update={"active_command_id": active_id}, deep=True)
 

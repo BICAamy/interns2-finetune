@@ -19,19 +19,23 @@ from surgical_contracts import (
     CommandIntent,
     CoordinateSource,
     Direction,
+    ErrorCode,
+    MotionState,
+    MoveSequenceResult,
     ParsedCommand,
     Point3D,
     RelativeMotion,
     SimulationCameraControlRequest,
     SimulationCameraState,
     SimulationTelemetry,
+    ToolStatus,
     TrajectoryClearResult,
 )
 from web.backend.main import create_app
 from web.backend.asr import ASRSettings
 from web.backend.asr.service import RawTranscription
 from web.backend.models import SessionStatus, TextCommandRequest
-from web.backend.runtime import WebRuntime
+from web.backend.runtime import WebRuntime, _controller_joints_from_visual_home
 
 
 def settings() -> AgentSettings:
@@ -70,6 +74,14 @@ def relative_command(command_id: str = "web-relative") -> ParsedCommand:
         ),
         summary="沿 Z 轴正方向移动 8 mm",
     )
+
+
+def test_real_reset_home_inverts_the_calibrated_visual_joint_mapping() -> None:
+    assert _controller_joints_from_visual_home(
+        (0.0, 0.0, 60.0, 0.0, 90.0, 0.0),
+        sign=(1, -1, 1, -1, 1, -1),
+        zero_offset_deg=(1.0, 2.0, 3.0, 4.0, 5.0, 6.0),
+    ) == (-1.0, 2.0, 57.0, 4.0, 85.0, 6.0)
 
 
 class StubParser:
@@ -255,6 +267,49 @@ class BlockingParser(StubParser):
             image_path,
             input_source=input_source,
         )
+
+
+class PausableFakeRobotController(FakeRobotController):
+    """Hold one fake motion open so the web pause/resume state can be tested."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.motion_started = Event()
+        self.motion_release = Event()
+        self.hard_stopped = False
+
+    def move_sequence(self, request):
+        self._motion_state = MotionState.MOVING
+        self.motion_started.set()
+        if not self.motion_release.wait(2.0):
+            raise TimeoutError("test motion was not released")
+        if self.hard_stopped:
+            return MoveSequenceResult(
+                command_id=request.command_id,
+                status=ToolStatus.FAILED,
+                completed=False,
+                completed_steps=0,
+                total_steps=len(request.steps),
+                final_tcp_position=self._position,
+                final_joint_positions_deg=tuple(self._joint_positions_deg),
+                message="Fake motion was replaced after pause",
+                error_code=ErrorCode.ROBOT_TIMEOUT,
+            )
+        return super().move_sequence(request)
+
+    def stop(self, command_id=None):
+        self.hard_stopped = True
+        self.motion_release.set()
+        return super().stop(command_id)
+
+
+class PausableThenResetFakeRobotController(PausableFakeRobotController):
+    """Block only the original task; let the following home sequence run."""
+
+    def move_sequence(self, request):
+        if self.motion_started.is_set():
+            return FakeRobotController.move_sequence(self, request)
+        return super().move_sequence(request)
 
 
 def make_client(command: ParsedCommand):
@@ -451,6 +506,132 @@ def test_relative_motion_cancel_and_image_lifecycle():
         assert second_confirm.status_code == 409
 
 
+def test_active_task_can_pause_and_resume_without_losing_remaining_motion():
+    robot = PausableFakeRobotController()
+    runtime = WebRuntime(
+        settings(),
+        parser=StubParser(relative_command("web-pause-resume-001")),
+        robot=robot,
+        planner=FakePuncturePlannerClient(),
+        simulation_observer=StubSimulationObserver(robot),
+    )
+
+    async def scenario() -> None:
+        session_id = (await runtime.create_session()).session_id
+        preview = await runtime.submit_text(
+            session_id,
+            TextCommandRequest(prompt="机械臂向上移动 8 毫米"),
+        )
+        assert preview.status == SessionStatus.AWAITING_CONFIRMATION
+        await runtime.confirm(session_id)
+        assert await asyncio.to_thread(robot.motion_started.wait, 1.0)
+
+        paused = await runtime.stop(session_id, emergency=False)
+        assert paused.status == SessionStatus.PAUSED
+        assert paused.active_command_id == "web-pause-resume-001"
+        assert robot.pause_calls == 1
+        await asyncio.sleep(0.03)
+        assert runtime.get_session(session_id).status == SessionStatus.PAUSED
+
+        resumed = await runtime.resume(session_id)
+        assert resumed.status == SessionStatus.EXECUTING
+        assert resumed.active_command_id == "web-pause-resume-001"
+        assert robot.resume_calls == 1
+        robot.motion_release.set()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            if runtime.get_session(session_id).status == SessionStatus.COMPLETED:
+                break
+            await asyncio.sleep(0.01)
+        assert runtime.get_session(session_id).status == SessionStatus.COMPLETED
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        robot.motion_release.set()
+        runtime.close()
+
+
+def test_new_text_replaces_a_paused_task_instead_of_resuming_it():
+    robot = PausableFakeRobotController()
+    runtime = WebRuntime(
+        settings(),
+        parser=StubParser(relative_command("web-replacement-001")),
+        robot=robot,
+        planner=FakePuncturePlannerClient(),
+        simulation_observer=StubSimulationObserver(robot),
+    )
+
+    async def scenario() -> None:
+        session_id = (await runtime.create_session()).session_id
+        await runtime.submit_text(
+            session_id,
+            TextCommandRequest(prompt="先执行旧任务"),
+        )
+        await runtime.confirm(session_id)
+        assert await asyncio.to_thread(robot.motion_started.wait, 1.0)
+        paused = await runtime.stop(session_id, emergency=False)
+        assert paused.status == SessionStatus.PAUSED
+
+        replacement = await runtime.submit_text(
+            session_id,
+            TextCommandRequest(prompt="改为执行新任务"),
+        )
+        assert replacement.status == SessionStatus.AWAITING_CONFIRMATION
+        assert replacement.active_command_id is None
+        assert robot.stop_calls == 1
+        assert robot.resume_calls == 0
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        robot.motion_release.set()
+        runtime.close()
+
+
+def test_reset_discards_a_paused_task_and_runs_the_home_sequence():
+    robot = PausableThenResetFakeRobotController()
+    runtime = WebRuntime(
+        settings(),
+        parser=StubParser(relative_command("web-pause-before-reset-001")),
+        robot=robot,
+        planner=FakePuncturePlannerClient(),
+        simulation_observer=StubSimulationObserver(robot),
+    )
+
+    async def scenario() -> None:
+        session_id = (await runtime.create_session()).session_id
+        await runtime.submit_text(
+            session_id,
+            TextCommandRequest(prompt="先执行旧任务"),
+        )
+        await runtime.confirm(session_id)
+        assert await asyncio.to_thread(robot.motion_started.wait, 1.0)
+        paused = await runtime.stop(session_id, emergency=False)
+        assert paused.status == SessionStatus.PAUSED
+
+        resetting = await runtime.reset(session_id)
+        assert resetting.status == SessionStatus.EXECUTING
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            if runtime.get_session(session_id).status == SessionStatus.COMPLETED:
+                break
+            await asyncio.sleep(0.01)
+        final = runtime.get_session(session_id)
+        assert final.status == SessionStatus.COMPLETED
+        assert robot.stop_calls == 1
+        assert robot.resume_calls == 0
+        assert [
+            step.target_angle_deg for step in robot.move_sequence_calls[-1].steps
+        ] == [0.0, 0.0, 60.0, 0.0, 90.0, 0.0]
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        robot.motion_release.set()
+        runtime.close()
+
+
 def test_relative_confirmation_stop_estop_reset_and_websocket():
     client, _parser, robot, planner, _observer = make_client(
         relative_command("web-relative-2")
@@ -487,10 +668,23 @@ def test_relative_confirmation_stop_estop_reset_and_websocket():
         assert estopped.json()["status"] == "estop"
         assert robot.emergency_stop_calls == 1
 
-        reset = client.post(f"/api/sessions/{session_id}/reset-estop")
+        reset = client.post(f"/api/sessions/{session_id}/reset")
         assert reset.status_code == 200
-        assert reset.json()["status"] == "ready"
-        assert robot.reset_estop_calls == 1
+        reset_result = wait_for_status(client, session_id, {"completed", "failed"})
+        assert reset_result["status"] == "completed"
+        assert robot.clear_estop_calls == 1
+        assert robot.reset_estop_calls == 0
+        assert len(robot.move_sequence_calls) == 2
+        home_steps = robot.move_sequence_calls[-1].steps
+        assert [step.joint_index for step in home_steps] == [1, 2, 3, 4, 5, 6]
+        assert [step.target_angle_deg for step in home_steps] == [
+            0.0,
+            0.0,
+            60.0,
+            0.0,
+            90.0,
+            0.0,
+        ]
 
 
 def test_unknown_session_never_calls_reset_tool():

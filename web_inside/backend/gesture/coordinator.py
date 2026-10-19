@@ -42,6 +42,7 @@ _BUSY_STATUSES = {
     SessionStatus.MOVING_RELATIVE,
     SessionStatus.PLANNING,
     SessionStatus.STOPPING,
+    SessionStatus.PAUSED,
 }
 
 

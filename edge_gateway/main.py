@@ -67,7 +67,7 @@ class EdgeGateway:
             secret=self.secret,
             gateway_id=config.gateway_id,
             command_handler=installed_handler,
-            stop_handler=(self._execute_software_stop if self._real else None),
+            stop_handler=(self._execute_motion_control if self._real else None),
         )
         self.robot_model: str | None = None
         self.package_version: str | None = None
@@ -300,12 +300,12 @@ class EdgeGateway:
             self._controller_operation_active.clear()
             self._controller_operation.release()
 
-    def _execute_software_stop(
+    def _execute_motion_control(
         self,
         envelope: RobotCommandEnvelope,
         fingerprint: str,
     ) -> RobotCommandResult:
-        """Pre-empt the active owned motion with Huayan ``GrpStop,0,;``.
+        """Pause, resume or stop the active motion on its owned 10003 client.
 
         This deliberately bypasses ``_controller_operation``: the motion
         thread owns the 10003 client, and the executor serializes the stop on
@@ -314,21 +314,38 @@ class EdgeGateway:
         """
 
         from surgical_contracts import (
+            MotionControlRequest,
             MotionStopConfirmation,
             SoftwareStopRequest,
             StopDelivery,
             ToolStatus,
         )
 
-        if (
-            command_fingerprint(envelope) != fingerprint
-            or envelope.command_kind != GatewayCommandKind.SOFTWARE_STOP_REQUEST
-            or not isinstance(envelope.payload, SoftwareStopRequest)
-        ):
+        if command_fingerprint(envelope) != fingerprint:
             return self._failed_result(
                 envelope,
                 ErrorCode.COMMAND_CONFLICT,
-                "software stop envelope or fingerprint is invalid",
+                "motion-control fingerprint is invalid",
+            )
+        is_stop = (
+            envelope.command_kind == GatewayCommandKind.SOFTWARE_STOP_REQUEST
+            and isinstance(envelope.payload, SoftwareStopRequest)
+        )
+        is_pause = (
+            envelope.command_kind == GatewayCommandKind.PAUSE_REQUEST
+            and isinstance(envelope.payload, MotionControlRequest)
+            and envelope.payload.operation == "pause"
+        )
+        is_resume = (
+            envelope.command_kind == GatewayCommandKind.RESUME_REQUEST
+            and isinstance(envelope.payload, MotionControlRequest)
+            and envelope.payload.operation == "resume"
+        )
+        if not (is_stop or is_pause or is_resume):
+            return self._failed_result(
+                envelope,
+                ErrorCode.COMMAND_CONFLICT,
+                "motion-control envelope is invalid",
             )
         config = (
             self.config.robot_config
@@ -341,23 +358,70 @@ class EdgeGateway:
                 ErrorCode.OPERATION_NOT_ENABLED,
                 "real robot configuration is unavailable",
             )
-        with self._active_executor_lock:
-            executor = self._active_remote_executor
+        timeout_s = (
+            config.deadlines.stop_ack_ms + config.deadlines.response_ms
+        ) / 1000 + 0.5
+        # A user can press Stop immediately after web confirmation.  In that
+        # narrow race the motion frame has reached this process but its worker
+        # may not yet have published the owned executor.  Wait only within the
+        # existing bounded control deadline; never reject an in-order pause
+        # merely because thread scheduling lost this race.
+        executor_deadline = time.monotonic() + (
+            timeout_s if (is_pause or is_resume) else 0.0
+        )
+        executor = None
+        while executor is None:
+            with self._active_executor_lock:
+                executor = self._active_remote_executor
+            if executor is None and time.monotonic() < executor_deadline:
+                time.sleep(0.01)
+            else:
+                break
         if executor is None:
             return self._failed_result(
                 envelope,
                 ErrorCode.COMMAND_CONFLICT,
-                "no active Mac-owned motion can be stopped",
+                "no active Mac-owned motion is available for this control request",
             )
+        if is_pause or is_resume:
+            request = envelope.payload
+            assert isinstance(request, MotionControlRequest)
+            confirmed = (
+                executor.request_authenticated_pause(
+                    envelope.command_id,
+                    target_command_id=request.target_command_id,
+                    timeout_s=timeout_s,
+                )
+                if is_pause
+                else executor.request_authenticated_resume(
+                    envelope.command_id,
+                    target_command_id=request.target_command_id,
+                    timeout_s=timeout_s,
+                )
+            )
+            if not confirmed:
+                return self._failed_result(
+                    envelope,
+                    ErrorCode.ROBOT_TIMEOUT,
+                    (
+                        "GrpInterrupt was not confirmed by 10003 and 10004"
+                        if is_pause
+                        else "GrpContinue was not confirmed by 10003 and 10004"
+                    ),
+                )
+            return RobotCommandResult(
+                gateway_session_id=envelope.gateway_session_id,
+                command_id=envelope.command_id,
+                command_kind=envelope.command_kind,
+                status=ToolStatus.SUCCESS,
+            )
+
         stop = executor.request_authenticated_stop(
             envelope.command_id,
-            timeout_s=(
-                config.deadlines.stop_ack_ms
-                + config.deadlines.response_ms
-            ) / 1000 + 0.1,
+            timeout_s=timeout_s,
         )
         confirmed = (
-            stop.delivery == StopDelivery.SENT
+            stop.delivery in {StopDelivery.SENT, StopDelivery.NOT_SENT}
             and stop.motion_stop == MotionStopConfirmation.CONFIRMED
         )
         if not confirmed:
@@ -368,7 +432,8 @@ class EdgeGateway:
                 status=ToolStatus.FAILED,
                 error_code=ErrorCode.ROBOT_TIMEOUT,
                 error_message=(
-                    "GrpStop delivery or stationary confirmation was not established"
+                    "motion cancellation/GrpStop delivery or stationary "
+                    "confirmation was not established"
                 ),
                 software_stop=stop,
             )
@@ -656,11 +721,7 @@ class EdgeGateway:
                     config, motion_client, sampler,
                     session_id=envelope.gateway_session_id,
                 )
-                return result.telemetry, (
-                    f"moving_10003={result.moving_10003}, "
-                    f"moving_10004={result.moving_10004}, "
-                    f"fsm_10004={result.fsm_10004}"
-                )
+                return result
 
             with CommandJournal(
                 self.config.audit_path.parent / "commands.journal"

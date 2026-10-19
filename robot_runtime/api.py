@@ -27,6 +27,7 @@ from surgical_contracts import (
     MoveRelativeRequest,
     MoveSequenceRequest,
     MoveToEntryRequest,
+    MotionControlRequest,
     SetEnabledRequest,
     ResetSimulationRequest,
     RobotActionRequest,
@@ -455,6 +456,36 @@ def create_app(
     @router.post("/v1/commands/stop", response_model=RobotCommandRecord, status_code=202)
     def stop(request: RobotActionRequest) -> RobotCommandRecord:
         return runtime_provider.submit(RobotCommandKind.STOP, request)[0]
+
+    @router.post("/v1/commands/pause", response_model=RobotCommandRecord, status_code=202)
+    def pause(request: MotionControlRequest) -> RobotCommandRecord:
+        if request.operation != "pause":
+            raise RobotRuntimeServiceError(
+                ErrorCode.INVALID_COMMAND_SCHEMA,
+                "pause endpoint requires operation='pause'",
+                status_code=422,
+                command_id=request.command_id,
+            )
+        return runtime_provider.submit(RobotCommandKind.PAUSE, request)[0]
+
+    @router.post("/v1/commands/resume", response_model=RobotCommandRecord, status_code=202)
+    def resume(request: MotionControlRequest) -> RobotCommandRecord:
+        if request.operation != "resume":
+            raise RobotRuntimeServiceError(
+                ErrorCode.INVALID_COMMAND_SCHEMA,
+                "resume endpoint requires operation='resume'",
+                status_code=422,
+                command_id=request.command_id,
+            )
+        return runtime_provider.submit(RobotCommandKind.RESUME, request)[0]
+
+    @router.post(
+        "/v1/commands/clear-estop",
+        response_model=RobotCommandRecord,
+        status_code=202,
+    )
+    def clear_estop(request: RobotActionRequest) -> RobotCommandRecord:
+        return runtime_provider.submit(RobotCommandKind.CLEAR_ESTOP, request)[0]
 
     @router.post("/v1/commands/estop", response_model=RobotCommandRecord, status_code=202)
     def estop(request: RobotActionRequest) -> RobotCommandRecord:

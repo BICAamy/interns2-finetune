@@ -17,9 +17,12 @@ from surgical_contracts import (
     CommandExecutionStatus,
     CommandIntent,
     CoordinateSource,
+    ErrorCode,
     ParsedCommand,
     Point3D,
+    MotionSequence,
     MotionSequenceStep,
+    MotionState,
     MotionStepKind,
     MoveSequenceRequest,
     RobotMotionProposal,
@@ -92,6 +95,7 @@ _BUSY_STATUSES = {
     SessionStatus.MOVING_RELATIVE,
     SessionStatus.PLANNING,
     SessionStatus.STOPPING,
+    SessionStatus.PAUSED,
 }
 
 _IMAGE_SUFFIXES = {
@@ -109,7 +113,41 @@ _CURRENT_TOOLS = {
     SessionStatus.ESTOP: "robot.emergency_stop",
 }
 
+_PAUSEABLE_SESSION_STATUSES = {
+    SessionStatus.EXECUTING,
+    SessionStatus.MOVING_TO_ENTRY,
+    SessionStatus.MOVING_RELATIVE,
+}
+
 _TELEMETRY_TRAJECTORY_LIMIT = 160
+
+
+def _controller_joints_from_visual_home(
+    visual_joints_deg: tuple[float, ...],
+    *,
+    sign: tuple[int, ...],
+    zero_offset_deg: tuple[float, ...],
+) -> tuple[float, ...]:
+    """Invert the calibrated controller-to-visual joint mapping.
+
+    The passive real mirror and the Mac-side FK use
+    ``visual = sign * controller + zero_offset``.  A common visual home must
+    therefore be converted back to controller coordinates before it is placed
+    in a real-robot JOINT_ABSOLUTE step.
+    """
+
+    if not (
+        len(visual_joints_deg) == len(sign) == len(zero_offset_deg) == 6
+    ):
+        raise ValueError("joint home and calibrated mapping must contain six values")
+    return tuple(
+        float(axis_sign) * (float(visual) - float(offset))
+        for visual, axis_sign, offset in zip(
+            visual_joints_deg,
+            sign,
+            zero_offset_deg,
+        )
+    )
 _REAL_CONNECTION_RECOVERY_NOTICE = "真实机械臂连接恢复中"
 _HEART_STAR_DEMO_PREVIEW_DELAY_S = 2.0
 
@@ -356,6 +394,9 @@ class WebRuntime:
             RuntimeMode.SIMULATION
             if RuntimeMode.SIMULATION in self._robots
             else configured_mode
+        )
+        self._home_joint_positions_deg = (
+            simulation_policy.initial_joint_positions_deg
         )
         self._robot_mode_settings: dict[str, dict[str, Any]] = {}
         self._robot_mode_settings[RuntimeMode.SIMULATION.value] = {
@@ -840,6 +881,13 @@ class WebRuntime:
                 session.session_id,
                 telemetry.frame_sequence,
             ),
+            enabled=True,
+            moving=telemetry.state.motion_state == MotionState.MOVING,
+            in_position=telemetry.state.motion_state in {
+                MotionState.IDLE,
+                MotionState.STOPPED,
+            },
+            physical_estop_active=telemetry.state.estop,
             error=session.error,
         )
 
@@ -1041,6 +1089,8 @@ class WebRuntime:
         selected_mode, parser, robot, _observer, orchestrator = (
             self._resources_for_session(session_id)
         )
+        if self.store.snapshot(session_id).status == SessionStatus.PAUSED:
+            await self._abandon_paused_task(session_id, robot)
         parse_started_ms = time.time_ns() // 1_000_000
         parse_token = uuid4().hex
 
@@ -1371,10 +1421,49 @@ class WebRuntime:
         return self.store.mutate(session_id, operation)
 
     async def stop(self, session_id: str, *, emergency: bool) -> SessionSnapshot:
-        selected_mode, _parser, _robot, _observer, orchestrator = (
+        selected_mode, _parser, robot, _observer, orchestrator = (
             self._resources_for_session(session_id)
         )
         await self.manual.stop_external(selected_mode)
+        if not emergency:
+            before = self.store.snapshot(session_id)
+            target_command_id = before.active_command_id
+            motion_is_pauseable = False
+            if (
+                target_command_id is not None
+                and before.status in _PAUSEABLE_SESSION_STATUSES
+            ):
+                try:
+                    motion_is_pauseable = await asyncio.to_thread(
+                        self._motion_is_pauseable,
+                        robot,
+                        target_command_id,
+                    )
+                except Exception:
+                    # If the read-only state check is unavailable or
+                    # contradictory, use the terminating software-stop path.
+                    # Never assume an upper-layer active_command_id means that
+                    # the controller currently has a resumable trajectory.
+                    motion_is_pauseable = False
+            if motion_is_pauseable:
+                state = await asyncio.to_thread(
+                    robot.pause,
+                    target_command_id,
+                    f"web-pause-{uuid4().hex}",
+                )
+
+                def paused(record) -> None:
+                    if record.active_command_id != target_command_id:
+                        raise SessionConflict("任务在暂停确认前已经结束")
+                    record.status = SessionStatus.PAUSED
+                    record.current_tcp = state.tcp_position.model_dump(mode="json")
+                    record.message = "任务已暂停；可点击继续，或输入新任务替换剩余步骤"
+                    record.error = None
+
+                return self.store.mutate(session_id, paused)
+            # A direct/voice stop while no resumable task exists remains a
+            # hard software stop.  This keeps the safety phrase useful during
+            # parsing and lets it explicitly discard an already-paused task.
         # Huayan exposes GrpStop as a direct controller stop, not as a
         # physical/latching E-stop.  Both real-mode buttons therefore request
         # the same authenticated software stop while the UI keeps the red
@@ -1440,32 +1529,229 @@ class WebRuntime:
 
         return self.store.mutate(session_id, finish)
 
-    async def reset_estop(self, session_id: str) -> SessionSnapshot:
-        selected_mode, _parser, robot, _observer, _orchestrator = (
+    @staticmethod
+    def _motion_is_pauseable(robot: Any, target_command_id: str) -> bool:
+        telemetry_reader = getattr(robot, "get_telemetry", None)
+        if callable(telemetry_reader):
+            telemetry = telemetry_reader()
+            if isinstance(telemetry, RobotTelemetry):
+                active_command_id = telemetry.active_command_id
+                moving = (
+                    telemetry.motion_state == MotionState.MOVING
+                    or telemetry.moving is True
+                )
+            elif isinstance(telemetry, SimulationTelemetry):
+                active_command_id = telemetry.state.active_command_id
+                moving = telemetry.state.motion_state == MotionState.MOVING
+            else:
+                raise TypeError("robot returned unsupported telemetry")
+        else:
+            state = robot.get_state()
+            active_command_id = state.active_command_id
+            moving = state.motion_state == MotionState.MOVING
+        return moving and active_command_id in {None, target_command_id}
+
+    async def resume(self, session_id: str) -> SessionSnapshot:
+        _mode, _parser, robot, _observer, _orchestrator = (
             self._resources_for_session(session_id)
         )
-        if selected_mode == RuntimeMode.REAL:
-            raise SessionConflict("Step 12 真实模式禁止远程复位急停")
-        # Resolve the session before performing a state-changing tool call.
-        self.store.snapshot(session_id)
-        command_id = f"web-reset-{uuid4().hex}"
+        before = self.store.snapshot(session_id)
+        target_command_id = before.active_command_id
+        if before.status != SessionStatus.PAUSED or target_command_id is None:
+            raise SessionConflict("当前没有可继续的暂停任务")
+        state = await asyncio.to_thread(
+            robot.resume,
+            target_command_id,
+            f"web-resume-{uuid4().hex}",
+        )
+
+        def resumed(record) -> None:
+            if record.active_command_id != target_command_id:
+                raise SessionConflict("任务在继续确认前已经结束")
+            record.status = SessionStatus.EXECUTING
+            record.current_tcp = state.tcp_position.model_dump(mode="json")
+            record.message = "已继续执行暂停任务的剩余步骤"
+            record.error = None
+
+        return self.store.mutate(session_id, resumed)
+
+    async def _abandon_paused_task(self, session_id: str, robot: Any) -> None:
+        """Hard-stop one paused task before allowing a replacement command."""
+
+        before = self.store.snapshot(session_id)
+        old_command_id = before.active_command_id
+        if before.status != SessionStatus.PAUSED or old_command_id is None:
+            return
+        await asyncio.to_thread(robot.stop, f"web-replace-{uuid4().hex}")
+        deadline = self._monotonic_clock() + 5.0
+        while self._monotonic_clock() < deadline:
+            current = self.store.snapshot(session_id)
+            if current.active_command_id != old_command_id:
+                return
+            await asyncio.sleep(0.02)
+        raise SessionConflict("旧暂停任务尚未完全退出，请稍后重试")
+
+    async def reset(self, session_id: str) -> SessionSnapshot:
+        selected_mode, _parser, robot, _observer, orchestrator = (
+            self._resources_for_session(session_id)
+        )
+        current = self.store.snapshot(session_id)
+        if current.status == SessionStatus.PAUSED:
+            await self._abandon_paused_task(session_id, robot)
+            current = self.store.snapshot(session_id)
+        self.manual.assert_task_allowed(current.robot_mode)
+        if current.status in _BUSY_STATUSES:
+            raise SessionConflict("session already has a pending or active command")
         try:
-            state = await asyncio.to_thread(robot.reset_estop, command_id)
+            telemetry_reader = getattr(robot, "get_telemetry", robot.get_state)
+            telemetry = await asyncio.to_thread(telemetry_reader)
         except Exception as error:
             return self.store.mutate(
                 session_id,
                 lambda record: self._mark_background_failure(record, error),
             )
+        if isinstance(telemetry, RobotTelemetry):
+            if telemetry.enabled is not True:
+                raise SessionConflict("真机必须处于使能状态才能复位")
+            if telemetry.physical_estop_active is not False:
+                raise SessionConflict("请先在现场解除物理急停，再执行复位运动")
+            if telemetry.moving is not False or telemetry.potentially_moving is not False:
+                raise SessionConflict("机械臂仍在运动，不能开始复位")
+        else:
+            simulation_state = (
+                telemetry.state
+                if isinstance(telemetry, SimulationTelemetry)
+                else telemetry
+            )
+            if simulation_state.motion_state in {
+                MotionState.MOVING,
+                MotionState.PAUSED,
+            }:
+                raise SessionConflict("机械臂仍在运动，不能开始复位")
+            if simulation_state.estop:
+                await asyncio.to_thread(
+                    robot.clear_estop,
+                    f"web-clear-estop-{uuid4().hex}",
+                )
 
-        def finish(record) -> None:
-            record.status = SessionStatus.READY
-            record.active_command_id = None
+        home_joint_positions_deg = self._home_joint_positions_deg
+        if selected_mode == RuntimeMode.REAL:
+            if self._real_config is None:
+                raise SessionConflict("真实机械臂复位缺少真机配置")
+            sign = self._real_config.joint_mapping.sign
+            zero_offset_deg = self._real_config.joint_mapping.zero_offset_deg
+            if sign is None or zero_offset_deg is None:
+                raise SessionConflict("真实机械臂复位缺少关节映射标定")
+            home_joint_positions_deg = _controller_joints_from_visual_home(
+                self._home_joint_positions_deg,
+                sign=sign,
+                zero_offset_deg=zero_offset_deg,
+            )
+
+        command = ParsedCommand(
+            command_id=f"web-home-{uuid4().hex}",
+            intent=CommandIntent.MOVE_SEQUENCE,
+            motion_sequence=MotionSequence(
+                steps=tuple(
+                    MotionSequenceStep(
+                        kind=MotionStepKind.JOINT_ABSOLUTE,
+                        joint_index=index,
+                        target_angle_deg=angle,
+                    )
+                    for index, angle in enumerate(
+                        home_joint_positions_deg,
+                        start=1,
+                    )
+                )
+            ),
+            summary="运动恢复到统一初始关节姿态",
+        )
+        proposal_payload: dict[str, Any] | None = None
+        if selected_mode == RuntimeMode.REAL:
+            proposal_request = MoveSequenceRequest(
+                command_id=command.command_id,
+                steps=command.motion_sequence.steps,
+                translation_speed_mm_s=orchestrator.policy.move_speed_mm_s,
+                joint_speed_deg_s=orchestrator.policy.joint_move_speed_deg_s,
+                joint_acceleration_deg_s2=(
+                    orchestrator.policy.joint_move_acceleration_deg_s2
+                ),
+            )
+            proposal_record = await asyncio.to_thread(
+                robot.create_move_sequence_proposal,
+                proposal_request,
+            )
+            proposal = RobotMotionProposal.model_validate(
+                (proposal_record.result or {}).get("proposal")
+            )
+            proposal_payload = proposal.model_dump(mode="json")
+
+        now_ms = _now_ms()
+
+        def begin(record) -> None:
+            if record.status in _BUSY_STATUSES:
+                raise SessionConflict("session already has a pending or active command")
+            record.status = SessionStatus.EXECUTING
+            record.active_command_id = command.command_id
             record.pending_command = None
-            record.current_tcp = state.tcp_position.model_dump(mode="json")
-            record.message = "急停已复位，仿真环境已重置"
+            record.motion_proposal = proposal_payload
+            record.normalized_command = command.model_dump(mode="json")
+            record.live_tool_events = []
+            record.execution_events = []
+            record.orchestration = None
+            record.message = "正在运动恢复到统一初始姿态"
             record.error = None
+            record.parse_started_ms = now_ms
+            record.parse_finished_ms = now_ms
 
-        return self.store.mutate(session_id, finish)
+        snapshot = self.store.mutate(session_id, begin)
+        self.store.bind_command(session_id, command.command_id)
+        if selected_mode == RuntimeMode.REAL:
+            try:
+                assert proposal_payload is not None
+                proposal = RobotMotionProposal.model_validate(proposal_payload)
+                confirmed = await asyncio.to_thread(
+                    robot.confirm_motion_proposal,
+                    command.command_id,
+                    proposal.fingerprint,
+                    RobotCommandKind.MOVE_SEQUENCE,
+                )
+                if confirmed.status != CommandExecutionStatus.RUNNING:
+                    raise SessionConflict("真机复位 proposal 未获准执行")
+                confirmed_payload = RobotMotionProposal.model_validate(
+                    (confirmed.result or {}).get("proposal")
+                ).model_dump(mode="json")
+                snapshot = self.store.mutate(
+                    session_id,
+                    lambda record: setattr(
+                        record,
+                        "motion_proposal",
+                        confirmed_payload,
+                    ),
+                )
+            except Exception as error:
+                self.store.unbind_command(command.command_id)
+                return self.store.mutate(
+                    session_id,
+                    lambda record: self._mark_background_failure(record, error),
+                )
+        task = asyncio.create_task(
+            self._execute_confirmed(
+                session_id,
+                command,
+                now_ms,
+                now_ms,
+                orchestrator,
+            )
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return snapshot
+
+    async def reset_estop(self, session_id: str) -> SessionSnapshot:
+        """Backward-compatible route alias for the new moving reset."""
+
+        return await self.reset(session_id)
 
     async def _execute_confirmed(
         self,
@@ -1586,12 +1872,16 @@ class WebRuntime:
 
     @staticmethod
     def _mark_background_failure(record: Any, error: Exception) -> None:
+        error_code = getattr(error, "error_code", ErrorCode.INTERNAL_ERROR)
+        if isinstance(error_code, ErrorCode):
+            error_code = error_code.value
+        detail = str(error).strip() or type(error).__name__
         record.active_command_id = None
         record.status = SessionStatus.FAILED
-        record.message = f"后台任务失败：{type(error).__name__}"
+        record.message = f"后台任务失败：{type(error).__name__}: {detail}"
         record.error = {
-            "code": "INTERNAL_ERROR",
-            "message": record.message,
+            "code": str(error_code),
+            "message": detail,
             "details": {},
         }
 

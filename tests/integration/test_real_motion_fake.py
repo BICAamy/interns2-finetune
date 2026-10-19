@@ -51,7 +51,8 @@ def pose(x: float = 100.0) -> Pose6D:
 
 def telemetry(*, sequence: int = 10, x: float = 100.0,
               moving: bool = False, fsm: int = 33,
-              in_position: bool = True) -> RobotTelemetry:
+              in_position: bool = True,
+              paused: bool = False) -> RobotTelemetry:
     return RobotTelemetry(
         runtime_mode=RuntimeMode.REAL, provider=RobotProvider.HUAYAN_EDGE_GATEWAY,
         sequence=sequence, freshness=SourceFreshness.FRESH,
@@ -67,8 +68,8 @@ def telemetry(*, sequence: int = 10, x: float = 100.0,
         reduced_mode=True, three_position_enable=True,
         physical_estop_active=False, emergency_stop_circuit_fault=False,
         safeguard_active=False, safeguard_circuit_fault=False,
-        free_drive_active=False, force_control_active=False, paused=False,
-        potentially_moving=False, moving=moving, in_position=in_position,
+        free_drive_active=False, force_control_active=False, paused=paused,
+        potentially_moving=moving or paused, moving=moving, in_position=in_position,
         fsm_code=fsm,
     )
 
@@ -386,6 +387,186 @@ def test_authenticated_remote_stop_interrupts_active_trial_and_confirms_feedback
             assert result_holder["result"].status == ToolStatus.FAILED
         finally:
             worker.join(timeout=1)
+            journal.close()
+            client.close()
+
+
+def test_pause_during_single_motion_preflight_blocks_first_waypoint_until_resume(
+    tmp_path,
+) -> None:
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client = FakeMotionClient(
+            "127.0.0.1", fake.command_port, timeout_s=0.1,
+        )
+        client.connect()
+        journal = CommandJournal(tmp_path / "pause-during-preflight.journal")
+        preflight_started = threading.Event()
+        release_preflight = threading.Event()
+        feedback_sequence = 10
+
+        def blocking_ik(_point):
+            preflight_started.set()
+            assert release_preflight.wait(1.0)
+            return (0, 0, 90, 0, 90, 0)
+
+        def feedback():
+            nonlocal feedback_sequence
+            feedback_sequence += 1
+            if feedback_sequence == 11:
+                return (
+                    telemetry(
+                        sequence=feedback_sequence,
+                        moving=True,
+                        fsm=25,
+                        in_position=False,
+                    ),
+                    "moving after preflight resume",
+                )
+            return (
+                telemetry(sequence=feedback_sequence, x=101),
+                "arrived after preflight resume",
+            )
+
+        executor = RemoteMotionExecutor(
+            trial_factory=lambda: FakeMotionTrial(
+                client=client,
+                journal=journal,
+                timing=timing(),
+                approval=approval(),
+                path_ik=blocking_ik,
+            ),
+            snapshot=telemetry,
+            readback=readback,
+            feedback=feedback,
+            poll_interval_s=0.001,
+        )
+        command = envelope("pause-single-preflight")
+        result_holder = {}
+        worker = threading.Thread(
+            target=lambda: result_holder.setdefault(
+                "result",
+                executor.execute(
+                    command,
+                    command_fingerprint(command),
+                    local_deadline_monotonic_ns=(
+                        time.monotonic_ns() + 2_000_000_000
+                    ),
+                ),
+            ),
+        )
+        try:
+            worker.start()
+            assert preflight_started.wait(1.0)
+            assert executor.request_authenticated_pause(
+                "pause-single-preflight-control",
+                target_command_id=command.command_id,
+                timeout_s=0.5,
+            ) is True
+            release_preflight.set()
+            time.sleep(0.05)
+            assert not any(
+                frame.startswith(b"WayPoint,")
+                for frame in fake.received_commands
+            )
+
+            assert executor.request_authenticated_resume(
+                "resume-single-preflight-control",
+                target_command_id=command.command_id,
+                timeout_s=0.5,
+            ) is True
+            worker.join(timeout=1.0)
+            assert worker.is_alive() is False
+            assert result_holder["result"].status == ToolStatus.SUCCESS
+            assert len([
+                frame
+                for frame in fake.received_commands
+                if frame.startswith(b"WayPoint,")
+            ]) == 1
+        finally:
+            release_preflight.set()
+            worker.join(timeout=1.0)
+            journal.close()
+            client.close()
+
+
+def test_hard_stop_cancels_single_motion_preflight_without_waypoint_write(
+    tmp_path,
+) -> None:
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client = FakeMotionClient(
+            "127.0.0.1", fake.command_port, timeout_s=0.1,
+        )
+        client.connect()
+        journal = CommandJournal(tmp_path / "stop-during-preflight.journal")
+        preflight_started = threading.Event()
+        release_preflight = threading.Event()
+
+        def blocking_ik(_point):
+            preflight_started.set()
+            assert release_preflight.wait(1.0)
+            return (0, 0, 90, 0, 90, 0)
+
+        executor = RemoteMotionExecutor(
+            trial_factory=lambda: FakeMotionTrial(
+                client=client,
+                journal=journal,
+                timing=timing(),
+                approval=approval(),
+                path_ik=blocking_ik,
+            ),
+            snapshot=telemetry,
+            readback=readback,
+            feedback=lambda: (telemetry(), "unused"),
+            poll_interval_s=0.001,
+        )
+        command = envelope("stop-single-preflight")
+        result_holder = {}
+        stop_holder = {}
+        motion_worker = threading.Thread(
+            target=lambda: result_holder.setdefault(
+                "result",
+                executor.execute(
+                    command,
+                    command_fingerprint(command),
+                    local_deadline_monotonic_ns=(
+                        time.monotonic_ns() + 2_000_000_000
+                    ),
+                ),
+            ),
+        )
+        stop_worker = threading.Thread(
+            target=lambda: stop_holder.setdefault(
+                "result",
+                executor.request_authenticated_stop(
+                    "stop-single-preflight-control",
+                    timeout_s=1.0,
+                ),
+            ),
+        )
+        try:
+            motion_worker.start()
+            assert preflight_started.wait(1.0)
+            stop_worker.start()
+            time.sleep(0.02)
+            release_preflight.set()
+            motion_worker.join(timeout=1.0)
+            stop_worker.join(timeout=1.0)
+
+            assert motion_worker.is_alive() is False
+            assert stop_worker.is_alive() is False
+            assert stop_holder["result"].delivery == StopDelivery.NOT_SENT
+            assert stop_holder["result"].motion_stop == (
+                MotionStopConfirmation.CONFIRMED
+            )
+            assert result_holder["result"].status == ToolStatus.FAILED
+            assert not any(
+                frame.startswith(b"WayPoint,")
+                for frame in fake.received_commands
+            )
+        finally:
+            release_preflight.set()
+            motion_worker.join(timeout=1.0)
+            stop_worker.join(timeout=1.0)
             journal.close()
             client.close()
 
@@ -1209,6 +1390,109 @@ def test_authenticated_stop_is_idempotent_rate_limited_and_never_physical_estop(
             assert journal.record("move-1")["state"] == "stopped"
         finally:
             client.close()
+
+
+def test_authenticated_pause_and_resume_retain_owned_waypoint(tmp_path) -> None:
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client, journal, trial = make_trial(fake, tmp_path)
+        try:
+            command = envelope()
+            assert trial.submit(
+                command,
+                telemetry(),
+                readback(),
+                arm(command),
+                lease(),
+                now_ms=BASE_MS,
+                now_monotonic_ns=BASE_NS,
+            ) == "accepted"
+            assert trial.request_authenticated_pause(
+                "pause-owned-1",
+                target_command_id=command.command_id,
+                authenticated=True,
+            ) is True
+            assert fake.received_commands.count(b"GrpInterrupt,0,;") == 1
+            assert trial.observe(
+                telemetry(
+                    sequence=11,
+                    paused=True,
+                    moving=False,
+                    fsm=32,
+                    in_position=False,
+                ),
+                paused_10003=True,
+                paused_10004=True,
+                now_monotonic_ns=BASE_NS + 10_000_000,
+            ) == "paused"
+            assert journal.record(command.command_id)["state"] == "paused"
+
+            assert trial.request_authenticated_resume(
+                "resume-owned-1",
+                target_command_id=command.command_id,
+                authenticated=True,
+            ) is True
+            assert fake.received_commands.count(b"GrpContinue,0,;") == 1
+            assert trial.observe(
+                telemetry(
+                    sequence=12,
+                    paused=False,
+                    moving=True,
+                    fsm=25,
+                    in_position=False,
+                ),
+                paused_10003=False,
+                paused_10004=False,
+                now_monotonic_ns=BASE_NS + 20_000_000,
+            ) == "executing"
+            assert journal.record(command.command_id)["state"] == "executing"
+
+            assert trial.request_stop(
+                reason="test cleanup",
+                now_monotonic_ns=BASE_NS + 30_000_000,
+            ) == "sent"
+            assert trial.observe(
+                telemetry(sequence=13),
+                now_monotonic_ns=BASE_NS + 40_000_000,
+            ) == "stopping"
+            assert trial.observe(
+                telemetry(sequence=14),
+                now_monotonic_ns=BASE_NS + 50_000_000,
+            ) == "stopped"
+        finally:
+            client.close()
+
+
+def test_unconfirmed_pause_times_out_to_bounded_software_stop(tmp_path) -> None:
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        client, journal, trial = make_trial(fake, tmp_path)
+        try:
+            command = envelope("pause-confirmation-timeout")
+            assert trial.submit(
+                command,
+                telemetry(),
+                readback(),
+                arm(command),
+                lease(),
+                now_ms=BASE_MS,
+                now_monotonic_ns=BASE_NS,
+            ) == "accepted"
+            assert trial.request_authenticated_pause(
+                "pause-timeout-control",
+                target_command_id=command.command_id,
+                authenticated=True,
+                now_monotonic_ns=BASE_NS + 10_000_000,
+            ) is True
+
+            state = trial.watchdog(
+                now_monotonic_ns=BASE_NS + 10_000_000
+                + (timing().stop_confirmation_ms + 1) * 1_000_000,
+            )
+            assert state == "stopping"
+            assert "pause confirmation deadline" in (trial.stop_reason or "")
+            assert fake.received_commands.count(b"GrpStop,0,;") == 1
+        finally:
+            client.close()
+            journal.close()
 
 
 def test_lost_stop_reply_cannot_be_reported_as_confirmed(tmp_path) -> None:

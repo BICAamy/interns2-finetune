@@ -216,7 +216,7 @@ class GatewayContractTests(unittest.TestCase):
                 status=ToolStatus.SUCCESS,
                 error_code=ErrorCode.ROBOT_TIMEOUT,
             )
-        with self.assertRaisesRegex(ValidationError, "sent and confirmed"):
+        with self.assertRaisesRegex(ValidationError, "confirmed cancellation"):
             RobotCommandResult(
                 gateway_session_id="session-1",
                 command_id="stop-1",
@@ -224,6 +224,20 @@ class GatewayContractTests(unittest.TestCase):
                 status=ToolStatus.SUCCESS,
                 software_stop=stop,
             )
+        cancelled_before_send = RobotCommandResult(
+            gateway_session_id="session-1",
+            command_id="stop-before-send",
+            command_kind=GatewayCommandKind.SOFTWARE_STOP_REQUEST,
+            status=ToolStatus.SUCCESS,
+            software_stop=SoftwareStopResult(
+                delivery=StopDelivery.NOT_SENT,
+                motion_stop=MotionStopConfirmation.CONFIRMED,
+            ),
+        )
+        self.assertEqual(
+            cancelled_before_send.software_stop.delivery,
+            StopDelivery.NOT_SENT,
+        )
         with self.assertRaisesRegex(ValidationError, "requires delivery"):
             RobotCommandResult(
                 gateway_session_id="session-1",

@@ -630,8 +630,10 @@ class ContinuousTrajectoryController:
     def _ensure_motion_can_start(self) -> None:
         if self._estop:
             raise InvalidMotionCommand("emergency stop is active")
-        if self._motion_state == MotionState.MOVING:
-            raise InvalidMotionCommand("cannot replace a motion command while it is moving")
+        if self._motion_state in {MotionState.MOVING, MotionState.PAUSED}:
+            raise InvalidMotionCommand(
+                "cannot replace an active or paused motion command"
+            )
 
     def _start_motion(
         self,
@@ -823,6 +825,34 @@ class ContinuousTrajectoryController:
         self._clear_sequence()
         self._active_command_id = None
         self._motion_state = MotionState.ESTOP if self._estop else MotionState.STOPPED
+        return self.get_state()
+
+    def pause(self) -> RobotState:
+        """Pause an active trajectory without discarding its remaining targets."""
+
+        if self._estop:
+            raise InvalidMotionCommand("cannot pause while emergency stop is active")
+        if self._motion_state != MotionState.MOVING or self._active_command_id is None:
+            raise InvalidMotionCommand("no active motion is available to pause")
+        self._motion_state = MotionState.PAUSED
+        return self.get_state()
+
+    def resume(self) -> RobotState:
+        """Continue the exact trajectory retained by :meth:`pause`."""
+
+        if self._estop:
+            raise InvalidMotionCommand("cannot resume while emergency stop is active")
+        if self._motion_state != MotionState.PAUSED or self._active_command_id is None:
+            raise InvalidMotionCommand("no paused motion is available to resume")
+        self._motion_state = MotionState.MOVING
+        return self.get_state()
+
+    def clear_estop(self) -> RobotState:
+        """Clear only the simulation latch while preserving the current pose."""
+
+        self._estop = False
+        if self._motion_state == MotionState.ESTOP:
+            self._motion_state = MotionState.STOPPED
         return self.get_state()
 
     def emergency_stop(self) -> RobotState:

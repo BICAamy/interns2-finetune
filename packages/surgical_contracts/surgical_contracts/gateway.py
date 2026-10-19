@@ -43,6 +43,8 @@ class GatewayCommandKind(str, Enum):
     MOVE_JOINT_RELATIVE = "move_joint_relative"
     MOVE_CARTESIAN_POSE = "move_cartesian_pose"
     MOVE_SEQUENCE = "move_sequence"
+    PAUSE_REQUEST = "pause_request"
+    RESUME_REQUEST = "resume_request"
     SOFTWARE_STOP_REQUEST = "software_stop_request"
     SET_ENABLED = "set_enabled"
 
@@ -50,6 +52,15 @@ class GatewayCommandKind(str, Enum):
 class SoftwareStopRequest(ContractModel):
     schema_version: SchemaVersion = SCHEMA_VERSION
     command_id: str = Field(min_length=1, max_length=128)
+
+
+class MotionControlRequest(ContractModel):
+    """Authenticated pause/resume request for an already-owned motion."""
+
+    schema_version: SchemaVersion = SCHEMA_VERSION
+    command_id: str = Field(min_length=1, max_length=128)
+    target_command_id: str = Field(min_length=1, max_length=128)
+    operation: Literal["pause", "resume"]
 
 
 class MotionSafetyLimits(ContractModel):
@@ -79,6 +90,7 @@ class RobotCommandEnvelope(ContractModel):
         | MoveCartesianPoseRequest
         | MoveJointRelativeRequest
         | MoveSequenceRequest
+        | MotionControlRequest
         | SoftwareStopRequest
         | SetEnabledRequest
     )
@@ -97,13 +109,25 @@ class RobotCommandEnvelope(ContractModel):
             GatewayCommandKind.MOVE_CARTESIAN_POSE: MoveCartesianPoseRequest,
             GatewayCommandKind.MOVE_JOINT_RELATIVE: MoveJointRelativeRequest,
             GatewayCommandKind.MOVE_SEQUENCE: MoveSequenceRequest,
+            GatewayCommandKind.PAUSE_REQUEST: MotionControlRequest,
+            GatewayCommandKind.RESUME_REQUEST: MotionControlRequest,
             GatewayCommandKind.SOFTWARE_STOP_REQUEST: SoftwareStopRequest,
             GatewayCommandKind.SET_ENABLED: SetEnabledRequest,
         }[self.command_kind]
         if not isinstance(self.payload, expected_payload):
             raise ValueError("command_kind does not match typed payload")
+        if isinstance(self.payload, MotionControlRequest):
+            expected_operation = (
+                "pause"
+                if self.command_kind == GatewayCommandKind.PAUSE_REQUEST
+                else "resume"
+            )
+            if self.payload.operation != expected_operation:
+                raise ValueError("motion-control operation does not match command_kind")
 
         if self.command_kind in {
+            GatewayCommandKind.PAUSE_REQUEST,
+            GatewayCommandKind.RESUME_REQUEST,
             GatewayCommandKind.SOFTWARE_STOP_REQUEST,
             GatewayCommandKind.SET_ENABLED,
         }:
@@ -308,8 +332,12 @@ class RobotCommandResult(ContractModel):
             raise ValueError("non-success result requires error_code")
         if self.status == ToolStatus.SUCCESS and self.software_stop is not None:
             if (
-                self.software_stop.delivery != StopDelivery.SENT
+                self.software_stop.delivery
+                not in {StopDelivery.SENT, StopDelivery.NOT_SENT}
                 or self.software_stop.motion_stop != MotionStopConfirmation.CONFIRMED
             ):
-                raise ValueError("successful software stop requires sent and confirmed")
+                raise ValueError(
+                    "successful software stop requires confirmed cancellation "
+                    "or sent and confirmed stop"
+                )
         return self

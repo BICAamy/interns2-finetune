@@ -42,6 +42,24 @@ class RobotController(Protocol):
 
         ...
 
+    def pause(
+        self,
+        target_command_id: str,
+        command_id: str | None = None,
+    ) -> RobotState:
+        """Pause one owned motion without discarding its remaining path."""
+
+        ...
+
+    def resume(
+        self,
+        target_command_id: str,
+        command_id: str | None = None,
+    ) -> RobotState:
+        """Resume the same paused motion."""
+
+        ...
+
     def emergency_stop(self, command_id: str | None = None) -> RobotState:
         """Simulation latch only; a real provider must not claim a physical E-stop."""
 
@@ -49,5 +67,10 @@ class RobotController(Protocol):
 
     def reset_estop(self, command_id: str | None = None) -> RobotState:
         """Explicitly clear a previously latched emergency stop."""
+
+        ...
+
+    def clear_estop(self, command_id: str | None = None) -> RobotState:
+        """Clear only an E-stop latch; do not change the current pose."""
 
         ...

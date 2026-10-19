@@ -266,6 +266,7 @@ export default function App() {
     };
   } | null | undefined;
   const isBusy = session ? busyStatuses.has(session.status) : true;
+  const isPaused = session?.status === "paused";
   const realStale = runtimeMode === "real" && telemetry?.connected !== true;
   const canSubmit = Boolean(
     session &&
@@ -281,6 +282,16 @@ export default function App() {
     session && !isBusy && !modeBusy && !randomMotionBusy &&
     !session.pending_confirmation && telemetry?.connected && !telemetry.moving &&
     !telemetry.estop && telemetry.current_tcp,
+  );
+  const canReset = Boolean(
+    session &&
+      telemetry?.connected === true &&
+      telemetry.moving === false &&
+      !isBusy &&
+      !modeBusy &&
+      !realStale &&
+      (runtimeMode === "simulation" || telemetry.enabled === true) &&
+      (runtimeMode === "simulation" || telemetry.physical_estop_active === false),
   );
   const videoUrl = session
     ? api.videoUrl(session.session_id, videoAttempt, runtimeMode)
@@ -642,7 +653,7 @@ export default function App() {
             <span>运行模式</span>
             <select
               value={runtimeMode}
-              disabled={!session || modeBusy || isBusy || session?.pending_confirmation}
+              disabled={!session || modeBusy || isBusy || isPaused || session?.pending_confirmation}
               onChange={(event) => void selectRobotMode(
                 event.target.value as "simulation" | "real",
               )}
@@ -677,10 +688,13 @@ export default function App() {
           )}
           <button
             className="button stop"
-            disabled={!session}
-            onClick={() => session && run(() => api.action(session.session_id, "stop"))}
+            disabled={!session || (!isPaused && !session.active_command_id)}
+            onClick={() => session && run(() => api.action(
+              session.session_id,
+              isPaused ? "resume" : "stop",
+            ))}
           >
-            停止
+            {isPaused ? "继续" : "停止"}
           </button>
           <button
             className="button estop"
@@ -767,10 +781,11 @@ export default function App() {
               </button>
               <button
                 className="button secondary"
-                disabled={session?.status !== "estop" || runtimeMode !== "simulation"}
-                onClick={() => session && run(() => api.action(session.session_id, "reset-estop"))}
+                disabled={!canReset}
+                onClick={() => session && run(() => api.action(session.session_id, "reset"))}
+                title="机械臂静止且已使能时，平滑运动回统一初始姿态"
               >
-                复位急停
+                复位
               </button>
               <button
                 className="button secondary"

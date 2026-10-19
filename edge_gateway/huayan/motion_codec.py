@@ -101,6 +101,16 @@ def encode_software_stop() -> bytes:
     return b"GrpStop,0,;"
 
 
+def encode_group_interrupt() -> bytes:
+    """Pause the active robot-group motion without discarding its path."""
+    return b"GrpInterrupt,0,;"
+
+
+def encode_group_continue() -> bytes:
+    """Continue a motion previously paused with ``GrpInterrupt``."""
+    return b"GrpContinue,0,;"
+
+
 def encode_group_enabled(enabled: bool) -> bytes:
     """Encode the documented group enable/disable command for robot group 0."""
     if type(enabled) is not bool:
@@ -120,7 +130,10 @@ def encode_speed_override(value: float) -> bytes:
 
 def decode_write_reply(frame: bytes, *, command: str) -> bool:
     """Return acceptance only. An OK reply is never physical-state proof."""
-    if command not in ("WayPoint", "GrpStop", "GrpEnable", "GrpDisable", "SetOverride"):
+    if command not in (
+        "WayPoint", "GrpStop", "GrpInterrupt", "GrpContinue",
+        "GrpEnable", "GrpDisable", "SetOverride",
+    ):
         raise ValueError("unsupported write reply")
     if len(frame) > MAX_REPLY_BYTES or not frame.endswith(b",;"):
         raise ProtocolError("invalid write reply framing")

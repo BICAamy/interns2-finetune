@@ -23,7 +23,8 @@ from .command_codec import CommandFrameDecoder, decode_reply, encode_read
 from .models import CommandReply, ProtocolError, ReadCommand, ResponseUnknown
 from .motion_codec import (
     JointWaypoint, LinearWaypoint, decode_write_reply, encode_group_enabled,
-    encode_software_stop, encode_speed_override,
+    encode_group_continue, encode_group_interrupt, encode_software_stop,
+    encode_speed_override,
 )
 
 
@@ -238,6 +239,26 @@ class LocalRealMotionClient:
             return decode_write_reply(self._exchange(encode_software_stop()), command="GrpStop")
         except ResponseUnknown as exc:
             raise ResponseUnknown(f"GrpStop outcome unknown: {exc}") from exc
+
+    def pause_motion(self) -> bool:
+        if not self._identified or self._write_command != "WayPoint":
+            raise PermissionError("GrpInterrupt is only for this process's owned WayPoint")
+        try:
+            return decode_write_reply(
+                self._exchange(encode_group_interrupt()), command="GrpInterrupt",
+            )
+        except ResponseUnknown as exc:
+            raise ResponseUnknown(f"GrpInterrupt outcome unknown: {exc}") from exc
+
+    def resume_motion(self) -> bool:
+        if not self._identified or self._write_command != "WayPoint":
+            raise PermissionError("GrpContinue is only for this process's owned WayPoint")
+        try:
+            return decode_write_reply(
+                self._exchange(encode_group_continue()), command="GrpContinue",
+            )
+        except ResponseUnknown as exc:
+            raise ResponseUnknown(f"GrpContinue outcome unknown: {exc}") from exc
 
     def prepare_next_waypoint(self, *, stationary_confirmed: bool = False) -> None:
         """Reuse this identified socket only after actual feedback confirmed arrival."""

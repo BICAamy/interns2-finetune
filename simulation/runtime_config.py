@@ -32,6 +32,9 @@ class SimulationMotionPolicyConfig:
     workspace_low_mm: tuple[float, float, float]
     workspace_high_mm: tuple[float, float, float]
     auto_execute_delay_s: float
+    initial_joint_positions_deg: tuple[
+        float, float, float, float, float, float
+    ]
 
 
 def load_simulation_motion_policy(
@@ -72,6 +75,17 @@ def load_simulation_motion_policy(
     workspace_high_mm = triple("workspace.high_mm", workspace.get("high_mm"))
     if any(low >= high for low, high in zip(workspace_low_mm, workspace_high_mm)):
         raise ValueError("simulation workspace lower bounds must be below upper bounds")
+    robot = section.get("robot")
+    if not isinstance(robot, dict):
+        raise ValueError("entry_point_env.robot must be a mapping")
+    initial_raw = robot.get("initial_joint_positions_deg")
+    if not isinstance(initial_raw, (list, tuple)) or len(initial_raw) != 6:
+        raise ValueError(
+            "entry_point_env.robot.initial_joint_positions_deg must contain six numbers"
+        )
+    initial_joint_positions_deg = tuple(float(value) for value in initial_raw)
+    if any(not isfinite(value) for value in initial_joint_positions_deg):
+        raise ValueError("initial joint positions must be finite")
 
     policy = SimulationMotionPolicyConfig(
         tcp_name=str(section["tcp_name"]).strip(),
@@ -89,6 +103,7 @@ def load_simulation_motion_policy(
         workspace_low_mm=workspace_low_mm,
         workspace_high_mm=workspace_high_mm,
         auto_execute_delay_s=positive("auto_execute_delay_s"),
+        initial_joint_positions_deg=initial_joint_positions_deg,  # type: ignore[arg-type]
     )
     if policy.move_speed_mm_s > policy.max_speed_mm_s:
         raise ValueError("simulation default speed cannot exceed its maximum speed")

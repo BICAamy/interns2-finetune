@@ -115,9 +115,21 @@ class ControllerEnvironment:
         self._owned()
         return self.controller.stop()
 
+    def pause(self):
+        self._owned()
+        return self.controller.pause()
+
+    def resume(self):
+        self._owned()
+        return self.controller.resume()
+
     def emergency_stop(self):
         self._owned()
         return self.controller.emergency_stop()
+
+    def clear_estop(self):
+        self._owned()
+        return self.controller.clear_estop()
 
     def get_camera_state(self):
         self._owned()
@@ -454,6 +466,186 @@ def test_stop_preempts_active_motion(service):
     assert wait_for_terminal(client, "stop-api-001")["status"] == "succeeded"
     assert wait_for_terminal(client, "long-entry-001")["status"] == "cancelled"
     assert client.get("/v1/state").json()["state"]["motion_state"] == "stopped"
+
+
+def test_pause_retains_active_motion_and_resume_finishes_remaining_path(service):
+    client, _worker, _environment = service
+    moving = client.post(
+        "/v1/commands/move-relative",
+        json={
+            "command_id": "pause-resume-entry-001",
+            "translation_mm": [10.0, 0.0, 0.0],
+            "frame": "robot_base",
+            "speed_mm_s": 5.0,
+        },
+    )
+    assert moving.status_code == 202
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if client.get("/v1/commands/pause-resume-entry-001").json()["status"] == "running":
+            break
+        time.sleep(0.005)
+    else:
+        raise AssertionError("long motion never entered running state")
+
+    paused = client.post(
+        "/v1/commands/pause",
+        json={
+            "command_id": "pause-control-001",
+            "target_command_id": "pause-resume-entry-001",
+            "operation": "pause",
+        },
+    )
+    assert paused.status_code == 202, paused.text
+    assert wait_for_terminal(client, "pause-control-001")["status"] == "succeeded"
+    paused_motion = client.get("/v1/commands/pause-resume-entry-001").json()
+    assert paused_motion["status"] == "paused"
+    paused_state = client.get("/v1/state").json()
+    assert paused_state["state"]["motion_state"] == "paused"
+    assert paused_state["state"]["active_command_id"] == "pause-resume-entry-001"
+    paused_tcp = paused_state["state"]["tcp_position"]
+    time.sleep(0.03)
+    assert client.get("/v1/state").json()["state"]["tcp_position"] == paused_tcp
+
+    resumed = client.post(
+        "/v1/commands/resume",
+        json={
+            "command_id": "resume-control-001",
+            "target_command_id": "pause-resume-entry-001",
+            "operation": "resume",
+        },
+    )
+    assert resumed.status_code == 202, resumed.text
+    assert wait_for_terminal(client, "resume-control-001")["status"] == "succeeded"
+    assert wait_for_terminal(
+        client,
+        "pause-resume-entry-001",
+        timeout_s=5,
+    )["status"] == "succeeded"
+
+
+def test_pause_bound_to_still_queued_motion_applies_before_its_first_step():
+    environment = ControllerEnvironment()
+    worker = SimulationWorker(
+        lambda: environment,
+        tick_interval_s=0.001,
+        pause_on_no_clients=True,
+    )
+    with TestClient(create_app(worker)) as client:
+        blocker = client.post(
+            "/v1/commands/move-relative",
+            json={
+                "command_id": "queued-pause-blocker",
+                "translation_mm": [5.0, 0.0, 0.0],
+                "frame": "robot_base",
+                "speed_mm_s": 70.0,
+            },
+        )
+        assert blocker.status_code == 202
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if client.get(
+                "/v1/commands/queued-pause-blocker"
+            ).json()["status"] == "running":
+                break
+            time.sleep(0.005)
+        else:
+            raise AssertionError("blocking motion never became active")
+
+        target = client.post(
+            "/v1/commands/move-relative",
+            json={
+                "command_id": "still-queued-pause-target",
+                "translation_mm": [10.0, 0.0, 0.0],
+                "frame": "robot_base",
+                "speed_mm_s": 20.0,
+            },
+        )
+        paused = client.post(
+            "/v1/commands/pause",
+            json={
+                "command_id": "still-queued-pause-control",
+                "target_command_id": "still-queued-pause-target",
+                "operation": "pause",
+            },
+        )
+        assert target.status_code == 202
+        assert paused.status_code == 202
+        time.sleep(0.03)
+        assert client.get(
+            "/v1/commands/still-queued-pause-target"
+        ).json()["status"] == "queued"
+        assert client.get(
+            "/v1/commands/still-queued-pause-control"
+        ).json()["status"] == "running"
+
+        worker.register_client()
+        try:
+            blocker_result = wait_for_terminal(
+                client, "queued-pause-blocker", timeout_s=2.0
+            )
+            assert blocker_result["status"] == "succeeded"
+            assert wait_for_terminal(
+                client, "still-queued-pause-control", timeout_s=2.0
+            )["status"] == "succeeded"
+            target_record = client.get(
+                "/v1/commands/still-queued-pause-target"
+            ).json()
+            assert target_record["status"] == "paused"
+            state = client.get("/v1/state").json()["state"]
+            assert state["motion_state"] == "paused"
+            assert state["active_command_id"] == "still-queued-pause-target"
+            assert state["tcp_position"] == blocker_result["result"][
+                "final_tcp_position"
+            ]
+
+            resumed = client.post(
+                "/v1/commands/resume",
+                json={
+                    "command_id": "still-queued-resume-control",
+                    "target_command_id": "still-queued-pause-target",
+                    "operation": "resume",
+                },
+            )
+            assert resumed.status_code == 202
+            assert wait_for_terminal(
+                client, "still-queued-resume-control", timeout_s=2.0
+            )["status"] == "succeeded"
+            assert wait_for_terminal(
+                client, "still-queued-pause-target", timeout_s=3.0
+            )["status"] == "succeeded"
+        finally:
+            worker.unregister_client()
+
+
+def test_clear_estop_preserves_current_pose_instead_of_snapping_home(service):
+    client, _worker, _environment = service
+    move = client.post(
+        "/v1/commands/move-relative",
+        json={
+            "command_id": "clear-estop-move-001",
+            "translation_mm": [5.0, 0.0, 0.0],
+            "frame": "robot_base",
+            "speed_mm_s": 20.0,
+        },
+    )
+    assert move.status_code == 202
+    assert wait_for_terminal(client, "clear-estop-move-001")["status"] == "succeeded"
+    moved_pose = client.get("/v1/state").json()["state"]["tcp_position"]
+
+    client.post("/v1/commands/estop", json={"command_id": "clear-estop-latch-001"})
+    assert wait_for_terminal(client, "clear-estop-latch-001")["status"] == "succeeded"
+    cleared = client.post(
+        "/v1/commands/clear-estop",
+        json={"command_id": "clear-estop-only-001"},
+    )
+    assert cleared.status_code == 202
+    assert wait_for_terminal(client, "clear-estop-only-001")["status"] == "succeeded"
+    state = client.get("/v1/state").json()["state"]
+    assert state["estop"] is False
+    assert state["motion_state"] == "stopped"
+    assert state["tcp_position"] == moved_pose
 
 
 def test_stop_cancels_motion_that_is_still_queued(service):

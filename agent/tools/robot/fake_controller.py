@@ -59,8 +59,11 @@ class FakeRobotController:
         self.move_sequence_calls: list[MoveSequenceRequest] = []
         self._joint_positions_deg = [0.0] * 6
         self.stop_calls = 0
+        self.pause_calls = 0
+        self.resume_calls = 0
         self.emergency_stop_calls = 0
         self.reset_estop_calls = 0
+        self.clear_estop_calls = 0
         self._trajectory_sequence = 0
 
     def _next_trajectory_id(self) -> str:
@@ -330,6 +333,30 @@ class FakeRobotController:
         self._motion_state = MotionState.STOPPED
         return self._state()
 
+    def pause(
+        self,
+        target_command_id: str,
+        command_id: str | None = None,
+    ) -> RobotState:
+        del target_command_id, command_id
+        self.pause_calls += 1
+        if self._motion_state != MotionState.MOVING:
+            raise RuntimeError("fake robot has no active motion to pause")
+        self._motion_state = MotionState.PAUSED
+        return self._state()
+
+    def resume(
+        self,
+        target_command_id: str,
+        command_id: str | None = None,
+    ) -> RobotState:
+        del target_command_id, command_id
+        self.resume_calls += 1
+        if self._motion_state != MotionState.PAUSED:
+            raise RuntimeError("fake robot has no paused motion to resume")
+        self._motion_state = MotionState.MOVING
+        return self._state()
+
     def emergency_stop(self, command_id: str | None = None) -> RobotState:
         del command_id
         self.emergency_stop_calls += 1
@@ -342,4 +369,12 @@ class FakeRobotController:
         self.reset_estop_calls += 1
         self._estop = False
         self._motion_state = MotionState.IDLE
+        return self._state()
+
+    def clear_estop(self, command_id: str | None = None) -> RobotState:
+        del command_id
+        self.clear_estop_calls += 1
+        self._estop = False
+        if self._motion_state == MotionState.ESTOP:
+            self._motion_state = MotionState.STOPPED
         return self._state()

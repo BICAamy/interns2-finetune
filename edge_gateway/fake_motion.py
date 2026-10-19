@@ -88,6 +88,10 @@ class LocalMotionTrial:
         self._initial_reduced_mode: bool | None = None
         self._stop_requests: dict[str, str] = {}
         self._last_stop_request_ns: int | None = None
+        self._control_requests: dict[str, str] = {}
+        self._control_started_ns: int | None = None
+        self._pause_started_ns: int | None = None
+        self._paused = False
 
     @property
     def potentially_moving(self) -> bool:
@@ -102,6 +106,10 @@ class LocalMotionTrial:
             self._lease is not None and self._lease.active
             and time.monotonic_ns() < self._lease.expires_monotonic_ns
         )
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
 
     def submit(
         self, envelope: RobotCommandEnvelope, snapshot: RobotTelemetry,
@@ -287,7 +295,12 @@ class LocalMotionTrial:
         self.journal.transition(self.command_id, "accepted")
         return "accepted"
 
-    def _feedback_safety_failure(self, sample: RobotTelemetry) -> str | None:
+    def _feedback_safety_failure(
+        self,
+        sample: RobotTelemetry,
+        *,
+        journal_state: str,
+    ) -> str | None:
         """Return the exact fail-closed reason instead of an opaque boolean."""
         if sample.runtime_mode != RuntimeMode.REAL or sample.provider != RobotProvider.HUAYAN_EDGE_GATEWAY:
             return "runtime mode or provider changed"
@@ -315,7 +328,6 @@ class LocalMotionTrial:
             "reduced_mode": sample.reduced_mode,
             "free_drive_active": sample.free_drive_active,
             "force_control_active": sample.force_control_active,
-            "paused": sample.paused,
             "physical_estop_active": sample.physical_estop_active,
             "emergency_stop_circuit_fault": sample.emergency_stop_circuit_fault,
             "safeguard_active": sample.safeguard_active,
@@ -326,13 +338,20 @@ class LocalMotionTrial:
             "auto_mode": self._initial_auto_mode,
             "reduced_mode": self._initial_reduced_mode,
             "free_drive_active": False, "force_control_active": False,
-            "paused": False, "physical_estop_active": False,
+            "physical_estop_active": False,
             "emergency_stop_circuit_fault": False,
             "safeguard_active": False, "safeguard_circuit_fault": False,
         }
         for name, value in safety_values.items():
             if value is not expected[name]:
                 return f"unsafe feedback {name}={value!r}, expected {expected[name]!r}"
+        if journal_state == "paused" and sample.paused is not True:
+            return "paused motion lost controller pause feedback"
+        if (
+            journal_state not in {"pausing", "paused", "resuming", "stopping", "stop_unconfirmed"}
+            and sample.paused is not False
+        ):
+            return "controller reported an unsolicited pause"
         if sample.vendor_fault is not None:
             return "controller reported a vendor fault"
         if type(sample.moving) is not bool or type(sample.in_position) is not bool:
@@ -350,6 +369,8 @@ class LocalMotionTrial:
 
     def observe(
         self, sample: RobotTelemetry, *, feedback_debug: str | None = None,
+        paused_10003: bool | None = None,
+        paused_10004: bool | None = None,
         now_monotonic_ns: int | None = None,
     ) -> str:
         if self.command_id is None or self.target is None or self.sent_monotonic_ns is None:
@@ -371,7 +392,10 @@ class LocalMotionTrial:
                 now_monotonic_ns=now_monotonic_ns,
             )
             return "stopping" if self.stop_delivery == "sent" else "stop_unconfirmed"
-        safety_failure = self._feedback_safety_failure(sample)
+        safety_failure = self._feedback_safety_failure(
+            sample,
+            journal_state=record["state"],
+        )
         if safety_failure is not None:
             self.request_stop(reason=safety_failure, now_monotonic_ns=now_monotonic_ns)
             return "stopping" if self.stop_delivery == "sent" else "stop_unconfirmed"
@@ -379,6 +403,71 @@ class LocalMotionTrial:
         self.last_feedback_monotonic_ns = now_monotonic_ns
         if record["state"] in ("stopping", "stop_unconfirmed"):
             return self._observe_stop(sample, now_monotonic_ns)
+        if record["state"] == "pausing":
+            if (
+                paused_10003 is True
+                and paused_10004 is True
+                and sample.paused is True
+                and sample.moving is False
+            ):
+                self.journal.transition(
+                    self.command_id,
+                    "paused",
+                    evidence="10003 and 10004 confirmed paused",
+                )
+                self._paused = True
+                self._control_started_ns = None
+                self._pause_started_ns = now_monotonic_ns
+                return "paused"
+            if self._control_deadline_expired(now_monotonic_ns):
+                self.request_stop(
+                    reason=(
+                        "pause confirmation deadline expired: 10003 and 10004 "
+                        "did not agree"
+                    ),
+                    now_monotonic_ns=now_monotonic_ns,
+                )
+                return (
+                    "stopping"
+                    if self.stop_delivery == "sent"
+                    else "stop_unconfirmed"
+                )
+            return "pausing"
+        if record["state"] == "paused":
+            return "paused"
+        if record["state"] == "resuming":
+            if (
+                paused_10003 is False
+                and paused_10004 is False
+                and sample.paused is False
+            ):
+                if self._pause_started_ns is not None:
+                    self.sent_monotonic_ns += (
+                        now_monotonic_ns - self._pause_started_ns
+                    )
+                self._pause_started_ns = None
+                self._paused = False
+                self._control_started_ns = None
+                self.journal.transition(
+                    self.command_id,
+                    "executing",
+                    evidence="10003 and 10004 confirmed resumed",
+                )
+                return "executing"
+            if self._control_deadline_expired(now_monotonic_ns):
+                self.request_stop(
+                    reason=(
+                        "resume confirmation deadline expired: 10003 and 10004 "
+                        "did not agree"
+                    ),
+                    now_monotonic_ns=now_monotonic_ns,
+                )
+                return (
+                    "stopping"
+                    if self.stop_delivery == "sent"
+                    else "stop_unconfirmed"
+                )
+            return "resuming"
         elapsed_ms = (now_monotonic_ns - self.sent_monotonic_ns) / 1_000_000
         if elapsed_ms > self.timing.motion_ms:
             self.request_stop(reason="motion deadline expired", now_monotonic_ns=now_monotonic_ns)
@@ -554,6 +643,96 @@ class LocalMotionTrial:
             motion_stop=MotionStopConfirmation.UNCONFIRMED,
         )
 
+    def request_authenticated_pause(
+        self,
+        control_command_id: str,
+        *,
+        target_command_id: str,
+        authenticated: bool,
+        now_monotonic_ns: int | None = None,
+    ) -> bool:
+        validate_identifier(control_command_id)
+        if not authenticated or target_command_id != self.command_id:
+            raise PermissionError("pause requires the authenticated active motion")
+        previous = self._control_requests.get(control_command_id)
+        if previous is not None:
+            return previous in {"pausing", "paused"}
+        if self.command_id is None:
+            return False
+        record = self.journal.record(self.command_id)
+        if record is None or record["state"] not in {"accepted", "executing"}:
+            return False
+        now_monotonic_ns = (
+            time.monotonic_ns()
+            if now_monotonic_ns is None
+            else now_monotonic_ns
+        )
+        self.journal.transition(
+            self.command_id,
+            "pausing",
+            evidence=f"authenticated pause requested: {control_command_id}",
+        )
+        self._control_requests[control_command_id] = "pausing"
+        self._control_started_ns = now_monotonic_ns
+        try:
+            accepted = self.client.pause_motion()
+        except Exception:
+            self.request_stop(reason="GrpInterrupt outcome unknown")
+            raise
+        if not accepted:
+            self.request_stop(reason="controller rejected GrpInterrupt")
+            return False
+        return True
+
+    def request_authenticated_resume(
+        self,
+        control_command_id: str,
+        *,
+        target_command_id: str,
+        authenticated: bool,
+        now_monotonic_ns: int | None = None,
+    ) -> bool:
+        validate_identifier(control_command_id)
+        if not authenticated or target_command_id != self.command_id:
+            raise PermissionError("resume requires the authenticated paused motion")
+        previous = self._control_requests.get(control_command_id)
+        if previous is not None:
+            return previous in {"resuming", "resumed"}
+        if self.command_id is None:
+            return False
+        record = self.journal.record(self.command_id)
+        if record is None or record["state"] != "paused":
+            return False
+        now_monotonic_ns = (
+            time.monotonic_ns()
+            if now_monotonic_ns is None
+            else now_monotonic_ns
+        )
+        self.journal.transition(
+            self.command_id,
+            "resuming",
+            evidence=f"authenticated resume requested: {control_command_id}",
+        )
+        self._control_requests[control_command_id] = "resuming"
+        self._control_started_ns = now_monotonic_ns
+        try:
+            accepted = self.client.resume_motion()
+        except Exception:
+            self.request_stop(reason="GrpContinue outcome unknown")
+            raise
+        if not accepted:
+            self.request_stop(reason="controller rejected GrpContinue")
+            return False
+        return True
+
+    def _control_deadline_expired(self, now_monotonic_ns: int) -> bool:
+        return bool(
+            self._control_started_ns is not None
+            and (
+                now_monotonic_ns - self._control_started_ns
+            ) / 1_000_000 > self.timing.stop_confirmation_ms
+        )
+
     def _observe_stop(self, sample: RobotTelemetry, now_ns: int) -> str:
         if self.command_id is None or self.stop_monotonic_ns is None:
             raise JournalError("stop confirmation has no owned command")
@@ -604,6 +783,17 @@ class LocalMotionTrial:
                     self.command_id, "stop_unconfirmed",
                     evidence=self._stop_evidence("no fresh stop confirmation"),
                 )
+        elif record["state"] in {"pausing", "resuming"} and (
+            self._control_deadline_expired(now_monotonic_ns)
+        ):
+            operation = "pause" if record["state"] == "pausing" else "resume"
+            self.request_stop(
+                reason=(
+                    f"{operation} confirmation deadline expired without "
+                    "10003/10004 agreement"
+                ),
+                now_monotonic_ns=now_monotonic_ns,
+            )
         elif (
             self.last_feedback_monotonic_ns is not None
             and (now_monotonic_ns - self.last_feedback_monotonic_ns) / 1_000_000 > self.approval.state_stale_ms
@@ -612,7 +802,7 @@ class LocalMotionTrial:
                 reason="feedback watchdog expired without a fresh sample",
                 now_monotonic_ns=now_monotonic_ns,
             )
-        elif (
+        elif record["state"] not in {"pausing", "paused", "resuming"} and (
             self.sent_monotonic_ns is not None
             and (now_monotonic_ns - self.sent_monotonic_ns) / 1_000_000 > self.timing.motion_ms
         ):

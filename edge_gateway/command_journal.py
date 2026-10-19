@@ -17,15 +17,19 @@ import time
 from .huayan.command_codec import validate_identifier
 
 _STATES = frozenset({
-    "prepared", "send_started", "accepted", "executing", "stopping",
+    "prepared", "send_started", "accepted", "executing", "pausing",
+    "paused", "resuming", "stopping",
     "succeeded", "stopped", "not_sent", "rejected", "unknown", "stop_unconfirmed",
 })
 _TERMINAL = frozenset({"succeeded", "stopped", "not_sent", "rejected"})
 _TRANSITIONS = {
     "prepared": {"send_started", "not_sent"},
     "send_started": {"accepted", "rejected", "unknown", "stopping"},
-    "accepted": {"executing", "stopping", "unknown"},
-    "executing": {"succeeded", "stopping", "unknown"},
+    "accepted": {"executing", "pausing", "stopping", "unknown"},
+    "executing": {"succeeded", "pausing", "stopping", "unknown"},
+    "pausing": {"paused", "stopping", "unknown"},
+    "paused": {"resuming", "stopping", "unknown"},
+    "resuming": {"executing", "pausing", "stopping", "unknown"},
     "stopping": {"stopped", "stop_unconfirmed", "unknown"},
     "unknown": {"stopping", "stopped"},
     "stop_unconfirmed": {"stopping", "stopped"},

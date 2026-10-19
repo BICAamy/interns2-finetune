@@ -263,6 +263,15 @@ class EntryPointReachEnv(SofaEnv):
     def stop(self) -> RobotState:
         return self.controller.stop()
 
+    def pause(self) -> RobotState:
+        return self.controller.pause()
+
+    def resume(self) -> RobotState:
+        return self.controller.resume()
+
+    def clear_estop(self) -> RobotState:
+        return self.controller.clear_estop()
+
     def emergency_stop(self) -> RobotState:
         return self.controller.emergency_stop()
 

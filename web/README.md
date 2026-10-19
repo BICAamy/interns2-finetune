@@ -13,7 +13,7 @@
 - 本地 `faster-whisper-small` 非流式转写，最终转写、置信度和延迟可见；
 - 普通语音后端复用文本解析，“停止/急停”精确短语走快速通道；
 - 原始 InternS2 工具参数、规范化命令、坐标、TCP 和时间线；
-- 取消待确认任务、停止、急停和复位；
+- 取消待确认任务、暂停/继续、紧急停止和运动式复位；
 - 同源代理 SOFA MJPEG，浏览器不接触仿真服务地址；
 - 默认 Z-up 正视相机，支持左键旋转、右键平移、滚轮缩放和双击回正；
 - 提供正视、左视、右视、俯视、等轴测五个确定性预设视角；
@@ -35,8 +35,10 @@ POST /api/sessions/{session_id}/commands/speech
 POST /api/sessions/{session_id}/confirm
 POST /api/sessions/{session_id}/cancel
 POST /api/sessions/{session_id}/stop
+POST /api/sessions/{session_id}/resume
 POST /api/sessions/{session_id}/estop
-POST /api/sessions/{session_id}/reset-estop
+POST /api/sessions/{session_id}/reset
+# /reset-estop 仅作为旧客户端兼容别名，行为与 /reset 相同
 GET  /api/sessions/{session_id}/simulation/telemetry
 GET  /api/sessions/{session_id}/simulation/camera
 PUT  /api/sessions/{session_id}/simulation/camera

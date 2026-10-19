@@ -14,7 +14,8 @@ from .command_codec import CommandFrameDecoder, decode_reply, encode_read
 from .models import ProtocolError, ReadCommand, ResponseUnknown
 from .motion_codec import (
     JointWaypoint, LinearWaypoint, decode_write_reply, encode_group_enabled,
-    encode_software_stop, encode_speed_override,
+    encode_group_continue, encode_group_interrupt, encode_software_stop,
+    encode_speed_override,
 )
 
 
@@ -99,6 +100,16 @@ class FakeMotionClient:
 
     def software_stop(self) -> bool:
         return decode_write_reply(self._exchange(encode_software_stop()), command="GrpStop")
+
+    def pause_motion(self) -> bool:
+        return decode_write_reply(
+            self._exchange(encode_group_interrupt()), command="GrpInterrupt",
+        )
+
+    def resume_motion(self) -> bool:
+        return decode_write_reply(
+            self._exchange(encode_group_continue()), command="GrpContinue",
+        )
 
     def current_waypoint_id(self) -> str | None:
         frame = self._exchange(encode_read(ReadCommand.CURRENT_WAYPOINT_ID))

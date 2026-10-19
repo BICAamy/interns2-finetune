@@ -141,6 +141,13 @@ class SessionStore:
             if record is None:
                 return
             record.live_tool_events.append(event.model_dump(mode="json"))
+            # A motion worker may emit another progress event after the pause
+            # acknowledgement.  Keep the operator-visible paused state until
+            # an explicit resume or replacement command changes it.
+            if record.status == SessionStatus.PAUSED:
+                record.revision += 1
+                record.updated_at_ms = _now_ms()
+                return
             if event.tool == ToolName.ROBOT_MOVE_TO_ENTRY:
                 record.status = (
                     SessionStatus.MOVING_TO_ENTRY

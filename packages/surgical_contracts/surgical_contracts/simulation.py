@@ -14,10 +14,13 @@ from .robot import RobotState, ToolStatus
 
 class RobotCommandKind(str, Enum):
     RESET = "reset"
+    CLEAR_ESTOP = "clear_estop"
     MOVE_TO_ENTRY = "move_to_entry"
     MOVE_RELATIVE = "move_relative"
     MOVE_SEQUENCE = "move_sequence"
     STOP = "stop"
+    PAUSE = "pause"
+    RESUME = "resume"
     ESTOP = "estop"
     SET_ENABLED = "set_enabled"
 
@@ -87,6 +90,7 @@ class SimulationCameraState(ContractModel):
 class CommandExecutionStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
+    PAUSED = "paused"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     REJECTED = "rejected"

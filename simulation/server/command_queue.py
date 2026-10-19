@@ -9,7 +9,13 @@ from typing import Any
 from surgical_contracts import RobotCommandKind
 
 
-URGENT_COMMANDS = {RobotCommandKind.STOP, RobotCommandKind.ESTOP}
+URGENT_COMMANDS = {
+    RobotCommandKind.STOP,
+    RobotCommandKind.PAUSE,
+    RobotCommandKind.RESUME,
+    RobotCommandKind.ESTOP,
+    RobotCommandKind.CLEAR_ESTOP,
+}
 
 
 @dataclass(frozen=True)

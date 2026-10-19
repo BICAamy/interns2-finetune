@@ -131,6 +131,41 @@ def test_simulation_provider_preserves_legacy_routes_and_mjpeg(monkeypatch) -> N
     assert worker.closed
 
 
+@pytest.mark.parametrize(
+    ("path", "operation"),
+    (
+        ("/v1/commands/pause", "resume"),
+        ("/v1/commands/resume", "pause"),
+    ),
+)
+@pytest.mark.parametrize("mode", ("simulation", "real"))
+def test_motion_control_route_rejects_mismatched_operation(
+    path: str,
+    operation: str,
+    mode: str,
+) -> None:
+    worker = StubSimulationWorker() if mode == "simulation" else None
+    app = (
+        create_app(provider=SimulationProvider(worker))
+        if worker is not None
+        else create_app(mode="real")
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            path,
+            json={
+                "command_id": f"bad-{mode}-{operation}",
+                "target_command_id": "target-motion",
+                "operation": operation,
+            },
+        )
+    assert response.status_code == 422
+    assert response.json()["code"] == "INVALID_COMMAND_SCHEMA"
+    assert response.json()["command_id"] == f"bad-{mode}-{operation}"
+    if worker is not None:
+        assert not worker.records
+
+
 def test_real_stub_is_disconnected_and_rejects_every_command() -> None:
     with TestClient(create_app(mode="real")) as client:
         health = client.get("/health")

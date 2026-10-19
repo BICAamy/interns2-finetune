@@ -29,6 +29,7 @@ class SessionStatus(str, Enum):
     PLAN_READY = "plan_ready"
     COMPLETED = "completed"
     STOPPING = "stopping"
+    PAUSED = "paused"
     STOPPED = "stopped"
     ESTOP = "estop"
     CANCELLED = "cancelled"
@@ -48,6 +49,7 @@ STATUS_LABELS: dict[SessionStatus, str] = {
     SessionStatus.PLAN_READY: "路径规划结果已返回；当前版本未执行穿刺",
     SessionStatus.COMPLETED: "机械臂任务已完成；当前版本未执行穿刺",
     SessionStatus.STOPPING: "正在停止机械臂",
+    SessionStatus.PAUSED: "任务已暂停，可继续或输入新任务",
     SessionStatus.STOPPED: "机械臂已停止",
     SessionStatus.ESTOP: "机械臂处于急停状态",
     SessionStatus.CANCELLED: "待确认任务已取消",

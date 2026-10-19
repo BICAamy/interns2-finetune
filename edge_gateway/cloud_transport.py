@@ -5,6 +5,7 @@ import ipaddress
 import secrets
 import threading
 import time
+from collections import deque
 from typing import Callable
 from urllib.parse import urlparse
 
@@ -118,10 +119,19 @@ def telemetry_from_sample(
         actual_pose_robot_base=pose,
         motion_state=(
             MotionState.FAILED if sample.error_code else
+            MotionState.PAUSED if (
+                (robot_status.paused if robot_status is not None else sample.paused)
+                or sample.fsm_code == 32
+            ) else
             MotionState.MOVING if sample.moving or sample.fsm_code in (25, 26, 27, 47)
             else MotionState.IDLE
         ),
-        potentially_moving=sample.moving or sample.fsm_code in (25, 26, 27, 47),
+        potentially_moving=(
+            sample.moving
+            or sample.paused
+            or sample.fsm_code in (25, 26, 27, 32, 47)
+            or (robot_status.paused if robot_status is not None else False)
+        ),
         fsm_code=sample.fsm_code,
         enabled=(robot_status.enabled if robot_status is not None else sample.enabled),
         electrified=(robot_status.electrified if robot_status is not None else None),
@@ -201,6 +211,21 @@ class CloudTransport:
         self._stop_thread: threading.Thread | None = None
         self._stop_result: GatewayCommandResultFrame | None = None
         self._active_stop_id: str | None = None
+        self._priority_threads: dict[str, threading.Thread] = {}
+        self._priority_results: deque[GatewayCommandResultFrame] = deque()
+        self._priority_kinds: dict[str, GatewayCommandKind] = {}
+
+    def _sync_priority_compat_locked(self) -> None:
+        """Keep the historical single-slot attributes useful to diagnostics."""
+        self._stop_result = (
+            self._priority_results[0] if self._priority_results else None
+        )
+        self._active_stop_id = next(iter(self._priority_kinds), None)
+        self._stop_thread = (
+            self._priority_threads.get(self._active_stop_id)
+            if self._active_stop_id is not None
+            else None
+        )
 
     def connect(self, *, device_sn: str, robot_model: str, package_version: str) -> str:
         from websockets.sync.client import connect
@@ -210,15 +235,12 @@ class CloudTransport:
         with self._command_lock:
             if (
                 self._active_command_id is not None
-                or self._active_stop_id is not None
+                or bool(self._priority_kinds)
                 or (
                     self._command_thread is not None
                     and self._command_thread.is_alive()
                 )
-                or (
-                    self._stop_thread is not None
-                    and self._stop_thread.is_alive()
-                )
+                or any(thread.is_alive() for thread in self._priority_threads.values())
             ):
                 raise RuntimeError(
                     "previous remote command thread has not exited"
@@ -280,25 +302,27 @@ class CloudTransport:
         # motion command) until the old command handler has fully unwound.
         with self._command_lock:
             command_thread = self._command_thread
-            stop_thread = self._stop_thread
+            priority_threads = tuple(self._priority_threads.values())
         if (
             command_thread is not None
             and command_thread is not threading.current_thread()
         ):
             while command_thread.is_alive():
                 command_thread.join(timeout=0.1)
-        if stop_thread is not None and stop_thread is not threading.current_thread():
-            while stop_thread.is_alive():
-                stop_thread.join(timeout=0.1)
+        for priority_thread in priority_threads:
+            if priority_thread is threading.current_thread():
+                continue
+            while priority_thread.is_alive():
+                priority_thread.join(timeout=0.1)
         with self._command_lock:
             self._command_result = None
             self._active_command_id = None
-            self._stop_result = None
-            self._active_stop_id = None
+            self._priority_results.clear()
+            self._priority_kinds.clear()
+            self._priority_threads.clear()
             if self._command_thread is command_thread:
                 self._command_thread = None
-            if self._stop_thread is stop_thread:
-                self._stop_thread = None
+            self._sync_priority_compat_locked()
 
     def _run_command(
         self,
@@ -342,16 +366,26 @@ class CloudTransport:
                     ),
                 )
             with self._command_lock:
-                active_id = (
-                    self._active_stop_id if is_stop else self._active_command_id
+                command_id = frame.envelope.command_id
+                still_active = (
+                    command_id in self._priority_kinds
+                    if is_stop
+                    else self._active_command_id == command_id
                 )
-                if self.session_id == session_id and active_id == frame.envelope.command_id:
+                if self.session_id == session_id and still_active:
                     result_frame = GatewayCommandResultFrame(
                         fingerprint=frame.fingerprint,
                         result=result,
                     )
                     if is_stop:
-                        self._stop_result = result_frame
+                        if (
+                            frame.envelope.command_kind
+                            == GatewayCommandKind.SOFTWARE_STOP_REQUEST
+                        ):
+                            self._priority_results.appendleft(result_frame)
+                        else:
+                            self._priority_results.append(result_frame)
+                        self._sync_priority_compat_locked()
                     else:
                         self._command_result = result_frame
         finally:
@@ -372,8 +406,12 @@ class CloudTransport:
         if self._connection is None:
             raise RuntimeError("cloud is disconnected")
         with self._command_lock:
-            is_stop = self._stop_result is not None
-            frame = self._stop_result if is_stop else self._command_result
+            is_stop = bool(self._priority_results)
+            frame = (
+                self._priority_results[0]
+                if is_stop
+                else self._command_result
+            )
         if frame is None:
             return
         self._connection.send(frame.model_dump_json())
@@ -384,10 +422,14 @@ class CloudTransport:
         ):
             raise ValueError("gateway command result acknowledgement is missing")
         with self._command_lock:
-            if is_stop and self._stop_result == frame:
-                self._stop_result = None
-                self._active_stop_id = None
-                self._stop_thread = None
+            if is_stop and self._priority_results and (
+                self._priority_results[0] == frame
+            ):
+                self._priority_results.popleft()
+                command_id = frame.result.command_id
+                self._priority_kinds.pop(command_id, None)
+                self._priority_threads.pop(command_id, None)
+                self._sync_priority_compat_locked()
             elif not is_stop and self._command_result == frame:
                 self._command_result = None
                 self._active_command_id = None
@@ -402,10 +444,16 @@ class CloudTransport:
             response = parse_wire_json(self._connection.recv(timeout=3))
             if response.get("type") == "command":
                 frame = GatewayCommandFrame.model_validate(response)
-                is_stop = (
-                    frame.envelope.command_kind
-                    == GatewayCommandKind.SOFTWARE_STOP_REQUEST
-                )
+                # Pause, resume and hard software-stop must run beside the
+                # long-lived motion worker and share that worker's owned
+                # 10003 client.  Pause/resume are serialized, while a hard
+                # stop is always admitted and may overtake a control worker
+                # which is waiting for dual-channel confirmation.
+                is_stop = frame.envelope.command_kind in {
+                    GatewayCommandKind.SOFTWARE_STOP_REQUEST,
+                    GatewayCommandKind.PAUSE_REQUEST,
+                    GatewayCommandKind.RESUME_REQUEST,
+                }
                 handler = self.stop_handler if is_stop else self.command_handler
                 if handler is None:
                     rejection = self._rejections.reject(
@@ -416,8 +464,14 @@ class CloudTransport:
                     )
                 with self._command_lock:
                     if is_stop:
-                        if self._active_stop_id is not None:
-                            raise RuntimeError("gateway already has an active software stop")
+                        is_hard_stop = (
+                            frame.envelope.command_kind
+                            == GatewayCommandKind.SOFTWARE_STOP_REQUEST
+                        )
+                        if self._priority_kinds and not is_hard_stop:
+                            raise RuntimeError(
+                                "gateway already has an active pause/resume control"
+                            )
                     elif self._active_command_id is not None:
                         raise RuntimeError("gateway already has an active remote command")
                     session_id = self.session_id
@@ -426,7 +480,10 @@ class CloudTransport:
                             "command arrived without an active gateway session"
                         )
                     if is_stop:
-                        self._active_stop_id = frame.envelope.command_id
+                        self._priority_kinds[frame.envelope.command_id] = (
+                            frame.envelope.command_kind
+                        )
+                        self._sync_priority_compat_locked()
                     else:
                         self._active_command_id = frame.envelope.command_id
                     received_at_monotonic_ns = time.monotonic_ns()
@@ -455,11 +512,23 @@ class CloudTransport:
                     with self._command_lock:
                         if (
                             is_stop
-                            and self._active_stop_id == frame.envelope.command_id
+                            and frame.envelope.command_id in self._priority_kinds
                         ):
-                            self._active_stop_id = None
-                            self._stop_thread = None
-                            self._stop_result = None
+                            self._priority_kinds.pop(
+                                frame.envelope.command_id,
+                                None,
+                            )
+                            self._priority_threads.pop(
+                                frame.envelope.command_id,
+                                None,
+                            )
+                            self._priority_results = deque(
+                                result
+                                for result in self._priority_results
+                                if result.result.command_id
+                                != frame.envelope.command_id
+                            )
+                            self._sync_priority_compat_locked()
                         elif self._active_command_id == frame.envelope.command_id:
                             self._active_command_id = None
                             self._command_thread = None
@@ -469,8 +538,11 @@ class CloudTransport:
                     if (
                         self.session_id != session_id
                         or (
-                            self._active_stop_id if is_stop else self._active_command_id
-                        ) != frame.envelope.command_id
+                            frame.envelope.command_id not in self._priority_kinds
+                            if is_stop
+                            else self._active_command_id
+                            != frame.envelope.command_id
+                        )
                     ):
                         raise RuntimeError(
                             "gateway session changed before command authorization"
@@ -486,7 +558,10 @@ class CloudTransport:
                         daemon=True,
                     )
                     if is_stop:
-                        self._stop_thread = worker
+                        self._priority_threads[
+                            frame.envelope.command_id
+                        ] = worker
+                        self._sync_priority_compat_locked()
                     else:
                         self._command_thread = worker
                     worker.start()

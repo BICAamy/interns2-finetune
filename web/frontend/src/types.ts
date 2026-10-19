@@ -10,6 +10,7 @@ export type SessionStatus =
   | "planning"
   | "plan_ready"
   | "completed"
+  | "paused"
   | "stopping"
   | "stopped"
   | "estop"

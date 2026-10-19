@@ -20,6 +20,7 @@ from surgical_contracts import (
     MoveSequenceResult,
     MoveToEntryRequest,
     MoveToEntryResult,
+    MotionControlRequest,
     ResetSimulationRequest,
     RobotActionRequest,
     RobotActionResult,
@@ -324,6 +325,30 @@ class RobotRuntimeHTTPController:
             command_id or self._command_id_factory(),
         )
 
+    def pause(
+        self,
+        target_command_id: str,
+        command_id: str | None = None,
+    ) -> RobotState:
+        return self._motion_control(
+            "/v1/commands/pause",
+            RobotCommandKind.PAUSE,
+            target_command_id,
+            command_id or self._command_id_factory(),
+        )
+
+    def resume(
+        self,
+        target_command_id: str,
+        command_id: str | None = None,
+    ) -> RobotState:
+        return self._motion_control(
+            "/v1/commands/resume",
+            RobotCommandKind.RESUME,
+            target_command_id,
+            command_id or self._command_id_factory(),
+        )
+
     def emergency_stop(self, command_id: str | None = None) -> RobotState:
         return self._action(
             "/v1/commands/estop",
@@ -340,6 +365,28 @@ class RobotRuntimeHTTPController:
             request,
         )
         return self._action_state(record, RobotCommandKind.RESET)
+
+    def clear_estop(self, command_id: str | None = None) -> RobotState:
+        return self._action(
+            "/v1/commands/clear-estop",
+            RobotCommandKind.CLEAR_ESTOP,
+            command_id or self._command_id_factory(),
+        )
+
+    def _motion_control(
+        self,
+        path: str,
+        kind: RobotCommandKind,
+        target_command_id: str,
+        command_id: str,
+    ) -> RobotState:
+        request = MotionControlRequest(
+            command_id=command_id,
+            target_command_id=target_command_id,
+            operation=("pause" if kind == RobotCommandKind.PAUSE else "resume"),
+        )
+        record = self._submit_and_wait(path, kind, request)
+        return self._action_state(record, kind)
 
     def _action(
         self,
@@ -384,6 +431,11 @@ class RobotRuntimeHTTPController:
         self._validate_record(record, request.command_id, kind)
         deadline = self._clock() + self.command_timeout_s
         while record.status not in _TERMINAL:
+            if record.status == CommandExecutionStatus.PAUSED:
+                # Time deliberately spent paused by the operator does not
+                # consume the execution deadline. Polling still detects a
+                # disconnected runtime or a hard-stop cancellation.
+                deadline = self._clock() + self.command_timeout_s
             if self._clock() >= deadline:
                 self._submit_timeout_stop(request.command_id)
                 raise RobotSimulationTimeoutError(

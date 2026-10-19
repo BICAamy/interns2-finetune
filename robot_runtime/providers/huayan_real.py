@@ -154,6 +154,11 @@ class HuayanRealProvider:
             return self.remote_motion.set_enabled(request)
         if self.remote_motion is not None and kind == RobotCommandKind.STOP:
             return self.remote_motion.software_stop(request)
+        if (
+            self.remote_motion is not None
+            and kind in {RobotCommandKind.PAUSE, RobotCommandKind.RESUME}
+        ):
+            return self.remote_motion.motion_control(request)
         record, _created = self._commands.reject(
             kind, request, message="Requested real robot operation is not supported"
         )

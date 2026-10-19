@@ -162,9 +162,19 @@ async def stop(session_id: str, request: Request) -> SessionSnapshot:
     return await _runtime(request).stop(session_id, emergency=False)
 
 
+@router.post("/api/sessions/{session_id}/resume", response_model=SessionSnapshot)
+async def resume(session_id: str, request: Request) -> SessionSnapshot:
+    return await _runtime(request).resume(session_id)
+
+
 @router.post("/api/sessions/{session_id}/estop", response_model=SessionSnapshot)
 async def estop(session_id: str, request: Request) -> SessionSnapshot:
     return await _runtime(request).stop(session_id, emergency=True)
+
+
+@router.post("/api/sessions/{session_id}/reset", response_model=SessionSnapshot)
+async def reset(session_id: str, request: Request) -> SessionSnapshot:
+    return await _runtime(request).reset(session_id)
 
 
 @router.post(

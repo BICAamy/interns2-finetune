@@ -30,6 +30,7 @@ class TrajectoryClearResult(ContractModel):
 class MotionState(str, Enum):
     IDLE = "idle"
     MOVING = "moving"
+    PAUSED = "paused"
     AT_ENTRY = "at_entry"
     STOPPED = "stopped"
     ESTOP = "estop"

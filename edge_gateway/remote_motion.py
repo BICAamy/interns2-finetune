@@ -54,7 +54,7 @@ class RemoteMotionExecutor:
         trial_factory: Callable[[], LocalMotionTrial],
         snapshot: Callable[[], RobotTelemetry],
         readback: Callable[[], ControllerReadback],
-        feedback: Callable[[], tuple[RobotTelemetry, str | None]],
+        feedback: Callable[[], object],
         poll_interval_s: float = 0.02,
         local_preflight_timeout_ms: int = 120_000,
     ) -> None:
@@ -71,9 +71,16 @@ class RemoteMotionExecutor:
         self._used_fingerprints: set[str] = set()
         self._active = False
         self._trial_lock = threading.RLock()
+        self._control_condition = threading.Condition(self._trial_lock)
         self._active_trial: LocalMotionTrial | None = None
+        self._active_command_id: str | None = None
+        self._preflight_paused = False
+        self._abort_before_send = False
+        self._abort_reason: str | None = None
         self._terminal_state: str | None = None
         self._done = threading.Event()
+        self._paused_confirmed = threading.Event()
+        self._resumed_confirmed = threading.Event()
 
     def execute(
         self,
@@ -109,9 +116,16 @@ class RemoteMotionExecutor:
                 "Mac-local preflight deadline expired before execution began",
             )
 
-        self._active = True
-        self._terminal_state = None
-        self._done.clear()
+        with self._control_condition:
+            self._active = True
+            self._active_command_id = envelope.command_id
+            self._preflight_paused = False
+            self._abort_before_send = False
+            self._abort_reason = None
+            self._terminal_state = None
+            self._done.clear()
+            self._paused_confirmed.clear()
+            self._resumed_confirmed.clear()
         self._used_fingerprints.add(fingerprint)
         try:
             if envelope.command_kind != GatewayCommandKind.MOVE_SEQUENCE:
@@ -131,8 +145,12 @@ class RemoteMotionExecutor:
         except Exception as exc:
             return self._exception_failure(envelope, exc)
         finally:
-            self._active = False
-            self._done.set()
+            with self._control_condition:
+                self._active = False
+                self._active_command_id = None
+                self._preflight_paused = False
+                self._done.set()
+                self._control_condition.notify_all()
 
     def request_authenticated_stop(
         self,
@@ -149,16 +167,44 @@ class RemoteMotionExecutor:
 
         if timeout_s <= 0:
             raise ValueError("software stop timeout must be positive")
-        with self._trial_lock:
+        with self._control_condition:
             trial = self._active_trial
-            if trial is None or not trial.potentially_moving:
+            if not self._active:
                 return SoftwareStopResult(
                     delivery=StopDelivery.NOT_SENT,
                     motion_stop=MotionStopConfirmation.UNCONFIRMED,
                 )
-            requested = trial.request_authenticated_stop(
-                stop_command_id,
-                authenticated=True,
+            # A hard stop also cancels a command which is still in Mac-local
+            # preflight.  No controller stop is needed in that case, but the
+            # execution thread must acknowledge that it exited without ever
+            # sending a WayPoint.
+            self._abort_before_send = True
+            self._abort_reason = (
+                f"authenticated software stop requested: {stop_command_id}"
+            )
+            self._preflight_paused = False
+            self._control_condition.notify_all()
+            if trial is None or not trial.potentially_moving:
+                cancel_before_send = True
+            else:
+                cancel_before_send = False
+                requested = trial.request_authenticated_stop(
+                    stop_command_id,
+                    authenticated=True,
+                )
+        if cancel_before_send:
+            if not self._done.wait(timeout_s):
+                return SoftwareStopResult(
+                    delivery=StopDelivery.NOT_SENT,
+                    motion_stop=MotionStopConfirmation.UNCONFIRMED,
+                )
+            return SoftwareStopResult(
+                delivery=StopDelivery.NOT_SENT,
+                motion_stop=(
+                    MotionStopConfirmation.CONFIRMED
+                    if self._terminal_state == "cancelled_before_send"
+                    else MotionStopConfirmation.UNCONFIRMED
+                ),
             )
         if requested.delivery != StopDelivery.SENT:
             return requested
@@ -174,6 +220,143 @@ class RemoteMotionExecutor:
                 if self._terminal_state == "stopped"
                 else MotionStopConfirmation.UNCONFIRMED
             ),
+        )
+
+    def request_authenticated_pause(
+        self,
+        control_command_id: str,
+        *,
+        target_command_id: str,
+        timeout_s: float,
+    ) -> bool:
+        if timeout_s <= 0:
+            raise ValueError("pause timeout must be positive")
+        self._paused_confirmed.clear()
+        with self._control_condition:
+            if (
+                not self._active
+                or self._active_command_id != target_command_id
+                or self._abort_before_send
+            ):
+                return False
+            trial = self._active_trial
+            if trial is None or trial.command_id is None:
+                # The server has already authenticated this exact command,
+                # but the Mac is still checking its path.  Treat it as
+                # logically paused and keep the final send gate closed.
+                self._preflight_paused = True
+                self._paused_confirmed.set()
+                self._control_condition.notify_all()
+                return True
+            if trial.command_id != target_command_id:
+                return False
+            if not trial.request_authenticated_pause(
+                control_command_id,
+                target_command_id=target_command_id,
+                authenticated=True,
+            ):
+                return False
+        return self._wait_for_control_confirmation(
+            self._paused_confirmed,
+            timeout_s,
+        )
+
+    def request_authenticated_resume(
+        self,
+        control_command_id: str,
+        *,
+        target_command_id: str,
+        timeout_s: float,
+    ) -> bool:
+        if timeout_s <= 0:
+            raise ValueError("resume timeout must be positive")
+        self._resumed_confirmed.clear()
+        with self._control_condition:
+            if (
+                not self._active
+                or self._active_command_id != target_command_id
+                or self._abort_before_send
+            ):
+                return False
+            trial = self._active_trial
+            if self._preflight_paused and (
+                trial is None or trial.command_id is None
+            ):
+                self._preflight_paused = False
+                self._resumed_confirmed.set()
+                self._control_condition.notify_all()
+                return True
+            if trial is None or trial.command_id != target_command_id:
+                return False
+            if not trial.request_authenticated_resume(
+                control_command_id,
+                target_command_id=target_command_id,
+                authenticated=True,
+            ):
+                return False
+        return self._wait_for_control_confirmation(
+            self._resumed_confirmed,
+            timeout_s,
+        )
+
+    def _wait_for_control_confirmation(
+        self,
+        event: threading.Event,
+        timeout_s: float,
+    ) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            with self._trial_lock:
+                if self._abort_before_send or self._done.is_set():
+                    return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if event.wait(min(remaining, self._poll_interval_s)):
+                with self._trial_lock:
+                    return not self._abort_before_send
+
+    def _check_preflight_control(
+        self,
+        local_deadline_monotonic_ns: int,
+        *,
+        wait_while_paused: bool,
+    ) -> None:
+        """Fail before the first WayPoint or hold it behind a logical pause."""
+        with self._control_condition:
+            while wait_while_paused and self._preflight_paused:
+                if self._abort_before_send:
+                    break
+                remaining_ns = local_deadline_monotonic_ns - time.monotonic_ns()
+                if remaining_ns <= 0:
+                    self._abort_before_send = True
+                    self._abort_reason = (
+                        "Mac-local preflight deadline expired while paused"
+                    )
+                    break
+                self._control_condition.wait(
+                    timeout=min(0.1, remaining_ns / 1_000_000_000)
+                )
+            if self._abort_before_send:
+                self._terminal_state = "cancelled_before_send"
+                raise RuntimeError(
+                    self._abort_reason
+                    or "remote motion was cancelled before WayPoint submission"
+                )
+
+    def _feedback_sample(
+        self,
+    ) -> tuple[RobotTelemetry, str | None, bool | None, bool | None]:
+        value = self._feedback()
+        if isinstance(value, tuple):
+            sample, debug = value
+            return sample, debug, sample.paused, sample.paused
+        sample = getattr(value, "telemetry")
+        return (
+            sample,
+            getattr(value, "debug_text", None),
+            getattr(value, "paused_10003", sample.paused),
+            getattr(value, "paused_10004", sample.paused),
         )
 
     def _execute_continuous_sequence(
@@ -203,13 +386,18 @@ class RemoteMotionExecutor:
                 expires_monotonic_ns=expires_ns,
             )
             trial = self._trial_factory()
-            with self._trial_lock:
+            with self._control_condition:
                 self._active_trial = trial
+                self._control_condition.notify_all()
             predicted = start
             planned: list[
                 tuple[RobotCommandEnvelope, RobotTelemetry, PreflightTarget]
             ] = []
             for index, step in enumerate(request.steps):
+                self._check_preflight_control(
+                    local_deadline_monotonic_ns,
+                    wait_while_paused=False,
+                )
                 if time.monotonic_ns() >= expires_ns:
                     raise TimeoutError(
                         "Mac-local preflight deadline expired while checking sequence"
@@ -292,7 +480,11 @@ class RemoteMotionExecutor:
             self._verify_sequence_start_unchanged(
                 start, readback, fresh, fresh_readback, trial,
             )
-            with self._trial_lock:
+            with self._control_condition:
+                self._check_preflight_control(
+                    local_deadline_monotonic_ns,
+                    wait_while_paused=True,
+                )
                 state = trial.submit_preflighted_sequence(
                     envelope,
                     fresh,
@@ -307,9 +499,10 @@ class RemoteMotionExecutor:
                 trial.request_stop(reason="continuous remote sequence failed")
             return self._exception_failure(envelope, exc)
         finally:
-            with self._trial_lock:
+            with self._control_condition:
                 if self._active_trial is trial:
                     self._active_trial = None
+                self._control_condition.notify_all()
 
     def _sequence_child(
         self,
@@ -458,29 +651,78 @@ class RemoteMotionExecutor:
                 expires_monotonic_ns=expires_ns,
             )
             trial = self._trial_factory()
-            with self._trial_lock:
+            with self._control_condition:
                 self._active_trial = trial
-            with self._trial_lock:
-                state = trial.submit(
+                self._control_condition.notify_all()
+
+            # Do the potentially expensive path checks without holding the
+            # control mutex.  A pause or hard stop can therefore reach this
+            # executor while the Mac is still in preflight.  The actual write
+            # remains atomic with the final pause/abort gate below.
+            try:
+                target = preflight_motion(
                     envelope,
                     snapshot,
                     readback,
+                    trial.approval,
                     arm,
                     (lease,),
+                    trial.path_ik,
+                    trial.joint_fk,
                     required_lease_owner="remote",
                     enforce_envelope_deadline=False,
                 )
+            except Exception:
+                arm.revoke()
+                raise
+            waypoint_id = (
+                "F" + hashlib.sha256(envelope.command_id.encode()).hexdigest()[:16]
+            )
+            frame = trial.make_waypoint(
+                envelope,
+                snapshot,
+                target,
+                waypoint_id=waypoint_id,
+                blend_radius_mm=0.0,
+            )
+            if time.monotonic_ns() >= expires_ns:
+                raise TimeoutError(
+                    "Mac-local preflight deadline expired before WayPoint submission"
+                )
+            fresh = self._snapshot()
+            fresh_readback = self._readback()
+            self._verify_sequence_start_unchanged(
+                snapshot,
+                readback,
+                fresh,
+                fresh_readback,
+                trial,
+            )
+            with self._control_condition:
+                self._check_preflight_control(
+                    local_deadline_monotonic_ns,
+                    wait_while_paused=True,
+                )
+                state = trial.submit_preflighted_sequence(
+                    envelope,
+                    fresh,
+                    fresh_readback,
+                    lease,
+                    (frame,),
+                    target,
+                )
             return self._wait_for_trial(
-                envelope, trial, state, snapshot.sequence,
+                envelope, trial, state, fresh.sequence,
             )
         except Exception as exc:
             if trial is not None and trial.potentially_moving:
                 trial.request_stop(reason="remote motion executor failed")
             return self._exception_failure(envelope, exc)
         finally:
-            with self._trial_lock:
+            with self._control_condition:
                 if self._active_trial is trial:
                     self._active_trial = None
+                self._control_condition.notify_all()
 
     def _wait_for_trial(
         self,
@@ -493,14 +735,27 @@ class RemoteMotionExecutor:
             "succeeded", "failed", "rejected", "stopped", "stop_unconfirmed",
         }:
             time.sleep(self._poll_interval_s)
-            sample, debug = self._feedback()
+            sample, debug, paused_10003, paused_10004 = self._feedback_sample()
             if sample.sequence <= last_sequence:
+                with self._trial_lock:
+                    state = trial.watchdog()
                 continue
             last_sequence = sample.sequence
             with self._trial_lock:
-                state = trial.observe(sample, feedback_debug=debug)
+                state = trial.observe(
+                    sample,
+                    feedback_debug=debug,
+                    paused_10003=paused_10003,
+                    paused_10004=paused_10004,
+                )
+            if state == "paused":
+                self._paused_confirmed.set()
+            elif state == "executing" and not trial.paused:
+                self._resumed_confirmed.set()
         self._terminal_state = state
-        final_sample, _debug = self._feedback()
+        final_sample, _debug, _paused_10003, _paused_10004 = (
+            self._feedback_sample()
+        )
         if state == "succeeded":
             prepare_next = getattr(trial.client, "prepare_next_waypoint", None)
             if prepare_next is not None:

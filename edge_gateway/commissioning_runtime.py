@@ -42,6 +42,8 @@ class MotionFeedback:
     telemetry: RobotTelemetry
     moving_10003: bool
     moving_10004: bool
+    paused_10003: bool
+    paused_10004: bool
     fsm_10004: int
 
     @property
@@ -49,6 +51,8 @@ class MotionFeedback:
         return (
             f"moving_10003={self.moving_10003}, "
             f"moving_10004={self.moving_10004}, "
+            f"paused_10003={self.paused_10003}, "
+            f"paused_10004={self.paused_10004}, "
             f"fsm_10004={self.fsm_10004}"
         )
 
@@ -425,6 +429,9 @@ def read_motion_feedback(
         "enabled": state.enabled and sample.enabled,
         "in_position": state.in_position and sample.in_position,
         "moving": state.moving or sample.moving,
+        # Conservative merged value; exact two-channel agreement remains
+        # available on MotionFeedback for pause/resume confirmation.
+        "paused": state.paused or sample.paused,
         "potentially_moving": state.moving or sample.moving or base_telemetry.potentially_moving,
     })
     if telemetry.state_age_ms is None or telemetry.state_age_ms > config.deadlines.state_stale_ms:
@@ -433,6 +440,8 @@ def read_motion_feedback(
         telemetry=telemetry,
         moving_10003=state.moving,
         moving_10004=sample.moving,
+        paused_10003=state.paused,
+        paused_10004=sample.paused,
         fsm_10004=sample.fsm_code,
     )
 

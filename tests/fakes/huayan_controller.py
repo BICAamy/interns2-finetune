@@ -108,6 +108,7 @@ class FakeHuayanController:
         self._state_lock = threading.Lock()
         self._enabled = initial_enabled
         self._moving = initial_moving
+        self._paused = False
         self._override = initial_override
         self._apply_group_state_changes = apply_group_state_changes
         self._simulate_waypoint_motion = simulate_waypoint_motion
@@ -265,7 +266,8 @@ class FakeHuayanController:
                     connection.sendall(b"FakeOnlyIdentity,OK,INTERN-S2-FAKE-MOTION-V1,;")
                 continue
             if name in (
-                "WayPoint", "GrpStop", "GrpEnable", "GrpDisable", "SetOverride",
+                "WayPoint", "GrpStop", "GrpInterrupt", "GrpContinue",
+                "GrpEnable", "GrpDisable", "SetOverride",
             ) and self.accept_fake_motion and not fast:
                 if name == "WayPoint":
                     joint_mode = len(fields) == 25 and fields[19:21] == [b"0", b"1"]
@@ -293,6 +295,10 @@ class FakeHuayanController:
                         target_joints = tuple(float(value) for value in fields[8:14])
                 elif name == "GrpStop":
                     valid = fields == [b"GrpStop", b"0"]
+                elif name == "GrpInterrupt":
+                    valid = fields == [b"GrpInterrupt", b"0"]
+                elif name == "GrpContinue":
+                    valid = fields == [b"GrpContinue", b"0"]
                 elif name == "SetOverride":
                     try:
                         requested_override = float(fields[2])
@@ -341,6 +347,15 @@ class FakeHuayanController:
                         elif name == "GrpStop":
                             self._waypoint_queue.clear()
                             self._moving = False
+                            self._paused = False
+                        elif name == "GrpInterrupt":
+                            if self._moving:
+                                self._moving = False
+                                self._paused = True
+                        elif name == "GrpContinue":
+                            if self._paused:
+                                self._paused = False
+                                self._moving = True
                 if pipelined:
                     return
                 continue
@@ -374,11 +389,13 @@ class FakeHuayanController:
             if action is None:
                 if command == ReadCommand.ROBOT_STATE and self.accept_fake_motion:
                     with self._state_lock:
-                        enabled, moving = self._enabled, self._moving
+                        enabled, moving, paused = (
+                            self._enabled, self._moving, self._paused
+                        )
                     reply = (
                         "ReadRobotState,OK,"
-                        f"{int(moving)},{int(enabled)},0,0,0,{int(moving)},0,0,0,1,1,"
-                        f"{int(not moving)},{int(not moving)},;"
+                        f"{int(moving)},{int(enabled)},0,0,0,0,{int(paused)},0,0,1,1,"
+                        f"{int(not moving and not paused)},{int(not moving and not paused)},;"
                     ).encode("ascii")
                 elif command == ReadCommand.OVERRIDE and self.accept_fake_motion:
                     with self._state_lock:
@@ -426,7 +443,9 @@ class FakeHuayanController:
             document = datasheet_document()
             if self.accept_fake_motion:
                 with self._state_lock:
-                    enabled, moving, override = self._enabled, self._moving, self._override
+                    enabled, moving, paused, override = (
+                        self._enabled, self._moving, self._paused, self._override
+                    )
                     base_pose = self._base_pose
                     joints = self._joint_positions
                 document["PosAndVel"]["Actual_Override"] = str(override)
@@ -441,9 +460,10 @@ class FakeHuayanController:
                 state = document["StateAndError"]
                 state["robotEnabled"] = int(enabled)
                 state["robotMoving"] = int(moving)
-                state["robotState"] = 25 if moving else 33
-                state["robotBlendingDone"] = int(not moving)
-                state["InPos"] = int(not moving)
+                state["robotPaused"] = int(paused)
+                state["robotState"] = 32 if paused else 25 if moving else 33
+                state["robotBlendingDone"] = int(not moving and not paused)
+                state["InPos"] = int(not moving and not paused)
             if frame_index % self._stamp_every_n_frames == 0:
                 source_stamp_ms = time.time_ns() // 1_000_000
             document["MsgTitle"]["Stamp"] = str(source_stamp_ms)
@@ -462,11 +482,20 @@ class FakeHuayanController:
                     self.motion_completion_count += 1
                     return
                 target_pose, target_joints, joint_mode = self._waypoint_queue.popleft()
-            if self._stop.wait(self._waypoint_motion_s):
-                return
-            with self._state_lock:
-                if not self._moving:
+            remaining = self._waypoint_motion_s
+            while remaining > 0 and not self._stop.is_set():
+                started = time.monotonic()
+                if self._stop.wait(min(remaining, 0.01)):
                     return
+                with self._state_lock:
+                    paused = self._paused
+                if not paused:
+                    remaining -= time.monotonic() - started
+            with self._state_lock:
+                if not self._moving and not self._paused:
+                    return
+                if self._paused:
+                    continue
                 if joint_mode:
                     self._joint_positions = target_joints
                 self._base_pose = target_pose

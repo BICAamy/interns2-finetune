@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 LEASE_SECONDS = 2.0
 HOLD_SECONDS = 0.45
 BUSY = {"parsing", "awaiting_confirmation", "executing", "moving_to_entry",
-        "verifying_entry", "moving_relative", "planning", "stopping"}
+        "verifying_entry", "moving_relative", "planning", "stopping", "paused"}
 
 
 class LeaseRequest(BaseModel):

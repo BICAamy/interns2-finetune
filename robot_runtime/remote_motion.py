@@ -30,6 +30,7 @@ from surgical_contracts import (
     MoveRelativeResult,
     MoveSequenceRequest,
     MoveSequenceResult,
+    MotionControlRequest,
     MotionStepKind,
     MoveToEntryRequest,
     MoveToEntryResult,
@@ -378,7 +379,10 @@ class RemoteMotionStore:
                     command_id=request.command_id,
                 )
             if any(
-                record.status == CommandExecutionStatus.RUNNING
+                record.status in {
+                    CommandExecutionStatus.RUNNING,
+                    CommandExecutionStatus.PAUSED,
+                }
                 for record in self._records.values()
             ):
                 raise RobotRuntimeServiceError(
@@ -538,6 +542,98 @@ class RemoteMotionStore:
             self._pending.appendleft(request.command_id)
             return record.model_copy(deep=True), True
 
+    def motion_control(
+        self,
+        request: MotionControlRequest,
+    ) -> tuple[RobotCommandRecord, bool]:
+        """Queue an authenticated pause/resume for one exact active motion."""
+
+        kind = (
+            GatewayCommandKind.PAUSE_REQUEST
+            if request.operation == "pause"
+            else GatewayCommandKind.RESUME_REQUEST
+        )
+        robot_kind = (
+            RobotCommandKind.PAUSE
+            if request.operation == "pause"
+            else RobotCommandKind.RESUME
+        )
+        expected_target_status = (
+            CommandExecutionStatus.RUNNING
+            if request.operation == "pause"
+            else CommandExecutionStatus.PAUSED
+        )
+        with self._lock:
+            existing = self._records.get(request.command_id)
+            request_key = request.model_dump(mode="json")
+            if existing is not None:
+                if existing.request != request_key:
+                    raise RobotRuntimeServiceError(
+                        ErrorCode.COMMAND_CONFLICT,
+                        "command_id was already used with different arguments",
+                        status_code=409,
+                        command_id=request.command_id,
+                    )
+                return existing.model_copy(deep=True), False
+            target = self._records.get(request.target_command_id)
+            if (
+                target is None
+                or target.kind not in {
+                    RobotCommandKind.MOVE_RELATIVE,
+                    RobotCommandKind.MOVE_TO_ENTRY,
+                    RobotCommandKind.MOVE_SEQUENCE,
+                }
+                or target.status != expected_target_status
+            ):
+                raise RobotRuntimeServiceError(
+                    ErrorCode.COMMAND_CONFLICT,
+                    f"motion {request.target_command_id!r} is not available to {request.operation}",
+                    status_code=409,
+                    command_id=request.command_id,
+                )
+            state = self._telemetry()
+            if (
+                state.gateway_session_id is None
+                or state.connections.gateway != LinkState.CONNECTED
+                or state.connections.command_socket != LinkState.CONNECTED
+            ):
+                raise RobotRuntimeServiceError(
+                    ErrorCode.OPERATION_NOT_ENABLED,
+                    "authenticated Mac command channel is unavailable",
+                    status_code=409,
+                    command_id=request.command_id,
+                )
+            now_ms = time.time_ns() // 1_000_000
+            envelope = RobotCommandEnvelope(
+                gateway_session_id=state.gateway_session_id,
+                command_id=request.command_id,
+                command_kind=kind,
+                created_at_ms=now_ms,
+                expires_at_ms=now_ms + self.policy.proposal_ttl_ms,
+                based_on_robot_state_sequence=state.sequence,
+                payload=request,
+            )
+            frame = GatewayCommandFrame(
+                fingerprint=command_fingerprint(envelope),
+                envelope=envelope,
+            )
+            record = RobotCommandRecord(
+                command_id=request.command_id,
+                kind=robot_kind,
+                status=CommandExecutionStatus.RUNNING,
+                submitted_at_ms=now_ms,
+                updated_at_ms=now_ms,
+                request=request_key,
+            )
+            self._records[request.command_id] = record
+            self._frames[request.command_id] = frame
+            # Keep an early pause behind its just-confirmed motion frame.  The
+            # web can request pause in the small interval before the Mac has
+            # acknowledged receipt; overtaking that motion would make the Mac
+            # correctly reject the pause as ownerless.
+            self._pending.append(request.command_id)
+            return record.model_copy(deep=True), True
+
     def confirm(self, command_id: str, fingerprint: str) -> RobotCommandRecord:
         with self._lock:
             record = self._get_locked(command_id)
@@ -560,7 +656,10 @@ class RemoteMotionStore:
                 return record.model_copy(deep=True)
             if any(
                 other_id != command_id
-                and other.status == CommandExecutionStatus.RUNNING
+                and other.status in {
+                    CommandExecutionStatus.RUNNING,
+                    CommandExecutionStatus.PAUSED,
+                }
                 for other_id, other in self._records.items()
             ):
                 raise RobotRuntimeServiceError(
@@ -671,7 +770,10 @@ class RemoteMotionStore:
             record = self._get_locked(result.command_id)
             frame = self._frames[result.command_id]
             if (
-                record.status != CommandExecutionStatus.RUNNING
+                record.status not in {
+                    CommandExecutionStatus.RUNNING,
+                    CommandExecutionStatus.PAUSED,
+                }
                 or result.command_id not in self._dispatched
                 or result.command_id not in self._gateway_accepted
                 or fingerprint != frame.fingerprint
@@ -715,7 +817,8 @@ class RemoteMotionStore:
                 if (
                     pose is None
                     or result.software_stop is None
-                    or result.software_stop.delivery != StopDelivery.SENT
+                    or result.software_stop.delivery
+                    not in {StopDelivery.SENT, StopDelivery.NOT_SENT}
                     or result.software_stop.motion_stop
                     != MotionStopConfirmation.CONFIRMED
                 ):
@@ -746,8 +849,97 @@ class RemoteMotionStore:
                         active_command_id=None,
                     ),
                     message=(
-                        "Controller GrpStop delivery and stationary feedback confirmed; "
-                        "this is not a physical emergency stop"
+                        "Mac cancelled the motion before the first WayPoint was sent"
+                        if result.software_stop.delivery == StopDelivery.NOT_SENT
+                        else (
+                            "Controller GrpStop delivery and stationary feedback confirmed; "
+                            "this is not a physical emergency stop"
+                        )
+                    ),
+                )
+                status = CommandExecutionStatus.SUCCEEDED
+                error = None
+            elif (
+                result.command_kind
+                in {
+                    GatewayCommandKind.PAUSE_REQUEST,
+                    GatewayCommandKind.RESUME_REQUEST,
+                }
+                and result.status == ToolStatus.SUCCESS
+            ):
+                requested = frame.envelope.payload
+                assert isinstance(requested, MotionControlRequest)
+                state = self._telemetry()
+                pose = state.actual_pose_robot_base
+                expected_paused = requested.operation == "pause"
+                # The gateway only reports success after 10003 and 10004 both
+                # confirm the transition.  Its command result can reach the
+                # server immediately before the next telemetry frame, so do
+                # not reject a valid acknowledgement using one older cached
+                # server-side sample.
+                if pose is None:
+                    raise RobotRuntimeServiceError(
+                        ErrorCode.INTERNAL_ERROR,
+                        "Mac motion-control result has no current robot pose",
+                        command_id=result.command_id,
+                    )
+                target = self._records.get(requested.target_command_id)
+                expected_status = (
+                    CommandExecutionStatus.RUNNING
+                    if expected_paused
+                    else CommandExecutionStatus.PAUSED
+                )
+                if target is None or target.status != expected_status:
+                    raise RobotRuntimeServiceError(
+                        ErrorCode.COMMAND_CONFLICT,
+                        "motion-control target changed before confirmation",
+                        status_code=409,
+                        command_id=result.command_id,
+                    )
+                final_point = Point3D(
+                    x=pose.translation_mm[0],
+                    y=pose.translation_mm[1],
+                    z=pose.translation_mm[2],
+                    frame=CoordinateFrame.ROBOT_BASE,
+                    unit=DistanceUnit.MILLIMETER,
+                    source=CoordinateSource.STRUCTURED_DATA,
+                )
+                operation = (
+                    RobotCommandKind.PAUSE
+                    if expected_paused
+                    else RobotCommandKind.RESUME
+                )
+                self._records[requested.target_command_id] = target.model_copy(
+                    update={
+                        "status": (
+                            CommandExecutionStatus.PAUSED
+                            if expected_paused
+                            else CommandExecutionStatus.RUNNING
+                        ),
+                        "updated_at_ms": now_ms,
+                    }
+                )
+                payload = RobotActionResult(
+                    command_id=result.command_id,
+                    operation=operation,
+                    status=ToolStatus.SUCCESS,
+                    state=RobotState(
+                        mode=RuntimeMode.REAL,
+                        tcp=self.policy.tcp_name,
+                        tcp_position=final_point,
+                        orientation_xyzw=pose.quaternion_xyzw,
+                        motion_state=(
+                            MotionState.PAUSED
+                            if expected_paused
+                            else MotionState.MOVING
+                        ),
+                        estop=bool(state.physical_estop_active),
+                        active_command_id=requested.target_command_id,
+                    ),
+                    message=(
+                        "Controller motion paused with the remaining path retained"
+                        if expected_paused
+                        else "Controller resumed the retained motion"
                     ),
                 )
                 status = CommandExecutionStatus.SUCCEEDED
@@ -839,7 +1031,10 @@ class RemoteMotionStore:
                     frame is not None
                     and record is not None
                     and frame.envelope.gateway_session_id == session_id
-                    and record.status == CommandExecutionStatus.RUNNING
+                    and record.status in {
+                        CommandExecutionStatus.RUNNING,
+                        CommandExecutionStatus.PAUSED,
+                    }
                 ):
                     self._fail_locked(
                         command_id,
