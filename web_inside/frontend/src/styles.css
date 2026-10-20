@@ -484,61 +484,17 @@ body::before { display: none; }
 }
 
 .ambient-scene {
-  position: fixed;
+  position: absolute;
   inset: 0;
   z-index: 0;
   overflow: hidden;
   pointer-events: none;
+  contain: paint;
+  isolation: isolate;
 }
 
 .ambient-scene::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background:
-    linear-gradient(180deg, rgba(0, 20, 70, 0.06), transparent 42%),
-    linear-gradient(180deg, transparent 52%, rgba(244, 248, 253, 0.76) 82%, #f4f8fd 100%);
-}
-
-.ambient-glow {
-  position: absolute;
-  width: 46vw;
-  aspect-ratio: 1;
-  border-radius: 50%;
-  filter: blur(90px);
-  opacity: 0.54;
-  will-change: transform;
-}
-
-.ambient-glow-a {
-  top: -22vw;
-  left: 18vw;
-  background: rgba(24, 148, 255, 0.72);
-  animation: ambient-glow-a 15s ease-in-out infinite alternate;
-}
-
-.ambient-glow-b {
-  top: 18vh;
-  right: -17vw;
-  background: rgba(17, 226, 207, 0.6);
-  animation: ambient-glow-b 19s ease-in-out infinite alternate;
-}
-
-.ambient-glow-c {
-  top: 42vh;
-  left: -24vw;
-  background: rgba(34, 116, 255, 0.34);
-  animation: ambient-glow-c 22s ease-in-out infinite alternate;
-}
-
-.ambient-waves {
-  position: absolute;
-  inset: -8% -6% auto;
-  width: 112%;
-  height: min(82vh, 900px);
-  overflow: visible;
-  opacity: 0.92;
-  filter: saturate(1.15);
+  display: none;
 }
 
 .medical-blueprint {
@@ -548,12 +504,9 @@ body::before { display: none; }
   background-repeat: no-repeat;
   background-position: center;
   background-size: contain;
-  mix-blend-mode: screen;
-  filter:
-    saturate(1.16)
-    drop-shadow(0 24px 48px rgba(0, 47, 135, 0.18))
-    drop-shadow(0 0 22px rgba(81, 190, 255, 0.16));
-  will-change: transform, opacity;
+  mix-blend-mode: normal;
+  filter: none;
+  will-change: auto;
 }
 
 .medical-blueprint-left {
@@ -561,11 +514,9 @@ body::before { display: none; }
   left: clamp(-270px, -13vw, -150px);
   width: clamp(480px, 38vw, 730px);
   aspect-ratio: 1122 / 1402;
-  opacity: 0.3;
+  opacity: 0.024;
   background-image: url("../images/r1.png");
-  -webkit-mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.92) 54%, rgba(0, 0, 0, 0.58) 79%, transparent 100%);
-  mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0.92) 54%, rgba(0, 0, 0, 0.58) 79%, transparent 100%);
-  animation: blueprint-left 20s ease-in-out infinite alternate;
+  animation: none;
 }
 
 .medical-blueprint-right {
@@ -573,11 +524,9 @@ body::before { display: none; }
   right: clamp(-275px, -13vw, -145px);
   width: clamp(490px, 39vw, 750px);
   aspect-ratio: 1173 / 1341;
-  opacity: 0.28;
+  opacity: 0.024;
   background-image: url("../images/r2.png");
-  -webkit-mask-image: linear-gradient(270deg, rgba(0, 0, 0, 0.92) 54%, rgba(0, 0, 0, 0.58) 79%, transparent 100%);
-  mask-image: linear-gradient(270deg, rgba(0, 0, 0, 0.92) 54%, rgba(0, 0, 0, 0.58) 79%, transparent 100%);
-  animation: blueprint-right 23s ease-in-out infinite alternate;
+  animation: none;
 }
 
 .medical-blueprint-center {
@@ -585,70 +534,21 @@ body::before { display: none; }
   left: 50%;
   width: min(88vw, 1560px);
   aspect-ratio: 1672 / 941;
-  opacity: 0.11;
+  opacity: 0.014;
   background-image: url("../images/r3.png");
   background-position: center top;
-  -webkit-mask-image:
-    radial-gradient(ellipse at center, #000 18%, rgba(0, 0, 0, 0.64) 52%, transparent 78%);
-  mask-image:
-    radial-gradient(ellipse at center, #000 18%, rgba(0, 0, 0, 0.64) 52%, transparent 78%);
-  transform: translate3d(-50%, 0, 0) scale(1.04);
-  animation: blueprint-center 26s ease-in-out infinite alternate;
-}
-
-.ambient-wave {
-  mix-blend-mode: screen;
-  filter: blur(34px);
-  transform-box: fill-box;
-  transform-origin: center;
-  will-change: transform, opacity;
-}
-
-.ambient-wave-one {
-  animation: ambient-wave-one 13s ease-in-out infinite alternate;
-}
-
-.ambient-wave-two {
-  opacity: 0.74;
-  animation: ambient-wave-two 17s ease-in-out infinite alternate;
-}
-
-.ambient-wave-three {
-  opacity: 0.58;
-  animation: ambient-wave-three 21s ease-in-out infinite alternate;
-}
-
-.ambient-thread {
-  stroke: rgba(173, 226, 255, 0.3);
-  stroke-width: 1.1;
-  stroke-dasharray: 4 10;
-  animation: ambient-thread 22s linear infinite;
-}
-
-.ambient-thread-two {
-  opacity: 0.56;
-  animation-duration: 28s;
-  animation-direction: reverse;
+  transform: translateX(-50%);
+  animation: none;
 }
 
 .ambient-grid {
   position: absolute;
   inset: 0;
-  opacity: 0.2;
+  opacity: 0.04;
   background-image:
     linear-gradient(rgba(157, 213, 255, 0.13) 1px, transparent 1px),
     linear-gradient(90deg, rgba(157, 213, 255, 0.11) 1px, transparent 1px);
-  background-size: 72px 72px;
-  mask-image: linear-gradient(180deg, #000, transparent 68%);
-}
-
-.ambient-noise {
-  position: absolute;
-  inset: 0;
-  opacity: 0.2;
-  background-image: radial-gradient(rgba(255, 255, 255, 0.42) 0.6px, transparent 0.8px);
-  background-size: 9px 9px;
-  mask-image: linear-gradient(180deg, #000 0, transparent 58%);
+  background-size: 64px 64px;
 }
 
 .topbar,
@@ -1258,55 +1158,6 @@ footer {
 
 footer strong { color: #0a61c6; }
 
-@keyframes ambient-glow-a {
-  from { transform: translate3d(-5%, -4%, 0) scale(0.92); }
-  to { transform: translate3d(18%, 12%, 0) scale(1.12); }
-}
-
-@keyframes ambient-glow-b {
-  from { transform: translate3d(4%, -8%, 0) scale(0.9); }
-  to { transform: translate3d(-24%, 10%, 0) scale(1.14); }
-}
-
-@keyframes ambient-glow-c {
-  from { transform: translate3d(-6%, 8%, 0) scale(0.92); }
-  to { transform: translate3d(28%, -10%, 0) scale(1.1); }
-}
-
-@keyframes ambient-wave-one {
-  from { transform: translate3d(-2%, -2%, 0) rotate(-1deg) scale(1.02); opacity: 0.72; }
-  to { transform: translate3d(3%, 5%, 0) rotate(2deg) scale(1.08); opacity: 1; }
-}
-
-@keyframes ambient-wave-two {
-  from { transform: translate3d(3%, 2%, 0) rotate(1deg) scale(1.04); opacity: 0.54; }
-  to { transform: translate3d(-4%, -3%, 0) rotate(-2deg) scale(1.1); opacity: 0.82; }
-}
-
-@keyframes ambient-wave-three {
-  from { transform: translate3d(-4%, 4%, 0) scale(1.02); opacity: 0.38; }
-  to { transform: translate3d(5%, -4%, 0) scale(1.13); opacity: 0.66; }
-}
-
-@keyframes ambient-thread {
-  to { stroke-dashoffset: -140; }
-}
-
-@keyframes blueprint-left {
-  from { transform: translate3d(-1.8%, 0, 0) rotate(-1deg) scale(1.01); opacity: 0.24; }
-  to { transform: translate3d(2.5%, 2.2%, 0) rotate(1deg) scale(1.04); opacity: 0.34; }
-}
-
-@keyframes blueprint-right {
-  from { transform: translate3d(1.5%, 1.4%, 0) rotate(0.8deg) scale(1.02); opacity: 0.23; }
-  to { transform: translate3d(-2.8%, -1.5%, 0) rotate(-1deg) scale(1.05); opacity: 0.32; }
-}
-
-@keyframes blueprint-center {
-  from { transform: translate3d(-50%, 1.8%, 0) scale(1.02); opacity: 0.075; }
-  to { transform: translate3d(-50%, -1.8%, 0) scale(1.07); opacity: 0.14; }
-}
-
 @media (max-width: 1240px) {
   .topbar {
     align-items: flex-start;
@@ -1330,9 +1181,6 @@ footer strong { color: #0a61c6; }
 }
 
 @media (max-width: 720px) {
-  .ambient-glow { filter: blur(70px); }
-  .ambient-glow-c,
-  .ambient-thread-two { display: none; }
   .ambient-grid { opacity: 0.12; }
   .medical-blueprint-center { display: none; }
   .medical-blueprint-left,
@@ -1382,9 +1230,6 @@ footer strong { color: #0a61c6; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ambient-glow,
-  .ambient-wave,
-  .ambient-thread,
   .medical-blueprint,
   .status-pulse,
   .microphone-dot {
@@ -1426,16 +1271,9 @@ body {
 ::selection { color: #fff; background: rgba(37, 99, 235, 0.82); }
 
 .ambient-scene::after {
-  background: linear-gradient(180deg, rgba(248, 250, 252, 0.04), #f8fafc 88%);
+  display: none;
 }
 
-.ambient-glow { opacity: 0.18; filter: blur(110px); }
-.ambient-glow-a { background: rgba(37, 99, 235, 0.55); }
-.ambient-glow-b { background: rgba(8, 145, 178, 0.42); }
-.ambient-glow-c { background: rgba(56, 189, 248, 0.34); }
-.ambient-waves { opacity: 0.28; filter: saturate(0.9); }
-.ambient-wave { mix-blend-mode: multiply; filter: blur(46px); }
-.ambient-thread { stroke: rgba(14, 165, 233, 0.2); }
 .ambient-grid {
   opacity: 0.22;
   background-image:
@@ -1443,13 +1281,14 @@ body {
     linear-gradient(90deg, rgba(14, 165, 233, 0.08) 1px, transparent 1px);
   background-size: 64px 64px;
 }
-.ambient-noise { opacity: 0.08; }
 .medical-blueprint {
-  opacity: 0.09;
-  mix-blend-mode: multiply;
-  filter: saturate(0.75) contrast(0.92);
+  opacity: 0.024;
+  mix-blend-mode: normal;
+  filter: none;
+  animation: none;
+  will-change: auto;
 }
-.medical-blueprint-center { opacity: 0.045; }
+.medical-blueprint-center { opacity: 0.014; }
 
 .topbar {
   color: var(--text);
@@ -1726,8 +1565,9 @@ footer strong { color: #1d4ed8; }
   --rw-ink: #edf3fc; --rw-secondary: #c3d0e1; --rw-muted: #a1b3ca;
   --rw-border: #3b4d64; --rw-accent: #93c5fd; --rw-accent-soft: #172d50;
 }
-.robot-workbench .ambient-scene { opacity: .15; pointer-events: none; }
-.robot-workbench .medical-blueprint { opacity: .025; }
+.robot-workbench .ambient-scene { opacity: 1; pointer-events: none; }
+.robot-workbench .medical-blueprint { opacity: .024; }
+.robot-workbench .medical-blueprint-center { opacity: .014; }
 .robot-workbench .agent-masthead { flex-shrink: 0; }
 .robot-workbench .robot-workspace {
   position: relative; z-index: 1; flex: 1 1 0; min-height: 0;
