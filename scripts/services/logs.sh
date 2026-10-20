@@ -29,6 +29,7 @@ echo "ROBOT MODE = ${mode:-UNKNOWN (service unavailable)}"
 usage() {
     echo "Usage:"
     echo "  $0 all"
+    echo "  $0 supervisor"
     echo "  $0 inference"
     echo "  $0 simulation"
     echo "  $0 robot"
@@ -41,17 +42,20 @@ case "${1:-}" in
     all)
         files=()
         if [[ "$mode" == REAL* ]]; then
-            names=(inference robot-runtime robot-simulation-fallback planner-adapter agent-web xvfb)
+            names=(start_all inference robot-runtime robot-simulation-fallback planner-adapter agent-web xvfb)
         elif [[ "$mode" == SIMULATION ]]; then
-            names=(inference robot-simulation planner-adapter agent-web xvfb)
+            names=(start_all inference robot-simulation planner-adapter agent-web xvfb)
         else
-            names=(inference robot-simulation robot-runtime planner-adapter agent-web xvfb)
+            names=(start_all inference robot-simulation robot-runtime planner-adapter agent-web xvfb)
         fi
         for name in "${names[@]}"; do
             [[ -f "$LOG_DIR/$name.log" ]] && files+=("$LOG_DIR/$name.log")
         done
         (( ${#files[@]} > 0 )) || { echo "No service logs found." >&2; exit 1; }
         tail -n 100 -F "${files[@]}"
+        ;;
+    supervisor)
+        tail -n 200 -F "$LOG_DIR/start_all.log"
         ;;
     inference)
         tail -n 200 -F "$LOG_DIR/inference.log"

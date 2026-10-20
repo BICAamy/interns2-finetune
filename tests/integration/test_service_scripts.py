@@ -241,6 +241,24 @@ class ServiceScriptsTest(unittest.TestCase):
         self.assertNotIn("INFERENCE_PID", stop)
         self.assertNotIn("23333", stop)
 
+    def test_start_all_runs_under_a_detached_session_supervisor(self) -> None:
+        content = (SERVICE_SCRIPTS / "start_all.sh").read_text(encoding="utf-8")
+
+        self.assertIn("nohup setsid env", content)
+        self.assertIn("_INTERNS2_START_ALL_SUPERVISOR=1", content)
+        self.assertIn('</dev/null >>"$SUPERVISOR_LOG" 2>&1 &', content)
+        self.assertIn('write_atomic_file "$SUPERVISOR_STATE_FILE" "ready"', content)
+        self.assertIn("Services are running independently of this SSH terminal.", content)
+        self.assertNotIn("Keep this terminal open.", content)
+        self.assertNotIn("Press Ctrl+C to stop the whole system.", content)
+
+    def test_stop_all_removes_detached_supervisor_state(self) -> None:
+        content = (SERVICE_SCRIPTS / "stop_all.sh").read_text(encoding="utf-8")
+
+        self.assertIn('SUPERVISOR_STATE_FILE="$SERVICE_STATE_DIR/start_all.state"', content)
+        self.assertIn('"$SUPERVISOR_STATE_FILE"', content)
+        self.assertIn('"$SERVICE_STATE_DIR"/startup.*', content)
+
     def test_stop_all_api_mode_leaves_external_process_running(self) -> None:
         external = subprocess.Popen(["sleep", "30"])
         supervisor = None
@@ -264,6 +282,14 @@ class ServiceScriptsTest(unittest.TestCase):
                     "api\n",
                     encoding="utf-8",
                 )
+                (state_dir / "start_all.state").write_text(
+                    "ready\n",
+                    encoding="utf-8",
+                )
+                (state_dir / "startup.test").write_text(
+                    "ready\n",
+                    encoding="utf-8",
+                )
                 environment = os.environ.copy()
                 environment.update({
                     "SERVICE_STATE_DIR": str(state_dir),
@@ -277,6 +303,9 @@ class ServiceScriptsTest(unittest.TestCase):
                     text=True,
                     check=False,
                 )
+                self.assertFalse((state_dir / "start_all.pid").exists())
+                self.assertFalse((state_dir / "start_all.state").exists())
+                self.assertFalse((state_dir / "startup.test").exists())
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(

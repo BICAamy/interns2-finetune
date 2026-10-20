@@ -8,8 +8,260 @@ RUNTIME_ROOT="$BUNDLE_ROOT/runtime/envs"
 LOG_DIR="$APP_ROOT/logs/services"
 SERVICE_STATE_DIR="${SERVICE_STATE_DIR:-$APP_ROOT/run/services}"
 SUPERVISOR_PID_FILE="$SERVICE_STATE_DIR/start_all.pid"
+SUPERVISOR_STATE_FILE="$SERVICE_STATE_DIR/start_all.state"
 INFERENCE_MODE_FILE="$SERVICE_STATE_DIR/inference_mode"
 WEB_VARIANT_FILE="$SERVICE_STATE_DIR/web_variant"
+SUPERVISOR_LOG="$LOG_DIR/start_all.log"
+STARTUP_WAIT_SECONDS="${STARTUP_WAIT_SECONDS:-600}"
+INTERNAL_SUPERVISOR="${_INTERNS2_START_ALL_SUPERVISOR:-0}"
+STARTUP_RESULT_FILE="${INTERNS2_STARTUP_RESULT_FILE:-}"
+ORIGINAL_ARGS=("$@")
+
+PIDS=()
+SUPERVISOR_STATE_OWNED=false
+SUPERVISOR_READY=false
+SHUTDOWN_REQUESTED=false
+UNEXPECTED_CHILD_EXIT=false
+DETACHED_RESULT_FILE=""
+
+fail() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+process_is_running() {
+    local pid="$1"
+    local state=""
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    state="$(ps -p "$pid" -o stat= 2>/dev/null | tr -d '[:space:]')"
+    [[ -n "$state" && "$state" != Z* ]]
+}
+
+is_start_all_supervisor() {
+    local pid="$1"
+    local command=""
+    local process_cwd=""
+    process_is_running "$pid" || return 1
+    command="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    [[ "$command" == *"scripts/services/start_all.sh"* ]] || return 1
+    if [[ -L "/proc/$pid/cwd" ]]; then
+        process_cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+        [[ "$process_cwd" == "$APP_ROOT" ]] || return 1
+    fi
+}
+
+read_supervisor_pid() {
+    local recorded=""
+    if [[ -r "$SUPERVISOR_PID_FILE" ]]; then
+        IFS= read -r recorded < "$SUPERVISOR_PID_FILE" || true
+    fi
+    printf '%s' "$recorded"
+}
+
+write_atomic_file() {
+    local path="$1"
+    local value="$2"
+    local temporary="${path}.$$"
+    printf '%s\n' "$value" > "$temporary"
+    mv -f -- "$temporary" "$path"
+}
+
+write_startup_result() {
+    local value="$1"
+    [[ -n "$STARTUP_RESULT_FILE" ]] || return 0
+    write_atomic_file "$STARTUP_RESULT_FILE" "$value"
+}
+
+clear_supervisor_state() {
+    local recorded_pid=""
+    if [[ -r "$SUPERVISOR_PID_FILE" ]]; then
+        IFS= read -r recorded_pid < "$SUPERVISOR_PID_FILE" || true
+    fi
+    if [[ "$recorded_pid" == "$$" ]]; then
+        rm -f -- "$SUPERVISOR_PID_FILE" "$INFERENCE_MODE_FILE" "$WEB_VARIANT_FILE"
+    fi
+}
+
+cleanup() {
+    local exit_status=$?
+    local pid=""
+    local final_state=""
+    trap - INT TERM EXIT
+
+    if $UNEXPECTED_CHILD_EXIT && (( exit_status == 0 )); then
+        exit_status=1
+    fi
+
+    if (( ${#PIDS[@]} > 0 )); then
+        echo
+        echo "Stopping surgical-navigation services..."
+
+        for pid in "${PIDS[@]}"; do
+            [[ -n "$pid" ]] || continue
+            kill "$pid" 2>/dev/null || true
+        done
+
+        sleep 1
+
+        for pid in "${PIDS[@]}"; do
+            [[ -n "$pid" ]] || continue
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        done
+
+        wait 2>/dev/null || true
+        echo "All services stopped."
+    fi
+
+    if $SUPERVISOR_STATE_OWNED; then
+        if $SHUTDOWN_REQUESTED; then
+            final_state="stopped"
+        else
+            final_state="failed:$exit_status"
+        fi
+        clear_supervisor_state
+        write_atomic_file "$SUPERVISOR_STATE_FILE" "$final_state"
+        if ! $SUPERVISOR_READY; then
+            write_startup_result "$final_state"
+        fi
+    fi
+
+    return "$exit_status"
+}
+
+handle_shutdown_signal() {
+    SHUTDOWN_REQUESTED=true
+    exit 0
+}
+
+claim_supervisor_state() {
+    local existing_pid=""
+    mkdir -p "$LOG_DIR" "$SERVICE_STATE_DIR"
+
+    existing_pid="$(read_supervisor_pid)"
+    if is_start_all_supervisor "$existing_pid"; then
+        echo "ERROR: service supervisor is already running (PID=$existing_pid)." >&2
+        write_startup_result "failed:1"
+        return 1
+    fi
+    rm -f -- "$SUPERVISOR_PID_FILE"
+
+    if ! (set -o noclobber; printf '%s\n' "$$" > "$SUPERVISOR_PID_FILE") 2>/dev/null; then
+        echo "ERROR: another start_all.sh process claimed the supervisor state." >&2
+        write_startup_result "failed:1"
+        return 1
+    fi
+
+    SUPERVISOR_STATE_OWNED=true
+    write_atomic_file "$SUPERVISOR_STATE_FILE" "starting"
+    write_startup_result "starting"
+}
+
+flush_supervisor_log() {
+    local current_lines=0
+    [[ -f "$SUPERVISOR_LOG" ]] || return 0
+    current_lines="$(wc -l < "$SUPERVISOR_LOG" | tr -d '[:space:]')"
+    if (( current_lines > PRINTED_LOG_LINES )); then
+        sed -n "$((PRINTED_LOG_LINES + 1)),${current_lines}p" "$SUPERVISOR_LOG"
+        PRINTED_LOG_LINES=$current_lines
+    fi
+}
+
+interrupt_startup_wait() {
+    echo
+    echo "Startup wait interrupted; the detached service supervisor is still running." >&2
+    echo "Use ./scripts/services/status.sh to inspect it or ./scripts/services/stop_all.sh to stop it." >&2
+    [[ -n "$DETACHED_RESULT_FILE" ]] && rm -f -- "$DETACHED_RESULT_FILE"
+    exit 130
+}
+
+launch_detached_supervisor() {
+    local existing_pid=""
+    local deadline=0
+    local result=""
+    local result_status=1
+
+    [[ "$STARTUP_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+        || fail "STARTUP_WAIT_SECONDS must be a positive integer."
+    command -v nohup >/dev/null 2>&1 || fail "nohup is required for detached startup."
+    command -v setsid >/dev/null 2>&1 || fail "setsid is required for detached startup."
+
+    mkdir -p "$LOG_DIR" "$SERVICE_STATE_DIR"
+    existing_pid="$(read_supervisor_pid)"
+    if is_start_all_supervisor "$existing_pid"; then
+        fail "service stack is already running (supervisor PID=$existing_pid); use status.sh or stop_all.sh."
+    fi
+    rm -f -- "$SUPERVISOR_PID_FILE" "$SUPERVISOR_STATE_FILE"
+
+    DETACHED_RESULT_FILE="$SERVICE_STATE_DIR/startup.$$.${RANDOM}"
+    rm -f -- "$DETACHED_RESULT_FILE"
+    : > "$SUPERVISOR_LOG"
+    PRINTED_LOG_LINES=0
+
+    echo "Starting InternS2 services in a detached session..."
+    echo "supervisor log=$SUPERVISOR_LOG"
+    (
+        cd "$APP_ROOT"
+        nohup setsid env \
+            _INTERNS2_START_ALL_SUPERVISOR=1 \
+            INTERNS2_STARTUP_RESULT_FILE="$DETACHED_RESULT_FILE" \
+            bash "$SCRIPT_DIR/start_all.sh" "${ORIGINAL_ARGS[@]}" \
+            </dev/null >>"$SUPERVISOR_LOG" 2>&1 &
+    )
+
+    trap interrupt_startup_wait HUP INT TERM
+    deadline=$((SECONDS + STARTUP_WAIT_SECONDS))
+    while (( SECONDS < deadline )); do
+        flush_supervisor_log
+        if [[ -r "$DETACHED_RESULT_FILE" ]]; then
+            IFS= read -r result < "$DETACHED_RESULT_FILE" || true
+            case "$result" in
+                ready)
+                    flush_supervisor_log
+                    rm -f -- "$DETACHED_RESULT_FILE"
+                    trap - HUP INT TERM
+                    echo
+                    echo "Services are running independently of this SSH terminal."
+                    echo "Status: ./scripts/services/status.sh"
+                    echo "Stop:   ./scripts/services/stop_all.sh"
+                    return 0
+                    ;;
+                failed:*)
+                    flush_supervisor_log
+                    result_status="${result#failed:}"
+                    [[ "$result_status" =~ ^[0-9]+$ ]] || result_status=1
+                    rm -f -- "$DETACHED_RESULT_FILE"
+                    trap - HUP INT TERM
+                    echo "ERROR: detached service startup failed (status=$result_status)." >&2
+                    return "$result_status"
+                    ;;
+                stopped)
+                    flush_supervisor_log
+                    rm -f -- "$DETACHED_RESULT_FILE"
+                    trap - HUP INT TERM
+                    echo "ERROR: detached service startup was stopped before becoming ready." >&2
+                    return 1
+                    ;;
+            esac
+        fi
+        sleep 0.2
+    done
+
+    flush_supervisor_log
+    rm -f -- "$DETACHED_RESULT_FILE"
+    trap - HUP INT TERM
+    echo "ERROR: services did not report ready within ${STARTUP_WAIT_SECONDS}s." >&2
+    echo "The detached supervisor was left running; inspect status/logs or use stop_all.sh." >&2
+    return 1
+}
+
+if [[ "$INTERNAL_SUPERVISOR" == 1 ]]; then
+    trap cleanup EXIT
+    trap handle_shutdown_signal INT TERM
+    claim_supervisor_state || exit 1
+fi
 
 # shellcheck source=scripts/services/interns2_config.sh
 source "$SCRIPT_DIR/interns2_config.sh"
@@ -38,54 +290,11 @@ export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
 export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
 export NCCL_CUMEM_HOST_ENABLE="${NCCL_CUMEM_HOST_ENABLE:-0}"
 export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-0}"
-export GATEWAY_AUTH_SECRET_FILE="$PWD/configs/gateway-auth.local"
+export GATEWAY_AUTH_SECRET_FILE="$APP_ROOT/configs/gateway-auth.local"
 export GATEWAY_EXPECTED_ID=mac-huayan-ph590320009
 export ROBOT_REAL_MIRROR=1
 
 cd "$APP_ROOT"
-
-PIDS=()
-
-clear_supervisor_state() {
-    local recorded_pid=""
-    if [[ -r "$SUPERVISOR_PID_FILE" ]]; then
-        IFS= read -r recorded_pid < "$SUPERVISOR_PID_FILE" || true
-    fi
-    if [[ "$recorded_pid" == "$$" ]]; then
-        rm -f -- "$SUPERVISOR_PID_FILE" "$INFERENCE_MODE_FILE" "$WEB_VARIANT_FILE"
-    fi
-}
-
-cleanup() {
-    trap - INT TERM EXIT
-
-    echo
-    echo "Stopping surgical-navigation services..."
-
-    for pid in "${PIDS[@]:-}"; do
-        [[ -n "$pid" ]] || continue
-        kill "$pid" 2>/dev/null || true
-    done
-
-    sleep 1
-
-    for pid in "${PIDS[@]:-}"; do
-        [[ -n "$pid" ]] || continue
-        if kill -0 "$pid" 2>/dev/null; then
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-    done
-
-    wait 2>/dev/null || true
-    clear_supervisor_state
-
-    echo "All services stopped."
-}
-
-fail() {
-    echo "ERROR: $*" >&2
-    exit 1
-}
 
 WEB_VARIANT="${INTERNS2_WEB_VARIANT:-web}"
 case "$WEB_VARIANT" in
@@ -124,6 +333,7 @@ while (( $# > 0 )); do
         --help|-h)
             echo "Usage: $0 [--robot-mode simulation|real] [--real-config PATH] [--check-config]"
             echo "Environment: INTERNS2_WEB_VARIANT=web|web_inside|both (default: web)"
+            echo "Normal startup is detached from SSH; use scripts/services/stop_all.sh to stop it."
             exit 0
             ;;
         *) fail "Unknown argument: $1" ;;
@@ -347,6 +557,11 @@ PY_HTTP
     return 1
 }
 
+if [[ "$INTERNAL_SUPERVISOR" != 1 ]]; then
+    launch_detached_supervisor
+    exit $?
+fi
+
 
 echo "=================================================="
 echo " InternS2 Surgical Navigation - Portable Dev"
@@ -469,8 +684,6 @@ case "$WEB_VARIANT" in
 esac
 echo
 
-trap cleanup INT TERM EXIT
-printf '%s\n' "$$" > "$SUPERVISOR_PID_FILE"
 printf '%s\n' "$INTERNS2_INFERENCE_MODE" > "$INFERENCE_MODE_FILE"
 printf '%s\n' "$WEB_VARIANT" > "$WEB_VARIANT_FILE"
 
@@ -838,10 +1051,15 @@ fi
 echo "   $ROBOT_LOG"
 echo "   $LOG_DIR/planner-adapter.log"
 echo "   $LOG_DIR/agent-web.log"
+echo "   $SUPERVISOR_LOG"
 echo
-echo "Keep this terminal open."
-echo "Press Ctrl+C to stop the whole system."
+echo "Supervisor PID=$$ (detached from SSH/terminal)"
+echo "Stop the whole system only with: ./scripts/services/stop_all.sh"
 echo "=================================================="
+
+SUPERVISOR_READY=true
+write_atomic_file "$SUPERVISOR_STATE_FILE" "ready"
+write_startup_result "ready"
 
 # If any managed process dies unexpectedly, leave the supervisor and
 # let the EXIT trap shut the rest down as well.
@@ -852,4 +1070,8 @@ set -e
 
 echo
 echo "A managed process exited unexpectedly (status=$STATUS)."
+UNEXPECTED_CHILD_EXIT=true
+if (( STATUS == 0 )); then
+    STATUS=1
+fi
 exit "$STATUS"

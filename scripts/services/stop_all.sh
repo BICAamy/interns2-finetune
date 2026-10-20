@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 APP_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 SERVICE_STATE_DIR="${SERVICE_STATE_DIR:-$APP_ROOT/run/services}"
 SUPERVISOR_PID_FILE="$SERVICE_STATE_DIR/start_all.pid"
+SUPERVISOR_STATE_FILE="$SERVICE_STATE_DIR/start_all.state"
 INFERENCE_MODE_FILE="$SERVICE_STATE_DIR/inference_mode"
 WEB_VARIANT_FILE="$SERVICE_STATE_DIR/web_variant"
 STOP_TIMEOUT_SECONDS="${STOP_TIMEOUT_SECONDS:-20}"
@@ -112,7 +113,10 @@ if (( FIND_STATUS == 2 )); then
     exit 1
 fi
 if (( FIND_STATUS != 0 )); then
-    rm -f -- "$SUPERVISOR_PID_FILE" "$INFERENCE_MODE_FILE" "$WEB_VARIANT_FILE"
+    rm -f -- \
+        "$SUPERVISOR_PID_FILE" "$SUPERVISOR_STATE_FILE" \
+        "$INFERENCE_MODE_FILE" "$WEB_VARIANT_FILE" \
+        "$SERVICE_STATE_DIR"/startup.*
     echo "No running InternS2 surgical-navigation service stack was found."
     exit 0
 fi
@@ -131,7 +135,10 @@ if process_is_running "$SUPERVISOR_PID"; then
     exit 1
 fi
 
-rm -f -- "$SUPERVISOR_PID_FILE" "$INFERENCE_MODE_FILE" "$WEB_VARIANT_FILE"
+rm -f -- \
+    "$SUPERVISOR_PID_FILE" "$SUPERVISOR_STATE_FILE" \
+    "$INFERENCE_MODE_FILE" "$WEB_VARIANT_FILE" \
+    "$SERVICE_STATE_DIR"/startup.*
 echo "All services managed by start_all.sh have stopped."
 
 case "$INFERENCE_MODE" in

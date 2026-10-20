@@ -6,6 +6,8 @@ APP_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 BUNDLE_ROOT="$(cd "$APP_ROOT/.." && pwd -P)"
 PYTHON="$BUNDLE_ROOT/runtime/envs/agent-web/bin/python"
 SERVICE_STATE_DIR="${SERVICE_STATE_DIR:-$APP_ROOT/run/services}"
+SUPERVISOR_PID_FILE="$SERVICE_STATE_DIR/start_all.pid"
+SUPERVISOR_STATE_FILE="$SERVICE_STATE_DIR/start_all.state"
 WEB_VARIANT_FILE="$SERVICE_STATE_DIR/web_variant"
 
 # shellcheck source=scripts/services/interns2_config.sh
@@ -24,6 +26,23 @@ if [[ -r "$WEB_VARIANT_FILE" ]]; then
 fi
 export INTERNS2_ACTIVE_WEB_VARIANT
 
+INTERNS2_SUPERVISOR_PID="unknown"
+INTERNS2_SUPERVISOR_STATE="stopped"
+if [[ -r "$SUPERVISOR_PID_FILE" ]]; then
+    IFS= read -r INTERNS2_SUPERVISOR_PID < "$SUPERVISOR_PID_FILE" || true
+fi
+if [[ -r "$SUPERVISOR_STATE_FILE" ]]; then
+    IFS= read -r INTERNS2_SUPERVISOR_STATE < "$SUPERVISOR_STATE_FILE" || true
+fi
+if [[ "$INTERNS2_SUPERVISOR_PID" =~ ^[1-9][0-9]*$ ]] \
+    && kill -0 "$INTERNS2_SUPERVISOR_PID" 2>/dev/null \
+    && [[ "$(ps -p "$INTERNS2_SUPERVISOR_PID" -o args= 2>/dev/null || true)" == *"scripts/services/start_all.sh"* ]]; then
+    INTERNS2_SUPERVISOR_RUNNING=true
+else
+    INTERNS2_SUPERVISOR_RUNNING=false
+fi
+export INTERNS2_SUPERVISOR_PID INTERNS2_SUPERVISOR_STATE INTERNS2_SUPERVISOR_RUNNING
+
 "$PYTHON" - <<'PY'
 import json
 import os
@@ -38,6 +57,14 @@ print("==================================================")
 print(" Surgical Navigation Service Status")
 print("==================================================")
 print(f"WEB UI = {os.environ.get('INTERNS2_ACTIVE_WEB_VARIANT', 'unknown')}")
+supervisor_running = os.environ.get("INTERNS2_SUPERVISOR_RUNNING") == "true"
+supervisor_pid = os.environ.get("INTERNS2_SUPERVISOR_PID", "unknown")
+supervisor_state = os.environ.get("INTERNS2_SUPERVISOR_STATE", "unknown")
+print(
+    f"{'service-supervisor':22} "
+    f"{'RUNNING' if supervisor_running else 'DOWN':9} "
+    f"pid={supervisor_pid:8}  {supervisor_state}"
+)
 
 headers = {}
 if api_key != "EMPTY":
