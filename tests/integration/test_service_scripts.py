@@ -252,6 +252,21 @@ class ServiceScriptsTest(unittest.TestCase):
         self.assertNotIn("Keep this terminal open.", content)
         self.assertNotIn("Press Ctrl+C to stop the whole system.", content)
 
+    def test_resolved_real_config_is_exported_only_inside_supervisor(self) -> None:
+        content = (SERVICE_SCRIPTS / "start_all.sh").read_text(encoding="utf-8")
+        detach_boundary = content.index(
+            'if [[ "$INTERNAL_SUPERVISOR" != 1 ]]; then\n'
+            "    launch_detached_supervisor"
+        )
+        resolved_path_export = content.index("    export REAL_CONFIG_PATH\n")
+
+        self.assertGreater(resolved_path_export, detach_boundary)
+        self.assertIn(
+            'REAL_CONFIG_PATH="$REAL_CONFIG_PATH" \\\n'
+            '            PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT"',
+            content,
+        )
+
     def test_stop_all_removes_detached_supervisor_state(self) -> None:
         content = (SERVICE_SCRIPTS / "stop_all.sh").read_text(encoding="utf-8")
 

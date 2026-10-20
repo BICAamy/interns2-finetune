@@ -402,12 +402,17 @@ print(c.motion.speed_mm_s, c.limits.max_speed_mm_s, c.limits.max_step_mm)
     ROBOT_MOVE_SPEED_MM_S="$REAL_COMMAND_SPEED"
     MAX_ROBOT_SPEED_MM_S="$REAL_MAX_SPEED"
     MAX_TRANSLATION_PER_COMMAND_MM="$REAL_MAX_STEP"
-    export REAL_CONFIG_PATH ROBOT_MOVE_SPEED_MM_S MAX_ROBOT_SPEED_MM_S \
+    # REAL_CONFIG_PATH is intentionally not exported yet.  The outer launcher
+    # validates the YAML before detaching, then starts this script again as the
+    # supervisor.  Exporting the derived absolute path here would leak it into
+    # that child, where it would be mistaken for a user-supplied override.
+    export ROBOT_MOVE_SPEED_MM_S MAX_ROBOT_SPEED_MM_S \
         MAX_TRANSLATION_PER_COMMAND_MM
     if ! $CHECK_CONFIG || [[ -n "${GATEWAY_AUTH_SECRET_FILE:-}" || -n "${GATEWAY_EXPECTED_ID:-}" ]]; then
         [[ -n "${GATEWAY_AUTH_SECRET_FILE:-}" && -n "${GATEWAY_EXPECTED_ID:-}" ]] \
             || fail "real mode requires both GATEWAY_AUTH_SECRET_FILE and GATEWAY_EXPECTED_ID."
-        PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
+        REAL_CONFIG_PATH="$REAL_CONFIG_PATH" \
+            PYTHONPATH="$APP_ROOT/packages/surgical_contracts:$APP_ROOT" \
             "$CONFIG_PYTHON" -c '
 import os
 from robot_runtime.gateway_session import GatewaySessionManager
@@ -560,6 +565,13 @@ PY_HTTP
 if [[ "$INTERNAL_SUPERVISOR" != 1 ]]; then
     launch_detached_supervisor
     exit $?
+fi
+
+# Only the detached supervisor and its managed services need the resolved path
+# in their environment.  Keeping this after the detach boundary prevents the
+# launcher from polluting the supervisor's fresh configuration parse.
+if [[ "$ROBOT_MODE" == real ]]; then
+    export REAL_CONFIG_PATH
 fi
 
 
