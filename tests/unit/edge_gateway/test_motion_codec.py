@@ -8,6 +8,7 @@ from edge_gateway.huayan.models import ProtocolError
 from edge_gateway.huayan.motion_codec import (
     JointWaypoint,
     decode_write_reply,
+    decode_write_reply_details,
     encode_group_enabled,
 )
 
@@ -68,3 +69,14 @@ def test_group_write_reply_rejects_bad_framing_and_unknown_parser_mode() -> None
         decode_write_reply(b"GrpEnable,OK", command="GrpEnable")
     with pytest.raises(ValueError, match="unsupported"):
         decode_write_reply(b"Anything,OK,;", command="Anything")
+
+
+def test_write_reply_details_preserve_vendor_code_and_comma_message() -> None:
+    reply = decode_write_reply_details(
+        b"WayPoint,Fail,20006,invalid,blend radius,;",
+        command="WayPoint",
+    )
+
+    assert reply.accepted is False
+    assert reply.vendor_error_code == 20006
+    assert reply.vendor_error_message == "invalid,blend radius"

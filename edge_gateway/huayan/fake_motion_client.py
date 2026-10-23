@@ -13,9 +13,9 @@ from .adapter import read_override, read_waypoint_id
 from .command_codec import CommandFrameDecoder, decode_reply, encode_read
 from .models import ProtocolError, ReadCommand, ResponseUnknown
 from .motion_codec import (
-    JointWaypoint, LinearWaypoint, decode_write_reply, encode_group_enabled,
-    encode_group_continue, encode_group_interrupt, encode_software_stop,
-    encode_speed_override,
+    JointWaypoint, LinearWaypoint, WaypointFailure, decode_write_reply,
+    decode_write_reply_details, encode_group_enabled, encode_group_continue,
+    encode_group_interrupt, encode_software_stop, encode_speed_override,
 )
 
 
@@ -31,6 +31,7 @@ class FakeMotionClient:
         self._socket: socket.socket | None = None
         self._decoder = CommandFrameDecoder()
         self._lock = Lock()
+        self.last_waypoint_failure: WaypointFailure | None = None
 
     def connect(self) -> None:
         with self._lock:
@@ -86,15 +87,27 @@ class FakeMotionClient:
             self._lock.release()
 
     def waypoint(self, waypoint: LinearWaypoint | JointWaypoint) -> bool:
-        return decode_write_reply(self._exchange(waypoint.encode()), command="WayPoint")
+        return self.waypoint_sequence((waypoint,))
 
     def waypoint_sequence(
         self, waypoints: tuple[LinearWaypoint | JointWaypoint, ...],
     ) -> bool:
         if not waypoints:
             raise ValueError("WayPoint sequence cannot be empty")
-        for waypoint in waypoints:
-            if not self.waypoint(waypoint):
+        self.last_waypoint_failure = None
+        for index, waypoint in enumerate(waypoints, start=1):
+            reply = decode_write_reply_details(
+                self._exchange(waypoint.encode()), command="WayPoint",
+            )
+            if not reply.accepted:
+                assert reply.vendor_error_code is not None
+                self.last_waypoint_failure = WaypointFailure(
+                    index=index,
+                    total=len(waypoints),
+                    waypoint_id=waypoint.waypoint_id,
+                    vendor_error_code=reply.vendor_error_code,
+                    vendor_error_message=reply.vendor_error_message,
+                )
                 return False
         return True
 

@@ -973,6 +973,59 @@ def test_failed_remote_motion_can_be_followed_by_success_without_restart(
             client.close()
 
 
+def test_vendor_waypoint_fail_is_not_misreported_as_timeout(tmp_path) -> None:
+    with FakeHuayanController(
+        accept_fake_motion=True,
+        motion_actions={
+            "WayPoint": [
+                CommandAction((b"WayPoint,Fail,20006,invalid parameters,;",))
+            ],
+        },
+    ) as fake:
+        client = FakeMotionClient(
+            "127.0.0.1", fake.command_port, timeout_s=0.1,
+        )
+        client.connect()
+        journal = CommandJournal(tmp_path / "vendor-rejected.journal")
+        feedback_sequence = 10
+
+        def feedback():
+            nonlocal feedback_sequence
+            feedback_sequence += 1
+            return (
+                telemetry(sequence=feedback_sequence),
+                "controller stationary after rejected WayPoint",
+            )
+
+        executor = RemoteMotionExecutor(
+            trial_factory=lambda: FakeMotionTrial(
+                client=client,
+                journal=journal,
+                timing=timing(),
+                approval=approval(),
+                path_ik=None,
+            ),
+            snapshot=telemetry,
+            readback=readback,
+            feedback=feedback,
+            poll_interval_s=0.001,
+        )
+        try:
+            command = envelope("vendor-rejected")
+            result = executor.execute(command, command_fingerprint(command))
+
+            assert result.status == ToolStatus.FAILED
+            assert result.error_code == ErrorCode.ROBOT_COMMAND_REJECTED
+            assert "WayPoint 1/1" in (result.error_message or "")
+            assert "code=20006: invalid parameters" in (
+                result.error_message or ""
+            )
+            assert journal.unresolved() == ()
+        finally:
+            journal.close()
+            client.close()
+
+
 def test_waypoint_frame_is_move_l_without_blend_seek_or_joint_target() -> None:
     frame = LinearWaypoint((1, 2, 3, 4, 5, 6), "FAKE_FLANGE", "Base", 2, 10,
                            "F123", (11, 12, 13, 14, 15, 16)).encode()
@@ -1172,6 +1225,11 @@ def test_waypoint_fail_is_not_proof_of_no_motion_and_requests_stop(tmp_path) -> 
             command = envelope()
             assert trial.submit(command, telemetry(), readback(), arm(command), lease(),
                                 now_ms=BASE_MS, now_monotonic_ns=BASE_NS) == "stopping"
+            assert trial.stop_reason == (
+                "vendor rejected WayPoint 1/1 "
+                "(id=F277fe6f195c14c18, code=20006: rejected); "
+                "motion unverified"
+            )
             assert journal.record(command.command_id)["state"] == "stopping"
             assert trial.potentially_moving
             assert len([frame for frame in fake.received_commands if frame.startswith(b"GrpStop,")]) == 1

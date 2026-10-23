@@ -96,6 +96,26 @@ class JointWaypoint:
         return frame
 
 
+@dataclass(frozen=True)
+class WriteReply:
+    """Parsed controller acknowledgement without discarding Fail details."""
+
+    accepted: bool
+    vendor_error_code: int | None = None
+    vendor_error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class WaypointFailure:
+    """The exact point and vendor reply which stopped a queued sequence."""
+
+    index: int
+    total: int
+    waypoint_id: str
+    vendor_error_code: int
+    vendor_error_message: str | None = None
+
+
 def encode_software_stop() -> bytes:
     """Ordinary TCP stop request, never a physical emergency stop."""
     return b"GrpStop,0,;"
@@ -128,8 +148,8 @@ def encode_speed_override(value: float) -> bytes:
     return f"SetOverride,0,{_number(value)},;".encode("ascii")
 
 
-def decode_write_reply(frame: bytes, *, command: str) -> bool:
-    """Return acceptance only. An OK reply is never physical-state proof."""
+def decode_write_reply_details(frame: bytes, *, command: str) -> WriteReply:
+    """Parse a write reply while retaining bounded vendor diagnostics."""
     if command not in (
         "WayPoint", "GrpStop", "GrpInterrupt", "GrpContinue",
         "GrpEnable", "GrpDisable", "SetOverride",
@@ -142,7 +162,16 @@ def decode_write_reply(frame: bytes, *, command: str) -> bool:
     except UnicodeDecodeError as exc:
         raise ProtocolError("write reply is not ASCII") from exc
     if fields == [command, "OK"]:
-        return True
+        return WriteReply(accepted=True)
     if len(fields) >= 3 and fields[0] == command and fields[1] == "Fail" and fields[2].isdecimal():
-        return False
+        return WriteReply(
+            accepted=False,
+            vendor_error_code=int(fields[2]),
+            vendor_error_message=(",".join(fields[3:])[:512] or None),
+        )
     raise ProtocolError("unexpected motion reply")
+
+
+def decode_write_reply(frame: bytes, *, command: str) -> bool:
+    """Return acceptance only. An OK reply is never physical-state proof."""
+    return decode_write_reply_details(frame, command=command).accepted

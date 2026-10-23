@@ -242,10 +242,8 @@ class LocalMotionTrial:
             raise ValueError("continuous sequence cannot be empty")
         if frames[-1].blend_radius_mm != 0:
             raise ValueError("the final WayPoint must stop with zero blend radius")
-        if len(frames) > 1 and any(
-            frame.blend_radius_mm <= 0 for frame in frames[:-1]
-        ):
-            raise ValueError("intermediate WayPoints require a positive blend radius")
+        if any(frame.blend_radius_mm < 0 for frame in frames[:-1]):
+            raise ValueError("intermediate WayPoint blend radius cannot be negative")
         if not lease.active or lease.owner != "remote":
             raise ValueError("continuous sequence requires the remote motion lease")
         now_monotonic_ns = (
@@ -293,8 +291,26 @@ class LocalMotionTrial:
         if not accepted:
             # A Fail reply is not proof of physical non-movement. Require
             # direct observation/reconciliation before another local trial.
-            self.journal.transition(self.command_id, "unknown", evidence="vendor Fail reply; motion unverified")
-            delivered = self.request_stop(reason="vendor rejected WayPoint; motion unverified")
+            failure = getattr(self.client, "last_waypoint_failure", None)
+            if failure is None:
+                reason = "vendor rejected WayPoint; motion unverified"
+            else:
+                message = (
+                    f": {failure.vendor_error_message}"
+                    if failure.vendor_error_message
+                    else ""
+                )
+                reason = (
+                    f"vendor rejected WayPoint {failure.index}/{failure.total} "
+                    f"(id={failure.waypoint_id}, code={failure.vendor_error_code}{message}); "
+                    "motion unverified"
+                )
+            self.journal.transition(
+                self.command_id,
+                "unknown",
+                evidence=reason[:128],
+            )
+            delivered = self.request_stop(reason=reason)
             return "stopping" if delivered == "sent" else "stop_unconfirmed"
         self.journal.transition(self.command_id, "accepted")
         return "accepted"

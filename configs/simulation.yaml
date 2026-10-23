@@ -12,7 +12,7 @@ entry_point_env:
   joint_speed_deg_s: 15.0 # 关节相对旋转速度
   joint_acceleration_deg_s2: 30.0 # 关节相对旋转加速度
   maximum_rotation_deg: 720.0 # 与真机 limits.max_rotation_deg 一致
-  sequence_blend_radius_mm: 10.0 # 与真机一致；连续序列中间点采用圆滑过渡，最后一点仍精确停止
+  sequence_blend_radius_mm: 10.0 # 与真机一致的最大过渡半径；按相邻线段动态缩小，最后一点精确停止
   trajectory_history_limit: 2048 # 最多保留 2048 个历史轨迹点
   auto_execute_delay_s: 0.01 # 解析完成后留给用户取消的时间；超时自动执行
 

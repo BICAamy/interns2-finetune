@@ -444,8 +444,8 @@ def test_web_confirmation_runs_all_real_task_motion_on_fake(
                 assert [
                     float(frame.split(b",")[18]) for frame in sequence_frames
                 ] == [
-                    config.motion.sequence_blend_radius_mm,
-                    config.motion.sequence_blend_radius_mm,
+                    15.0 * 0.45,
+                    15.0 * 0.45,
                     0.0,
                     0.0,
                 ]

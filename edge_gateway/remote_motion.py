@@ -534,10 +534,10 @@ class RemoteMotionExecutor:
                         "F"
                         + hashlib.sha256(child.command_id.encode()).hexdigest()[:16]
                     ),
-                    blend_radius_mm=(
-                        trial.approval.sequence_blend_radius_mm
-                        if index < len(planned) - 1
-                        else 0.0
+                    blend_radius_mm=self._sequence_blend_radius(
+                        planned,
+                        index,
+                        trial.approval.sequence_blend_radius_mm,
                     ),
                 )
                 for index, (child, segment_start, target) in enumerate(planned)
@@ -585,6 +585,47 @@ class RemoteMotionExecutor:
                 if self._active_trial is trial:
                     self._active_trial = None
                 self._control_condition.notify_all()
+
+    @staticmethod
+    def _sequence_blend_radius(
+        planned: list[
+            tuple[RobotCommandEnvelope, RobotTelemetry, PreflightTarget]
+        ],
+        index: int,
+        configured_radius_mm: float,
+    ) -> float:
+        """Treat YAML radius as a maximum and fit it to local path geometry.
+
+        This mirrors the simulation controller: only adjacent relative
+        Cartesian segments are rounded, and each radius remains below half of
+        both neighbouring segment lengths.  A zero result is a valid exact
+        waypoint, not a malformed continuous sequence.
+        """
+        if configured_radius_mm <= 0 or index >= len(planned) - 1:
+            return 0.0
+        child, segment_start, target = planned[index]
+        next_child, _next_start, next_target = planned[index + 1]
+        if not isinstance(child.payload, MoveRelativeRequest) or not isinstance(
+            next_child.payload,
+            MoveRelativeRequest,
+        ):
+            return 0.0
+        start_pose = segment_start.actual_pose_robot_base
+        if start_pose is None:
+            return 0.0
+        incoming = math.dist(
+            start_pose.translation_mm,
+            target.pose.translation_mm,
+        )
+        outgoing = math.dist(
+            target.pose.translation_mm,
+            next_target.pose.translation_mm,
+        )
+        return min(
+            configured_radius_mm,
+            incoming * 0.45,
+            outgoing * 0.45,
+        )
 
     @staticmethod
     def _sequence_batch_envelope(
@@ -910,7 +951,12 @@ class RemoteMotionExecutor:
         detail = trial.stop_reason or f"local motion ended in state {state}"
         if trial.last_feedback_debug:
             detail = f"{detail}; {trial.last_feedback_debug}"
-        return self._failure(envelope, ErrorCode.ROBOT_TIMEOUT, detail)
+        error_code = (
+            ErrorCode.ROBOT_COMMAND_REJECTED
+            if detail.startswith("vendor rejected WayPoint")
+            else ErrorCode.ROBOT_TIMEOUT
+        )
+        return self._failure(envelope, error_code, detail)
 
     @classmethod
     def _exception_failure(

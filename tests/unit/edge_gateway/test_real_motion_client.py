@@ -113,6 +113,41 @@ def test_real_writer_queues_prevalidated_sequence_serially(monkeypatch):
         assert [frame.split(b",")[18] for frame in frames] == [b"10", b"0"]
 
 
+def test_real_writer_reports_rejected_point_and_next_client_can_run(monkeypatch):
+    actions = [
+        CommandAction((b"WayPoint,OK,;",)),
+        CommandAction((b"WayPoint,Fail,20006,invalid blend radius,;",)),
+    ]
+    with FakeHuayanController(
+        accept_fake_motion=True,
+        motion_actions={"WayPoint": actions},
+    ) as fake:
+        redirect_controller(monkeypatch, fake)
+        first = replace(waypoint(), blend_radius_mm=1)
+        second = replace(
+            waypoint(),
+            pose_xyzrpy=(102, 100, 100, 0, 0, 0),
+            waypoint_id="LOCAL_2",
+        )
+        with LocalRealMotionClient(real_shaped_config(), timeout_s=0.1) as client:
+            assert client.waypoint_sequence((first, second)) is False
+            assert client.last_waypoint_failure is not None
+            assert client.last_waypoint_failure.index == 2
+            assert client.last_waypoint_failure.total == 2
+            assert client.last_waypoint_failure.waypoint_id == "LOCAL_2"
+            assert client.last_waypoint_failure.vendor_error_code == 20006
+            assert (
+                client.last_waypoint_failure.vendor_error_message
+                == "invalid blend radius"
+            )
+
+        # A rejected, fully-replied command does not poison a new local
+        # single-use client or require a gateway restart.
+        with LocalRealMotionClient(real_shaped_config(), timeout_s=0.1) as client:
+            assert client.waypoint(second) is True
+            assert client.last_waypoint_failure is None
+
+
 def test_real_writer_never_retries_unknown_waypoint(monkeypatch):
     with FakeHuayanController(
         accept_fake_motion=True,

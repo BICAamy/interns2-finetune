@@ -22,9 +22,9 @@ from .command_client import _private_controller_host
 from .command_codec import CommandFrameDecoder, decode_reply, encode_read
 from .models import CommandReply, ProtocolError, ReadCommand, ResponseUnknown
 from .motion_codec import (
-    JointWaypoint, LinearWaypoint, decode_write_reply, encode_group_enabled,
-    encode_group_continue, encode_group_interrupt, encode_software_stop,
-    encode_speed_override,
+    JointWaypoint, LinearWaypoint, WaypointFailure, decode_write_reply,
+    decode_write_reply_details, encode_group_enabled, encode_group_continue,
+    encode_group_interrupt, encode_software_stop, encode_speed_override,
 )
 
 
@@ -57,6 +57,7 @@ class LocalRealMotionClient:
         self._identified = False
         self._write_command: str | None = None
         self.package_version: str | None = None
+        self.last_waypoint_failure: WaypointFailure | None = None
 
     def connect(self) -> None:
         if self.require_local_terminal:
@@ -218,15 +219,25 @@ class LocalRealMotionClient:
         """
         if not waypoints:
             raise ValueError("WayPoint sequence cannot be empty")
+        self.last_waypoint_failure = None
         for waypoint in waypoints:
             self._validate_waypoint(waypoint)
             waypoint.encode()
         self._write_command = "WayPoint"  # Set before first byte; disconnect is ambiguous.
         try:
-            for waypoint in waypoints:
-                if not decode_write_reply(
+            for index, waypoint in enumerate(waypoints, start=1):
+                reply = decode_write_reply_details(
                     self._exchange(waypoint.encode()), command="WayPoint",
-                ):
+                )
+                if not reply.accepted:
+                    assert reply.vendor_error_code is not None
+                    self.last_waypoint_failure = WaypointFailure(
+                        index=index,
+                        total=len(waypoints),
+                        waypoint_id=waypoint.waypoint_id,
+                        vendor_error_code=reply.vendor_error_code,
+                        vendor_error_message=reply.vendor_error_message,
+                    )
                     return False
             return True
         except ResponseUnknown as exc:
