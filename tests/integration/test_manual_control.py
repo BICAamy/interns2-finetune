@@ -28,6 +28,19 @@ class Transport:
     async def close(self): self.closed=True
 
 
+class BlockingStopTransport(Transport):
+    def __init__(self):
+        super().__init__(running=True)
+        self.stop_entered = asyncio.Event()
+        self.allow_stop = asyncio.Event()
+
+    async def stop(self):
+        self.events.append('stop')
+        self.stop_entered.set()
+        await self.allow_stop.wait()
+        self.running = False
+
+
 def setup(transport=None, *, mode=RuntimeMode.SIMULATION):
     store=SessionStore(); session=store.create(robot_mode=mode)
     runtime=SimpleNamespace(store=store, _robots={RuntimeMode.SIMULATION:SimpleNamespace(base_url='http://invalid')})
@@ -74,6 +87,31 @@ def test_release_cannot_overtake_a_slow_submit():
         assert transport.events==['submit-start','submit-ack','stop']
         assert ctl.lease is None and transport.closed
         await ctl.shutdown()
+    asyncio.run(case())
+
+
+def test_overlapping_stop_callers_wait_for_the_same_confirmation():
+    async def case():
+        transport = BlockingStopTransport()
+        _,ctl,sid,_,_=setup(transport)
+        token=(await ctl.acquire(sid))['token']
+        await ctl.input(sid,ManualInput(
+            token=token,sequence=1,kind='translation',continuous=True,
+        ))
+        await asyncio.sleep(.01)
+        lease=ctl.lease
+        assert lease is not None
+        first=asyncio.create_task(ctl._stop(lease))
+        await transport.stop_entered.wait()
+        second=asyncio.create_task(ctl._stop(lease))
+        await asyncio.sleep(.01)
+        assert not second.done()
+        transport.allow_stop.set()
+        await asyncio.gather(first,second)
+        assert transport.events.count('stop')==1
+        await ctl.release(sid,token)
+        await ctl.shutdown()
+
     asyncio.run(case())
 
 

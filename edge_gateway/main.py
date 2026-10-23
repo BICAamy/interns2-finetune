@@ -378,10 +378,21 @@ class EdgeGateway:
             else:
                 break
         if executor is None:
+            # A manual jog is intentionally short.  By the time the browser's
+            # pointer/key-up stop reaches the Mac, that finite move may already
+            # have completed and released its executor.  Stopping an already
+            # stationary robot is idempotent: fresh 10004 feedback is enough to
+            # confirm that no controller write is required.  Never make this
+            # inference from a missing/stale/moving sample.
+            if is_stop and self._fresh_stationary_feedback():
+                return self._stationary_stop_result(envelope)
             return self._failed_result(
                 envelope,
                 ErrorCode.COMMAND_CONFLICT,
-                "no active Mac-owned motion is available for this control request",
+                (
+                    "no active Mac-owned motion is available and fresh "
+                    "stationary feedback could not confirm an idempotent stop"
+                ),
             )
         if is_pause or is_resume:
             request = envelope.payload
@@ -420,6 +431,14 @@ class EdgeGateway:
             envelope.command_id,
             timeout_s=timeout_s,
         )
+        # Close the very small race where execute() has marked itself inactive
+        # but the gateway has not yet cleared _active_remote_executor.
+        if (
+            stop.delivery == StopDelivery.NOT_SENT
+            and stop.motion_stop == MotionStopConfirmation.UNCONFIRMED
+            and self._fresh_stationary_feedback()
+        ):
+            return self._stationary_stop_result(envelope)
         confirmed = (
             stop.delivery in {StopDelivery.SENT, StopDelivery.NOT_SENT}
             and stop.motion_stop == MotionStopConfirmation.CONFIRMED
@@ -443,6 +462,39 @@ class EdgeGateway:
             command_kind=envelope.command_kind,
             status=ToolStatus.SUCCESS,
             software_stop=stop,
+        )
+
+    def _fresh_stationary_feedback(self) -> bool:
+        """Return true only when current 10004 feedback proves no motion."""
+
+        record, _events = self.state.snapshot()
+        if record is None:
+            return False
+        try:
+            fresh = self.watchdog.is_fresh(record.sample)
+        except ValueError:
+            return False
+        return bool(
+            fresh
+            and not record.sample.moving
+            and record.sample.in_position
+        )
+
+    @staticmethod
+    def _stationary_stop_result(
+        envelope: RobotCommandEnvelope,
+    ) -> RobotCommandResult:
+        """Confirm an idempotent stop without claiming a controller write."""
+
+        return RobotCommandResult(
+            gateway_session_id=envelope.gateway_session_id,
+            command_id=envelope.command_id,
+            command_kind=envelope.command_kind,
+            status=ToolStatus.SUCCESS,
+            software_stop=SoftwareStopResult(
+                delivery=StopDelivery.NOT_SENT,
+                motion_stop=MotionStopConfirmation.CONFIRMED,
+            ),
         )
 
     @staticmethod

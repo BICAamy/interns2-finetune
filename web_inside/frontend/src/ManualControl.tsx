@@ -66,7 +66,9 @@ export default function ManualControl({sessionId,runtimeMode,telemetry}:{
     if(!sessionId||!token.current){if(close)closePanel();return;}
     setBusy(true);const current=token.current;
     try {
-      await send(null);
+      // /release owns the stop-and-confirm sequence.  Sending a separate stop
+      // first races the lease watchdog and can leave the drawer waiting on two
+      // overlapping stop requests.
       const data=await request(sessionId,"/release",{token:current});
       token.current=null;setOwner(false);setStatus(data);failed.current=false;setError("");
       if(close)closePanel();
@@ -204,9 +206,9 @@ export default function ManualControl({sessionId,runtimeMode,telemetry}:{
       <div className="manual-scroll">
         <section className="manual-section"><div className="manual-section-title"><h3>XYZ 平移</h3><span>Base · mm</span></div>
           <div className="manual-translation"><div className="manual-pad">
-            <div className="manual-north">{xy(1,1,"Y＋","W")}</div>
-            <div className="manual-west">{xy(0,-1,"X－","A")}</div><span className="manual-pad-center">XY</span>
-            <div className="manual-east">{xy(0,1,"X＋","D")}</div><div className="manual-south">{xy(1,-1,"Y－","S")}</div>
+            <div className="manual-north">{xy(0,1,"X＋","W")}</div>
+            <div className="manual-west">{xy(1,1,"Y＋","A")}</div><span className="manual-pad-center">XY</span>
+            <div className="manual-east">{xy(1,-1,"Y－","D")}</div><div className="manual-south">{xy(0,-1,"X－","S")}</div>
           </div><div className="manual-z">{xy(2,1,"Z＋","R")}{xy(2,-1,"Z－","F")}</div></div>
         </section>
         <section className="manual-section"><div className="manual-section-title"><h3>姿态调整</h3><span>Base RPY · °</span></div>

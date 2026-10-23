@@ -64,6 +64,7 @@ class Lease:
     fault: str | None = None
     external_stopped: bool = False
     submitted: asyncio.Event = field(default_factory=asyncio.Event)
+    stop_done: asyncio.Event = field(default_factory=asyncio.Event)
     transport: object | None = None
 
 
@@ -104,7 +105,11 @@ class ManualTransport:
             record = await self.record(command_id)
             if record['status']=='succeeded': return
             if record['status'] in {'failed','rejected','cancelled'}:
-                raise RuntimeError('停止请求未成功完成')
+                detail = (record.get('error') or {}).get('message')
+                raise RuntimeError(
+                    '停止请求未成功完成'
+                    + (f'：{detail}' if isinstance(detail, str) and detail else '')
+                )
             await asyncio.sleep(.03)
         raise TimeoutError('等待仿真停止反馈超时')
 
@@ -349,12 +354,15 @@ class ManualController:
     async def _stop(self, lease: Lease) -> None:
         lease.desired = None; lease.hold_until = 0
         if lease.stopping:
-            if lease.task: await asyncio.shield(lease.task)
+            await lease.stop_done.wait()
+            if (lease.fault or '').startswith('停止未确认'):
+                raise SessionConflict(lease.fault)
             return
         if not lease.active and not (lease.fault or '').startswith('停止未确认'):
             if lease.task and not lease.task.done(): await asyncio.shield(lease.task)
             return
         lease.stopping = True
+        lease.stop_done.clear()
         try:
             if lease.active: await asyncio.wait_for(lease.submitted.wait(), timeout=3)
             await lease.transport.stop()
@@ -365,6 +373,7 @@ class ManualController:
             raise SessionConflict(lease.fault) from error
         finally:
             lease.stopping = False
+            lease.stop_done.set()
 
     async def release(self, session_id: str, token: str) -> dict:
         lease = self._owned(session_id, token)

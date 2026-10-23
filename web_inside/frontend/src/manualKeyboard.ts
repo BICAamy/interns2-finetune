@@ -2,8 +2,8 @@ export type ManualKind = "translation" | "rotation" | "joint";
 export type ManualDirection = { kind: ManualKind; axis: number; direction: -1 | 1 };
 
 const directions: Record<string, ManualDirection> = {
-  KeyA: {kind:"translation",axis:0,direction:-1}, KeyD:{kind:"translation",axis:0,direction:1},
-  KeyW: {kind:"translation",axis:1,direction:1}, KeyS:{kind:"translation",axis:1,direction:-1},
+  KeyW: {kind:"translation",axis:0,direction:1}, KeyS:{kind:"translation",axis:0,direction:-1},
+  KeyA: {kind:"translation",axis:1,direction:1}, KeyD:{kind:"translation",axis:1,direction:-1},
   KeyR: {kind:"translation",axis:2,direction:1}, KeyF:{kind:"translation",axis:2,direction:-1},
   KeyI: {kind:"rotation",axis:0,direction:1}, KeyK:{kind:"rotation",axis:0,direction:-1},
   KeyJ: {kind:"rotation",axis:1,direction:1}, KeyL:{kind:"rotation",axis:1,direction:-1},

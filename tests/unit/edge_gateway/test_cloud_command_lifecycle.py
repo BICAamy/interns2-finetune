@@ -3,8 +3,15 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from dataclasses import replace
+from types import SimpleNamespace
 
 from edge_gateway.cloud_transport import CloudTransport
+from edge_gateway.config import RealEdgeConfig
+from edge_gateway.huayan.datasheet_codec import DatasheetFrameDecoder
+from edge_gateway.main import EdgeGateway
+from edge_gateway.state_machine import EdgeState
+from edge_gateway.watchdog import StateWatchdog
 from surgical_contracts import (
     CoordinateFrame,
     DistanceUnit,
@@ -25,6 +32,7 @@ from surgical_contracts import (
     ToolStatus,
     command_fingerprint,
 )
+from tests.fakes.huayan_controller import datasheet_document, datasheet_frame
 
 
 SESSION = "a" * 32
@@ -117,6 +125,90 @@ def _stop_frame() -> GatewayCommandFrame:
         fingerprint=command_fingerprint(envelope),
         envelope=envelope,
     )
+
+
+def _gateway_without_active_executor(tmp_path, *, moving: bool = False):
+    sample = DatasheetFrameDecoder(byte_order="little").feed(
+        datasheet_frame(datasheet_document())
+    )[0]
+    sample = replace(sample, moving=moving, in_position=not moving)
+    gateway = EdgeGateway.__new__(EdgeGateway)
+    gateway.config = RealEdgeConfig(
+        controller_host="192.168.0.10",
+        command_port=10003,
+        datasheet_port=10004,
+        expected_device_sn="FAKE-E05-001",
+        expected_robot_model="E05-Pro",
+        approved_package_versions=("6.3.6.20240305",),
+        server_url="ws://127.0.0.1:18001/v1/gateway/connect",
+        secret_file=tmp_path / "secret",
+        gateway_id="mac-edge",
+        datasheet_byte_order="little",
+        audit_path=tmp_path / "audit.log",
+        stale_ms=250,
+        robot_config=SimpleNamespace(
+            deadlines=SimpleNamespace(stop_ack_ms=100, response_ms=100),
+        ),
+    )
+    gateway.state = EdgeState()
+    gateway.state.observe(sample)
+    gateway.watchdog = StateWatchdog(stale_ms=250)
+    gateway._active_executor_lock = threading.Lock()
+    gateway._active_remote_executor = None
+    return gateway, sample
+
+
+def test_stop_after_short_motion_completed_is_idempotently_confirmed(tmp_path) -> None:
+    gateway, _sample = _gateway_without_active_executor(tmp_path)
+    frame = _stop_frame()
+
+    result = gateway._execute_motion_control(
+        frame.envelope,
+        frame.fingerprint,
+    )
+
+    assert result.status == ToolStatus.SUCCESS
+    assert result.software_stop is not None
+    assert result.software_stop.delivery == StopDelivery.NOT_SENT
+    assert (
+        result.software_stop.motion_stop
+        == MotionStopConfirmation.CONFIRMED
+    )
+
+
+def test_ownerless_stop_is_not_confirmed_while_robot_is_moving(tmp_path) -> None:
+    gateway, _sample = _gateway_without_active_executor(tmp_path, moving=True)
+    frame = _stop_frame()
+
+    result = gateway._execute_motion_control(
+        frame.envelope,
+        frame.fingerprint,
+    )
+
+    assert result.status == ToolStatus.FAILED
+    assert result.error_code == ErrorCode.COMMAND_CONFLICT
+    assert result.software_stop is not None
+    assert (
+        result.software_stop.motion_stop
+        == MotionStopConfirmation.UNCONFIRMED
+    )
+
+
+def test_ownerless_stop_is_not_confirmed_from_stale_feedback(tmp_path) -> None:
+    gateway, sample = _gateway_without_active_executor(tmp_path)
+    gateway.watchdog = StateWatchdog(
+        stale_ms=250,
+        clock_ns=lambda: sample.received_monotonic_ns + 251_000_000,
+    )
+    frame = _stop_frame()
+
+    result = gateway._execute_motion_control(
+        frame.envelope,
+        frame.fingerprint,
+    )
+
+    assert result.status == ToolStatus.FAILED
+    assert result.error_code == ErrorCode.COMMAND_CONFLICT
 
 
 def test_disconnect_waits_for_old_command_thread_before_clearing_owner() -> None:
