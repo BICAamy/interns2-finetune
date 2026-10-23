@@ -19,6 +19,7 @@ from .config import DEFAULT_CONFIG_PATH, EntryPointEnvConfig
 from .external_joint_state_controller import ExternalJointStateController
 from .renderer import TrajectoryRenderer
 from .visual_theme import apply_opengl_background
+from .visual_geometry import MM_PER_SCENE_UNIT, real_workspace_scene_bounds
 
 
 SCENE_PATH = Path(__file__).resolve().with_name("scene.py")
@@ -36,6 +37,8 @@ class PassiveRealMirrorEnv(SofaEnv):
         zero_offset_deg: tuple[float, ...] | None = None,
         base_to_sofa_translation_mm: tuple[float, ...] | None = None,
         base_to_sofa_quaternion_xyzw: tuple[float, ...] | None = None,
+        workspace_low_mm: tuple[float, ...] | None = None,
+        workspace_high_mm: tuple[float, ...] | None = None,
         config: EntryPointEnvConfig | None = None,
         config_path: str | Path = DEFAULT_CONFIG_PATH,
         model_dir: str | Path | None = None,
@@ -53,6 +56,14 @@ class PassiveRealMirrorEnv(SofaEnv):
         )
         self.camera_controller = OrbitCameraController()
         self._renderer = TrajectoryRenderer()
+        if (workspace_low_mm is None) != (workspace_high_mm is None):
+            raise ValueError("real workspace low and high bounds must be set together")
+        workspace_low_m, workspace_high_m = real_workspace_scene_bounds(
+            self.config.workspace.low_mm if workspace_low_mm is None else workspace_low_mm,
+            self.config.workspace.high_mm if workspace_high_mm is None else workspace_high_mm,
+            base_to_sofa_translation_mm=base_to_sofa_translation_mm,
+            base_to_sofa_quaternion_xyzw=base_to_sofa_quaternion_xyzw,
+        )
         initial = self.controller.kinematics.forward(
             np.deg2rad(self.config.robot.initial_joint_positions_deg)
         )
@@ -72,7 +83,9 @@ class PassiveRealMirrorEnv(SofaEnv):
                 "initial_tcp_pose": flange_pose,
                 "force_link6_scale_z": self.config.robot.force_flange_offset_mm / 146.0,
                 "show_provisional_tool": False,
-                "show_command_workspace": False,
+                "show_command_workspace": True,
+                "workspace_low_m": workspace_low_m,
+                "workspace_high_m": workspace_high_m,
             },
         )
         self.action_space = spaces.Box(low=0.0, high=0.0, shape=(1,), dtype=np.float32)
@@ -165,11 +178,20 @@ class PassiveRealMirrorEnv(SofaEnv):
         )
         if freshness != SourceFreshness.FRESH:
             warning = f"{freshness.value.upper()} / FROZEN / NOT FOR CONTROL"
+        trajectory_mm = (
+            self.controller.trajectory_sofa_mm
+            if self.controller.coordinate_calibrated
+            else self.controller.trajectory_mm
+        )
+        trajectory_scene = tuple(
+            np.asarray(point, dtype=np.float64) / MM_PER_SCENE_UNIT
+            for point in trajectory_mm
+        )
         return self._renderer.render(
             frame,
-            # Step 8 aligns the robot links, not the final surgical tool.
-            # Keep the TCP path/marker hidden until Step 9 validates the tool.
-            trajectory_scene=(),
+            # Draw only actual controller feedback.  The provisional TCP marker
+            # remains hidden until the physical tool has been validated.
+            trajectory_scene=trajectory_scene,
             tcp_scene=None,
             entry_scene=None,
             warning=warning,

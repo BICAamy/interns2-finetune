@@ -8,6 +8,7 @@ import pytest
 
 from simulation.entry_point_env.config import EntryPointEnvConfig
 from simulation.entry_point_env.external_joint_state_controller import ExternalJointStateController
+from simulation.entry_point_env.visual_geometry import real_workspace_scene_bounds
 from simulation.entry_point_env.renderer import TrajectoryRenderer
 from surgical_contracts import (
     CoordinateFrame, DistanceUnit, Pose6D, RobotProvider, RobotTelemetry,
@@ -145,6 +146,36 @@ def test_clear_trajectory_keeps_only_the_latest_actual_sample() -> None:
 
     assert controller.snapshot is snapshot
     assert controller.trajectory_mm == (snapshot.actual_tcp_robot_base_mm,)
+
+
+def test_real_workspace_bounds_are_transformed_into_sofa_scene_units() -> None:
+    low, high = real_workspace_scene_bounds(
+        (200.0, -1000.0, 100.0),
+        (1000.0, 1000.0, 800.0),
+        base_to_sofa_translation_mm=(10.0, 20.0, 30.0),
+        base_to_sofa_quaternion_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    assert low == pytest.approx((0.21, -0.98, 0.13))
+    assert high == pytest.approx((1.01, 1.02, 0.83))
+
+
+def test_calibrated_real_feedback_retains_sofa_trajectory_for_rendering() -> None:
+    controller = ExternalJointStateController(
+        CONFIG,
+        stale_ms=250,
+        sign=(1, 1, 1, 1, 1, 1),
+        zero_offset_deg=(0, 0, 0, 0, 0, 0),
+        base_to_sofa_translation_mm=(10.0, 20.0, 30.0),
+        base_to_sofa_quaternion_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    assert controller.apply_external_joint_state(telemetry(1))
+    assert controller.apply_external_joint_state(telemetry(2))
+    np.testing.assert_allclose(
+        controller.trajectory_sofa_mm,
+        ((511.0, 20.0, 530.0), (512.0, 20.0, 530.0)),
+    )
 
 
 def test_uncalibrated_overlay_has_no_provisional_tcp_marker() -> None:

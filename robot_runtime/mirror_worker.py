@@ -64,6 +64,8 @@ def create_sofa_mirror_environment(
     zero_offset_deg: tuple[float, ...] | None,
     base_to_sofa_translation_mm: tuple[float, ...] | None,
     base_to_sofa_quaternion_xyzw: tuple[float, ...] | None,
+    workspace_low_mm: tuple[float, ...] | None,
+    workspace_high_mm: tuple[float, ...] | None,
 ) -> MirrorEnvironment:
     """SOFA 场景和 OpenGL 是由专门的 mirror thread 创建和操作"""
     from simulation.entry_point_env.passive_mirror_env import PassiveRealMirrorEnv
@@ -74,6 +76,8 @@ def create_sofa_mirror_environment(
         zero_offset_deg=zero_offset_deg,
         base_to_sofa_translation_mm=base_to_sofa_translation_mm,
         base_to_sofa_quaternion_xyzw=base_to_sofa_quaternion_xyzw,
+        workspace_low_mm=workspace_low_mm,
+        workspace_high_mm=workspace_high_mm,
     )
 
 
@@ -87,6 +91,8 @@ class RealMirrorWorker:
         zero_offset_deg: tuple[float, ...] | None = None, # 标定参数
         base_to_sofa_translation_mm: tuple[float, ...] | None = None, # 标定参数
         base_to_sofa_quaternion_xyzw: tuple[float, ...] | None = None, # 标定参数
+        workspace_low_mm: tuple[float, ...] | None = None,
+        workspace_high_mm: tuple[float, ...] | None = None,
         environment_factory: Callable[[], MirrorEnvironment] | None = None, # 环境对象
         tick_interval_s: float = 0.05, # mirror 自己多久循环一次，这里硬编码为0.05s -> 20Hz
     ) -> None:
@@ -99,6 +105,8 @@ class RealMirrorWorker:
             base_to_sofa_quaternion_xyzw is None
         ):
             raise ValueError("Base-to-SOFA translation and quaternion must be set together")
+        if (workspace_low_mm is None) != (workspace_high_mm is None):
+            raise ValueError("real workspace low and high bounds must be set together")
         self._calibrated = sign is not None and base_to_sofa_translation_mm is not None
         self._environment_factory = environment_factory or (
             lambda: create_sofa_mirror_environment(
@@ -107,6 +115,8 @@ class RealMirrorWorker:
                 zero_offset_deg=zero_offset_deg,
                 base_to_sofa_translation_mm=base_to_sofa_translation_mm,
                 base_to_sofa_quaternion_xyzw=base_to_sofa_quaternion_xyzw,
+                workspace_low_mm=workspace_low_mm,
+                workspace_high_mm=workspace_high_mm,
             )
         )
         self._tick_interval_s = tick_interval_s

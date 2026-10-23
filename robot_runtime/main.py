@@ -70,6 +70,8 @@ def app_from_environment():
                 zero_offset_deg=config.joint_mapping.zero_offset_deg,
                 base_to_sofa_translation_mm=config.base_to_sofa.translation_mm,
                 base_to_sofa_quaternion_xyzw=config.base_to_sofa.quaternion_xyzw,
+                workspace_low_mm=config.limits.workspace_low_mm,
+                workspace_high_mm=config.limits.workspace_high_mm,
             )
         policy = RemoteMotionPolicy(
             tcp_name=config.tool.tcp_name,
