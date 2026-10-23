@@ -262,8 +262,11 @@ class ManualController:
             return self.status(session_id)
         if lease.external_stopped:
             raise SessionConflict("直接控制已被停止/急停，请退出面板后重新接管")
+        if lease.fault and not lease.stopping:
+            await self._recover_motion_fault_if_stationary(lease)
         if lease.fault or lease.stopping:
-            raise SessionConflict("上次停止尚未确认或动作失败，请先释放控制权")
+            detail = lease.fault or "停止操作仍在进行"
+            raise SessionConflict(f"上次动作尚未安全恢复：{detail}")
         if self._mode(session_id) != lease.mode:
             await self._stop(lease)
             raise SessionConflict("模式已变化，手动输入已停止")
@@ -286,6 +289,48 @@ class ManualController:
         if lease.task is None or lease.task.done():
             lease.task = asyncio.create_task(self._run(lease))
         return self.status(session_id)
+
+    async def _recover_motion_fault_if_stationary(self, lease: Lease) -> bool:
+        """Clear a per-step failure only after fresh telemetry proves safety.
+
+        Direct gesture/manual motion may reach a kinematic boundary and have
+        one WayPoint rejected.  That individual step must not permanently
+        poison the control lease.  A genuinely unconfirmed stop remains
+        latched and can only be released through the confirmed stop path.
+        """
+
+        if (
+            not lease.fault
+            or lease.fault.startswith("停止未确认")
+            or lease.active
+            or lease.stopping
+        ):
+            return False
+        try:
+            view = await asyncio.to_thread(
+                self.runtime.get_robot_telemetry,
+                lease.session_id,
+            )
+        except Exception:
+            return False
+        stationary = bool(
+            self._mode(lease.session_id) == lease.mode
+            and view.connected
+            and not view.estop
+            and getattr(view, "freshness", None) == "fresh"
+            and getattr(view, "moving", None) is False
+            and getattr(view, "in_position", None) is True
+            and view.motion_state not in {"moving", "paused", "estop"}
+            and getattr(view, "vendor_fault", None) is None
+            and getattr(view, "emergency_stop_circuit_fault", False) is not True
+            and getattr(view, "safeguard_active", False) is not True
+            and getattr(view, "safeguard_circuit_fault", False) is not True
+            and (lease.mode != RuntimeMode.REAL or view.enabled is True)
+        )
+        if stationary:
+            lease.fault = None
+            return True
+        return False
 
     def _request(
         self,

@@ -5,6 +5,10 @@ import pytest
 from fastapi.testclient import TestClient
 from surgical_contracts import RuntimeMode, MotionStepKind
 from web.backend.manual_control import ManualController, ManualInput
+from web_inside.backend.manual_control import (
+    ManualController as InsideManualController,
+    ManualInput as InsideManualInput,
+)
 from web.backend.main import create_app
 from web.backend.sessions import SessionStore, SessionConflict
 from web.backend.models import SessionStatus
@@ -41,13 +45,46 @@ class BlockingStopTransport(Transport):
         self.running = False
 
 
-def setup(transport=None, *, mode=RuntimeMode.SIMULATION):
+class FailOnceTransport(Transport):
+    def __init__(self):
+        super().__init__()
+        self.attempts = 0
+
+    async def submit(self, request):
+        self.attempts += 1
+        self.commands.append(request)
+        if self.attempts == 1:
+            return {
+                'status': 'failed',
+                'error': {'message': 'vendor rejected WayPoint; motion unverified'},
+            }
+        return {'status': 'succeeded'}
+
+
+def setup(
+    transport=None,
+    *,
+    mode=RuntimeMode.SIMULATION,
+    controller_class=ManualController,
+):
     store=SessionStore(); session=store.create(robot_mode=mode)
     runtime=SimpleNamespace(store=store, _robots={RuntimeMode.SIMULATION:SimpleNamespace(base_url='http://invalid')})
     runtime._session_mode=lambda sid:RuntimeMode(store.snapshot(sid).robot_mode)
-    runtime.get_robot_telemetry=lambda sid:SimpleNamespace(connected=True,estop=False,motion_state='idle')
+    runtime.get_robot_telemetry=lambda sid:SimpleNamespace(
+        connected=True,
+        estop=False,
+        freshness='fresh',
+        moving=False,
+        in_position=True,
+        motion_state='idle',
+        vendor_fault=None,
+        emergency_stop_circuit_fault=False,
+        safeguard_active=False,
+        safeguard_circuit_fault=False,
+        enabled=True,
+    )
     fake=transport or Transport(); clock=[100.0]
-    controller=ManualController(runtime,clock=lambda:clock[0],transport_factory=lambda:fake)
+    controller=controller_class(runtime,clock=lambda:clock[0],transport_factory=lambda:fake)
     runtime.manual=controller
     return runtime,controller,session.session_id,fake,clock
 
@@ -152,6 +189,51 @@ def test_gesture_soft_pause_does_not_latch_external_stop_and_can_resume():
     asyncio.run(case())
 
 
+@pytest.mark.parametrize(
+    'controller_class,input_class',
+    [
+        (ManualController, ManualInput),
+        (InsideManualController, InsideManualInput),
+    ],
+)
+def test_rejected_gesture_step_recovers_after_fresh_stationary_feedback(
+    controller_class,
+    input_class,
+):
+    async def case():
+        transport = FailOnceTransport()
+        runtime,ctl,sid,_,_=setup(
+            transport,
+            mode=RuntimeMode.REAL,
+            controller_class=controller_class,
+        )
+        runtime._robots[RuntimeMode.REAL] = SimpleNamespace(base_url='http://invalid')
+        token=(await ctl.acquire(sid,owner='gesture'))['token']
+        await ctl.input(sid,input_class(
+            token=token,sequence=1,kind='translation',axis=0,
+            direction=1,amount=15,continuous=False,
+        ))
+        assert ctl.lease is not None and ctl.lease.task is not None
+        await ctl.lease.task
+        assert ctl.lease.fault == 'vendor rejected WayPoint; motion unverified'
+
+        # The failed target is local to this one step. Fresh READY/InPos
+        # telemetry proves that a different direction can be attempted without
+        # closing the panel or restarting the gateway.
+        await ctl.input(sid,input_class(
+            token=token,sequence=2,kind='translation',axis=0,
+            direction=-1,amount=15,continuous=False,
+        ))
+        assert ctl.lease.task is not None
+        await ctl.lease.task
+        assert ctl.lease.fault is None
+        assert transport.attempts == 2
+        await ctl.release(sid,token)
+        await ctl.shutdown()
+
+    asyncio.run(case())
+
+
 def test_sequence_and_token_prevent_replayed_or_other_tab_inputs():
     async def case():
         _,ctl,sid,_,_=setup()
@@ -198,6 +280,10 @@ def test_missing_stop_confirmation_retains_the_control_lock():
         await asyncio.sleep(.01)
         with pytest.raises(SessionConflict):await ctl.release(sid,token)
         assert ctl.lease is not None
+        with pytest.raises(SessionConflict, match='停止未确认'):
+            await ctl.input(sid,ManualInput(
+                token=token,sequence=2,kind='translation',direction=-1,
+            ))
         with pytest.raises(SessionConflict):ctl.assert_task_allowed(RuntimeMode.SIMULATION)
         transport.fail_stop=False
         await ctl.release(sid,token);await ctl.shutdown()
