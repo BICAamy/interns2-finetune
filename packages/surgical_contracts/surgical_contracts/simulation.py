@@ -18,6 +18,7 @@ class RobotCommandKind(str, Enum):
     MOVE_TO_ENTRY = "move_to_entry"
     MOVE_RELATIVE = "move_relative"
     MOVE_SEQUENCE = "move_sequence"
+    DIRECT_JOG = "direct_jog"
     STOP = "stop"
     PAUSE = "pause"
     RESUME = "resume"

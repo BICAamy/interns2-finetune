@@ -53,6 +53,7 @@ from .planner import (
     PlanPunctureResult,
 )
 from .robot import (
+    DirectJogRequest,
     ExecutionCertainty,
     FaultRecoverability,
     LinkState,
@@ -111,6 +112,7 @@ __all__ = [
     "Direction",
     "DistanceSource",
     "DistanceUnit",
+    "DirectJogRequest",
     "MotionSequence",
     "MotionSequenceStep",
     "MotionStepKind",

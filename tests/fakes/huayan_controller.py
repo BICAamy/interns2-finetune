@@ -268,6 +268,7 @@ class FakeHuayanController:
             if name in (
                 "WayPoint", "GrpStop", "GrpInterrupt", "GrpContinue",
                 "GrpEnable", "GrpDisable", "SetOverride",
+                "LongJogL", "LongJogJ", "LongMoveEvent",
             ) and self.accept_fake_motion and not fast:
                 if name == "WayPoint":
                     joint_mode = len(fields) == 25 and fields[19:21] == [b"0", b"1"]
@@ -309,6 +310,16 @@ class FakeHuayanController:
                         )
                     except (IndexError, ValueError):
                         valid = False
+                elif name in {"LongJogL", "LongJogJ"}:
+                    valid = (
+                        len(fields) == 5
+                        and fields[1] == b"0"
+                        and fields[2] in {str(index).encode() for index in range(6)}
+                        and fields[3] in {b"0", b"1"}
+                        and fields[4] in {b"0", b"1"}
+                    )
+                elif name == "LongMoveEvent":
+                    valid = fields == [b"LongMoveEvent", b"0"]
                 else:
                     valid = fields == [name.encode("ascii"), b"0"]
                 if not valid:
@@ -334,6 +345,9 @@ class FakeHuayanController:
                             self._enabled = False
                         elif name == "SetOverride":
                             self._override = requested_override
+                        elif name in {"LongJogL", "LongJogJ"}:
+                            self._moving = fields[4] == b"1"
+                            self._paused = False
                         elif name == "WayPoint" and self._simulate_waypoint_motion:
                             self._waypoint_queue.append(
                                 (target_pose, target_joints, joint_mode)

@@ -9,7 +9,7 @@ import time
 from typing import Callable
 
 from surgical_contracts import (
-    ErrorCode, GatewayCommandKind, LinkState, RobotCommandEnvelope,
+    DirectJogRequest, ErrorCode, GatewayCommandKind, LinkState, RobotCommandEnvelope,
     MotionStepKind, MoveSequenceRequest, RobotCommandResult, RobotTelemetry,
     MotionStopConfirmation, SetEnabledRequest, SoftwareStopResult,
     StopDelivery, ToolStatus,
@@ -260,12 +260,19 @@ class EdgeGateway:
                 GatewayCommandKind.MOVE_RELATIVE,
                 GatewayCommandKind.MOVE_TO_ENTRY,
                 GatewayCommandKind.MOVE_SEQUENCE,
+                GatewayCommandKind.DIRECT_JOG,
             }:
                 if local_preflight_deadline_ns is None:
                     return self._failed_result(
                         envelope,
                         ErrorCode.OPERATION_NOT_ENABLED,
                         "deadlines.motion_ms is required for remote motion",
+                    )
+                if envelope.command_kind == GatewayCommandKind.DIRECT_JOG:
+                    return self._execute_direct_jog(
+                        envelope,
+                        fingerprint,
+                        local_preflight_deadline_ns=local_preflight_deadline_ns,
                     )
                 return self._execute_remote_motion(
                     envelope,
@@ -367,7 +374,17 @@ class EdgeGateway:
         # existing bounded control deadline; never reject an in-order pause
         # merely because thread scheduling lost this race.
         executor_deadline = time.monotonic() + (
-            timeout_s if (is_pause or is_resume) else 0.0
+            timeout_s
+            if (
+                is_pause
+                or is_resume
+                or (
+                    is_stop
+                    and getattr(self, "_controller_operation_active", None) is not None
+                    and self._controller_operation_active.is_set()
+                )
+            )
+            else 0.0
         )
         executor = None
         while executor is None:
@@ -814,6 +831,106 @@ class EdgeGateway:
                     with self._active_executor_lock:
                         if self._active_remote_executor is executor:
                             self._active_remote_executor = None
+
+    def _execute_direct_jog(
+        self,
+        envelope: RobotCommandEnvelope,
+        fingerprint: str,
+        *,
+        local_preflight_deadline_ns: int,
+    ) -> RobotCommandResult:
+        """Run one held vendor jog; release is delivered through software stop."""
+
+        from .direct_jog import DirectJogExecutor
+        from .huayan.adapter import read_current_fsm, read_robot_state
+        from .huayan.models import ReadCommand
+        from .huayan.real_motion_client import LocalRealMotionClient
+
+        payload = envelope.payload
+        config = self.config.robot_config
+        if not isinstance(payload, DirectJogRequest) or config is None:
+            return self._failed_result(
+                envelope,
+                ErrorCode.INVALID_COMMAND_SCHEMA,
+                "direct-jog request or real configuration is unavailable",
+            )
+        if time.monotonic_ns() >= local_preflight_deadline_ns:
+            return self._failed_result(
+                envelope, ErrorCode.ROBOT_TIMEOUT,
+                "Mac-local direct-jog preflight deadline expired",
+            )
+
+        sampler = self._sampler()
+        before = sampler.snapshot()
+        if (
+            before.sample.moving
+            or before.sample.fsm_code != 33
+            or not before.sample.enabled
+            or not before.sample.in_position
+        ):
+            return self._failed_result(
+                envelope,
+                ErrorCode.OPERATION_NOT_ENABLED,
+                "10004 feedback is not enabled, stationary, READY and in-position",
+            )
+
+        timeout_s = config.deadlines.response_ms / 1000
+        requested_override = max(
+            0.01,
+            min(1.0, config.motion.controller_override * payload.speed_scale),
+        )
+        with LocalRealMotionClient(
+            config, timeout_s=timeout_s, require_local_terminal=False,
+        ) as override_client:
+            state = read_robot_state(override_client.request(ReadCommand.ROBOT_STATE))
+            fsm = read_current_fsm(override_client.request(ReadCommand.CURRENT_FSM))
+            if state.moving or not state.enabled or not state.in_position or fsm != 33:
+                return self._failed_result(
+                    envelope,
+                    ErrorCode.OPERATION_NOT_ENABLED,
+                    "10003 feedback is not enabled, stationary, READY and in-position",
+                )
+            if abs(override_client.current_override() - requested_override) > 1e-6:
+                if not override_client.set_override(
+                    requested_override, stationary_confirmed=True,
+                ):
+                    return self._failed_result(
+                        envelope,
+                        ErrorCode.ROBOT_COMMAND_REJECTED,
+                        "controller rejected the direct-jog speed override",
+                    )
+            if abs(override_client.current_override() - requested_override) > 1e-6:
+                return self._failed_result(
+                    envelope,
+                    ErrorCode.ROBOT_TIMEOUT,
+                    "10003 did not confirm the direct-jog speed override",
+                )
+
+        with LocalRealMotionClient(
+            config, timeout_s=timeout_s, require_local_terminal=False,
+        ) as jog_client:
+            executor = DirectJogExecutor(
+                client=jog_client,
+                snapshot=self.local_telemetry,
+                cloud_connected=lambda: self._cloud.session_id is not None,
+                keepalive_interval_s=0.2,
+                motion_timeout_s=config.deadlines.motion_ms / 1000,
+                stop_confirmation_s=config.deadlines.stop_ack_ms / 1000,
+            )
+            with self._active_executor_lock:
+                if self._active_remote_executor is not None:
+                    return self._failed_result(
+                        envelope,
+                        ErrorCode.COMMAND_CONFLICT,
+                        "another remote motion executor is active",
+                    )
+                self._active_remote_executor = executor
+            try:
+                return executor.execute(envelope, fingerprint)
+            finally:
+                with self._active_executor_lock:
+                    if self._active_remote_executor is executor:
+                        self._active_remote_executor = None
 
     def _wait_for_identity(self) -> None:
         deadline = time.monotonic() + 3

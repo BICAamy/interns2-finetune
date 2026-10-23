@@ -3,7 +3,7 @@ import asyncio
 from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
-from surgical_contracts import RuntimeMode, MotionStepKind
+from surgical_contracts import DirectJogRequest, RuntimeMode, MotionStepKind
 from web.backend.manual_control import ManualController, ManualInput
 from web_inside.backend.manual_control import (
     ManualController as InsideManualController,
@@ -362,7 +362,7 @@ def test_manual_large_increment_limit_is_still_enforced():
         (InsideManualController, InsideManualInput),
     ],
 )
-def test_real_held_translation_is_one_workspace_bounded_continuous_sequence(
+def test_real_held_input_uses_one_controller_long_jog_until_release(
     controller_class,
     input_class,
 ):
@@ -374,17 +374,6 @@ def test_real_held_translation_is_one_workspace_bounded_continuous_sequence(
             controller_class=controller_class,
         )
         runtime._robots[RuntimeMode.REAL] = SimpleNamespace(base_url='http://invalid')
-        original_telemetry = runtime.get_robot_telemetry
-
-        def telemetry(session_id):
-            view = original_telemetry(session_id)
-            view.actual_tcp_robot_base = {
-                'translation_mm': [455.0, 0.0, 650.0],
-            }
-            view.current_tcp = None
-            return view
-
-        runtime.get_robot_telemetry = telemetry
         token=(await ctl.acquire(sid))['token']
         await ctl.input(sid,input_class(
             token=token,
@@ -401,16 +390,14 @@ def test_real_held_translation_is_one_workspace_bounded_continuous_sequence(
             await asyncio.sleep(.002)
         assert len(transport.commands) == 1
         request = transport.commands[0]
-        assert len(request.steps) > 1
-        assert request.steps[0].translation_mm == (10.0, 0.0, 0.0)
-        assert all(step.translation_mm[1:] == (0.0, 0.0) for step in request.steps)
-        total = sum(step.translation_mm[0] for step in request.steps)
-        assert total <= ctl.policy.max_relative_translation_mm
-        assert total <= ctl.policy.direct_control_lookahead_mm
-        assert 455.0 + total <= ctl.policy.workspace_high_mm[0]
+        assert isinstance(request, DirectJogRequest)
+        assert request.kind == 'cartesian'
+        assert request.axis == 0
+        assert request.direction == 1
+        assert request.speed_scale == 1
 
-        # Renewals update the hold deadline; they do not create another
-        # proposal while the continuous controller sequence is still running.
+        # Renewals keep the same Mac-owned long jog alive. They do not create
+        # another proposal or another controller motion.
         await ctl.input(sid,input_class(
             token=token,
             sequence=2,
@@ -437,41 +424,48 @@ def test_real_held_translation_is_one_workspace_bounded_continuous_sequence(
         (InsideManualController, InsideManualInput),
     ],
 )
-def test_real_continuous_sequence_stops_cleanly_at_workspace_boundary(
+@pytest.mark.parametrize(
+    'kind,axis,expected_kind,expected_axis',
+    [
+        ('rotation', 2, 'cartesian', 5),
+        ('joint', 4, 'joint', 4),
+    ],
+)
+def test_real_continuous_rotation_and_joint_map_to_vendor_jog_axes(
     controller_class,
     input_class,
+    kind,
+    axis,
+    expected_kind,
+    expected_axis,
 ):
     async def case():
-        runtime,ctl,sid,transport,_=setup(
+        transport = Transport(running=True)
+        runtime,ctl,sid,_,_=setup(
+            transport,
             mode=RuntimeMode.REAL,
             controller_class=controller_class,
         )
         runtime._robots[RuntimeMode.REAL] = SimpleNamespace(base_url='http://invalid')
-        original_telemetry = runtime.get_robot_telemetry
-
-        def telemetry(session_id):
-            view = original_telemetry(session_id)
-            view.actual_tcp_robot_base = {
-                'translation_mm': [999.8, 0.0, 650.0],
-            }
-            view.current_tcp = None
-            return view
-
-        runtime.get_robot_telemetry = telemetry
         token=(await ctl.acquire(sid))['token']
         await ctl.input(sid,input_class(
             token=token,
             sequence=1,
-            kind='translation',
-            axis=0,
-            direction=1,
+            kind=kind,
+            axis=axis,
+            direction=-1,
             amount=10,
             continuous=True,
         ))
-        assert ctl.lease is not None and ctl.lease.task is not None
-        await ctl.lease.task
-        assert transport.commands == []
-        assert ctl.lease.fault is None
+        for _ in range(50):
+            if transport.commands:
+                break
+            await asyncio.sleep(.002)
+        request = transport.commands[0]
+        assert isinstance(request, DirectJogRequest)
+        assert request.kind == expected_kind
+        assert request.axis == expected_axis
+        assert request.direction == -1
         await ctl.release(sid,token)
         await ctl.shutdown()
 

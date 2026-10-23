@@ -17,6 +17,7 @@ from .base import SCHEMA_VERSION, ContractModel, SchemaVersion
 from .coordinates import CoordinateFrame, MotionStepKind
 from .errors import ErrorCode
 from .robot import (
+    DirectJogRequest,
     MoveCartesianPoseRequest,
     MoveJointAbsoluteRequest,
     MoveJointRelativeRequest,
@@ -45,6 +46,7 @@ class GatewayCommandKind(str, Enum):
     MOVE_JOINT_ABSOLUTE = "move_joint_absolute"
     MOVE_CARTESIAN_POSE = "move_cartesian_pose"
     MOVE_SEQUENCE = "move_sequence"
+    DIRECT_JOG = "direct_jog"
     PAUSE_REQUEST = "pause_request"
     RESUME_REQUEST = "resume_request"
     SOFTWARE_STOP_REQUEST = "software_stop_request"
@@ -93,6 +95,7 @@ class RobotCommandEnvelope(ContractModel):
         | MoveJointAbsoluteRequest
         | MoveJointRelativeRequest
         | MoveSequenceRequest
+        | DirectJogRequest
         | MotionControlRequest
         | SoftwareStopRequest
         | SetEnabledRequest
@@ -113,6 +116,7 @@ class RobotCommandEnvelope(ContractModel):
             GatewayCommandKind.MOVE_JOINT_RELATIVE: MoveJointRelativeRequest,
             GatewayCommandKind.MOVE_JOINT_ABSOLUTE: MoveJointAbsoluteRequest,
             GatewayCommandKind.MOVE_SEQUENCE: MoveSequenceRequest,
+            GatewayCommandKind.DIRECT_JOG: DirectJogRequest,
             GatewayCommandKind.PAUSE_REQUEST: MotionControlRequest,
             GatewayCommandKind.RESUME_REQUEST: MotionControlRequest,
             GatewayCommandKind.SOFTWARE_STOP_REQUEST: SoftwareStopRequest,
@@ -182,6 +186,8 @@ class RobotCommandEnvelope(ContractModel):
                         > self.safety_limits.max_rotation_deg
                     ):
                         raise ValueError("sequence rotation exceeds safety limit")
+                return self
+            if isinstance(self.payload, DirectJogRequest):
                 return self
             if isinstance(
                 self.payload,

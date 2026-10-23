@@ -19,6 +19,7 @@ from surgical_contracts import (
     CoordinateFrame,
     CoordinateSource,
     DistanceUnit,
+    DirectJogRequest,
     ErrorCode,
     ErrorResponse,
     GatewayCommandFrame,
@@ -111,7 +112,12 @@ class RemoteMotionStore:
 
     @staticmethod
     def _request_key(
-        request: MoveRelativeRequest | MoveToEntryRequest | MoveSequenceRequest,
+        request: (
+            MoveRelativeRequest
+            | MoveToEntryRequest
+            | MoveSequenceRequest
+            | DirectJogRequest
+        ),
     ) -> dict[str, object]:
         return request.model_dump(mode="json")
 
@@ -253,9 +259,19 @@ class RemoteMotionStore:
                     )
         return self._propose_motion(request, GatewayCommandKind.MOVE_SEQUENCE)
 
+    def propose_direct_jog(
+        self, request: DirectJogRequest,
+    ) -> tuple[RobotCommandRecord, bool]:
+        return self._propose_motion(request, GatewayCommandKind.DIRECT_JOG)
+
     def _propose_motion(
         self,
-        request: MoveRelativeRequest | MoveToEntryRequest | MoveSequenceRequest,
+        request: (
+            MoveRelativeRequest
+            | MoveToEntryRequest
+            | MoveSequenceRequest
+            | DirectJogRequest
+        ),
         kind: GatewayCommandKind,
     ) -> tuple[RobotCommandRecord, bool]:
         with self._lock:
@@ -980,6 +996,22 @@ class RemoteMotionStore:
                         final_tcp_position=final_point,
                         trajectory_id=result.controller_waypoint_id,
                         message="Mac confirmed arrival from actual controller feedback",
+                    )
+                elif result.command_kind == GatewayCommandKind.DIRECT_JOG:
+                    payload = RobotActionResult(
+                        command_id=result.command_id,
+                        operation=RobotCommandKind.DIRECT_JOG,
+                        status=ToolStatus.SUCCESS,
+                        state=RobotState(
+                            mode=RuntimeMode.REAL,
+                            tcp=self.policy.tcp_name,
+                            tcp_position=final_point,
+                            orientation_xyzw=pose.quaternion_xyzw,
+                            motion_state=MotionState.STOPPED,
+                            estop=False,
+                            active_command_id=None,
+                        ),
+                        message="Mac completed the held direct jog and confirmed stop",
                     )
                 else:
                     requested = frame.envelope.payload

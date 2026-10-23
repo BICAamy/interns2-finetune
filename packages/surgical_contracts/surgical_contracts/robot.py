@@ -332,6 +332,17 @@ class MoveSequenceRequest(ContractModel):
     joint_acceleration_deg_s2: FiniteFloat = Field(gt=0)
 
 
+class DirectJogRequest(ContractModel):
+    """One held manual/gesture jog, stopped explicitly on input release."""
+
+    schema_version: SchemaVersion = SCHEMA_VERSION
+    command_id: str = Field(min_length=1, max_length=128)
+    kind: Literal["cartesian", "joint"]
+    axis: int = Field(ge=0, le=5)
+    direction: Literal[-1, 1]
+    speed_scale: FiniteFloat = Field(gt=0, le=1)
+
+
 class SetEnabledRequest(ContractModel):
     schema_version: SchemaVersion = SCHEMA_VERSION
     command_id: str = Field(min_length=1, max_length=128)

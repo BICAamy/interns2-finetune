@@ -86,6 +86,36 @@ def test_real_writer_is_single_use_and_stop_requires_owned_attempt(monkeypatch):
         assert b",0,0,90,0,90,0,TCP,Base,2,10,0,1," in frames[0]
 
 
+@pytest.mark.parametrize(
+    "kind,axis,direction,start,close",
+    [
+        (
+            "cartesian", 4, 1,
+            b"LongJogL,0,4,1,1,;", b"LongJogL,0,4,1,0,;",
+        ),
+        (
+            "joint", 2, -1,
+            b"LongJogJ,0,2,0,1,;", b"LongJogJ,0,2,0,0,;",
+        ),
+    ],
+)
+def test_real_writer_keeps_one_long_jog_alive_until_explicit_close(
+    monkeypatch, kind, axis, direction, start, close,
+):
+    with FakeHuayanController(accept_fake_motion=True) as fake:
+        redirect_controller(monkeypatch, fake)
+        with LocalRealMotionClient(real_shaped_config(), timeout_s=0.1) as client:
+            assert client.start_long_jog(
+                kind=kind, axis=axis, direction=direction,
+            ) is True
+            assert client.keep_long_jog_alive() is True
+            assert client.keep_long_jog_alive() is True
+            assert client.stop_long_jog() is True
+        assert start in fake.received_commands
+        assert fake.received_commands.count(b"LongMoveEvent,0,;") == 2
+        assert close in fake.received_commands
+
+
 def test_real_writer_queues_prevalidated_sequence_serially(monkeypatch):
     with FakeHuayanController(accept_fake_motion=True) as fake:
         redirect_controller(monkeypatch, fake)

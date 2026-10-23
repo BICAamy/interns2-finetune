@@ -11,6 +11,7 @@ from robot_runtime.remote_motion import RemoteMotionPolicy
 from surgical_contracts import (
     CommandExecutionStatus,
     CoordinateFrame,
+    DirectJogRequest,
     ErrorCode,
     GatewayCommandKind,
     GatewayHandshake,
@@ -161,6 +162,44 @@ def test_proposal_is_inert_until_same_fingerprint_is_confirmed() -> None:
     assert completed.status == CommandExecutionStatus.SUCCEEDED
     assert completed.result["completed"] is True
     assert completed.result["final_tcp_position"]["source"] == "structured_data"
+
+
+def test_direct_jog_uses_the_same_confirmed_gateway_lifecycle() -> None:
+    _sessions, provider, session_id = enabled_provider()
+    request = DirectJogRequest(
+        command_id="manual-held-jog-1",
+        kind="cartesian",
+        axis=4,
+        direction=-1,
+        speed_scale=0.5,
+    )
+    record, created = provider.submit(RobotCommandKind.DIRECT_JOG, request)
+    assert created and record.status == CommandExecutionStatus.QUEUED
+    proposal = record.result["proposal"]
+
+    provider.confirm_command(request.command_id, proposal["fingerprint"])
+    dispatched = provider.take_gateway_command(session_id)
+    assert dispatched is not None
+    assert dispatched.envelope.command_kind == GatewayCommandKind.DIRECT_JOG
+    assert dispatched.envelope.payload == request
+    assert provider.acknowledge_gateway_command(
+        request.command_id, dispatched.fingerprint, session_id,
+    )
+
+    provider.ingest_gateway_result(
+        dispatched.fingerprint,
+        RobotCommandResult(
+            gateway_session_id=session_id,
+            command_id=request.command_id,
+            command_kind=GatewayCommandKind.DIRECT_JOG,
+            status=ToolStatus.SUCCESS,
+            final_pose_robot_base=dispatched.envelope.expected_start_pose_robot_base,
+            final_joint_positions_deg=(0, 0, 0, 0, 0, 0),
+        ),
+    )
+    completed = provider.get_command(request.command_id)
+    assert completed.status == CommandExecutionStatus.SUCCEEDED
+    assert completed.result["operation"] == RobotCommandKind.DIRECT_JOG.value
 
 
 def test_same_id_different_payload_and_disconnect_are_never_replayed() -> None:

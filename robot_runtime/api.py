@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from surgical_contracts import (
+    DirectJogRequest,
     ErrorCode,
     ErrorResponse,
     GatewayHeartbeat,
@@ -420,6 +421,21 @@ def create_app(
     )
     def move_sequence(request: MoveSequenceRequest) -> RobotCommandRecord:
         return runtime_provider.submit(RobotCommandKind.MOVE_SEQUENCE, request)[0]
+
+    @router.post(
+        "/v1/commands/direct-jog",
+        response_model=RobotCommandRecord,
+        status_code=202,
+    )
+    def direct_jog(request: DirectJogRequest) -> RobotCommandRecord:
+        if selected != RuntimeMode.REAL:
+            raise RobotRuntimeServiceError(
+                ErrorCode.OPERATION_NOT_ENABLED,
+                "continuous direct jog is available only for the real runtime",
+                status_code=403,
+                command_id=request.command_id,
+            )
+        return runtime_provider.submit(RobotCommandKind.DIRECT_JOG, request)[0]
 
     @router.post(
         "/v1/commands/set-enabled",

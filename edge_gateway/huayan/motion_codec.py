@@ -148,11 +148,39 @@ def encode_speed_override(value: float) -> bytes:
     return f"SetOverride,0,{_number(value)},;".encode("ascii")
 
 
+def _long_jog_frame(
+    command: str, axis: int, direction: int, enabled: bool,
+) -> bytes:
+    if command not in {"LongJogL", "LongJogJ"}:
+        raise ValueError("unsupported long-jog command")
+    if isinstance(axis, bool) or not isinstance(axis, int) or not 0 <= axis <= 5:
+        raise ValueError("long-jog axis must be an integer within 0..5")
+    if direction not in {-1, 1}:
+        raise ValueError("long-jog direction must be -1 or 1")
+    if type(enabled) is not bool:
+        raise TypeError("long-jog enabled state must be a bool")
+    vendor_direction = 1 if direction > 0 else 0
+    return f"{command},0,{axis},{vendor_direction},{int(enabled)},;".encode("ascii")
+
+
+def encode_long_jog_cartesian(axis: int, direction: int, enabled: bool) -> bytes:
+    return _long_jog_frame("LongJogL", axis, direction, enabled)
+
+
+def encode_long_jog_joint(axis: int, direction: int, enabled: bool) -> bytes:
+    return _long_jog_frame("LongJogJ", axis, direction, enabled)
+
+
+def encode_long_move_event() -> bytes:
+    return b"LongMoveEvent,0,;"
+
+
 def decode_write_reply_details(frame: bytes, *, command: str) -> WriteReply:
     """Parse a write reply while retaining bounded vendor diagnostics."""
     if command not in (
         "WayPoint", "GrpStop", "GrpInterrupt", "GrpContinue",
         "GrpEnable", "GrpDisable", "SetOverride",
+        "LongJogL", "LongJogJ", "LongMoveEvent",
     ):
         raise ValueError("unsupported write reply")
     if len(frame) > MAX_REPLY_BYTES or not frame.endswith(b",;"):

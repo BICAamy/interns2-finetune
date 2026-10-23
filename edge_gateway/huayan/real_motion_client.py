@@ -24,7 +24,8 @@ from .models import CommandReply, ProtocolError, ReadCommand, ResponseUnknown
 from .motion_codec import (
     JointWaypoint, LinearWaypoint, WaypointFailure, decode_write_reply,
     decode_write_reply_details, encode_group_enabled, encode_group_continue,
-    encode_group_interrupt, encode_software_stop, encode_speed_override,
+    encode_group_interrupt, encode_long_jog_cartesian, encode_long_jog_joint,
+    encode_long_move_event, encode_software_stop, encode_speed_override,
 )
 
 
@@ -58,6 +59,7 @@ class LocalRealMotionClient:
         self._write_command: str | None = None
         self.package_version: str | None = None
         self.last_waypoint_failure: WaypointFailure | None = None
+        self._long_jog: tuple[str, int, int] | None = None
 
     def connect(self) -> None:
         if self.require_local_terminal:
@@ -92,6 +94,7 @@ class LocalRealMotionClient:
             self._decoder = CommandFrameDecoder()
             self._identified = False
             self.package_version = None
+            self._long_jog = None
 
     def _exchange(self, frame: bytes) -> bytes:
         if not self._lock.acquire(timeout=self.timeout_s):
@@ -173,6 +176,60 @@ class LocalRealMotionClient:
             return decode_write_reply(self._exchange(encoded), command="SetOverride")
         except ResponseUnknown as exc:
             raise ResponseUnknown(f"SetOverride outcome unknown: {exc}") from exc
+
+    def start_long_jog(
+        self, *, kind: str, axis: int, direction: int,
+    ) -> bool:
+        """Start one controller-owned held jog on this single-use socket."""
+        if kind not in {"cartesian", "joint"}:
+            raise ValueError("long-jog kind must be cartesian or joint")
+        if not self._identified or self._write_command is not None:
+            raise RuntimeError("long jog requires an identified, single-use local session")
+        command = "LongJogL" if kind == "cartesian" else "LongJogJ"
+        frame = (
+            encode_long_jog_cartesian(axis, direction, True)
+            if kind == "cartesian"
+            else encode_long_jog_joint(axis, direction, True)
+        )
+        self._write_command = command
+        self._long_jog = (kind, axis, direction)
+        try:
+            return decode_write_reply(self._exchange(frame), command=command)
+        except ResponseUnknown as exc:
+            raise ResponseUnknown(f"{command} start outcome unknown: {exc}") from exc
+
+    def keep_long_jog_alive(self) -> bool:
+        if (
+            not self._identified
+            or self._write_command not in {"LongJogL", "LongJogJ"}
+            or self._long_jog is None
+        ):
+            raise PermissionError("LongMoveEvent requires this socket's active long jog")
+        try:
+            return decode_write_reply(
+                self._exchange(encode_long_move_event()), command="LongMoveEvent",
+            )
+        except ResponseUnknown as exc:
+            raise ResponseUnknown(f"LongMoveEvent outcome unknown: {exc}") from exc
+
+    def stop_long_jog(self) -> bool:
+        if (
+            not self._identified
+            or self._write_command not in {"LongJogL", "LongJogJ"}
+            or self._long_jog is None
+        ):
+            raise PermissionError("long-jog stop requires this socket's active long jog")
+        kind, axis, direction = self._long_jog
+        command = self._write_command
+        frame = (
+            encode_long_jog_cartesian(axis, direction, False)
+            if kind == "cartesian"
+            else encode_long_jog_joint(axis, direction, False)
+        )
+        try:
+            return decode_write_reply(self._exchange(frame), command=command)
+        except ResponseUnknown as exc:
+            raise ResponseUnknown(f"{command} stop outcome unknown: {exc}") from exc
 
     def _validate_waypoint(
         self, waypoint: LinearWaypoint | JointWaypoint,

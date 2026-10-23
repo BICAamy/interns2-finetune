@@ -10,6 +10,9 @@ from edge_gateway.huayan.motion_codec import (
     decode_write_reply,
     decode_write_reply_details,
     encode_group_enabled,
+    encode_long_jog_cartesian,
+    encode_long_jog_joint,
+    encode_long_move_event,
 )
 
 
@@ -18,6 +21,15 @@ def test_group_enable_disable_frames_are_exact() -> None:
     assert encode_group_enabled(False) == b"GrpDisable,0,;"
     with pytest.raises(TypeError):
         encode_group_enabled(1)  # type: ignore[arg-type]
+
+
+def test_long_jog_frames_are_exact() -> None:
+    assert encode_long_jog_cartesian(0, 1, True) == b"LongJogL,0,0,1,1,;"
+    assert encode_long_jog_cartesian(5, -1, False) == b"LongJogL,0,5,0,0,;"
+    assert encode_long_jog_joint(2, -1, True) == b"LongJogJ,0,2,0,1,;"
+    assert encode_long_move_event() == b"LongMoveEvent,0,;"
+    with pytest.raises(ValueError, match="axis"):
+        encode_long_jog_joint(6, 1, True)
 
 
 def test_joint_waypoint_uses_movej_and_joint_target_fields() -> None:
