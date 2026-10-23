@@ -218,6 +218,10 @@ def test_real_and_simulation_motion_values_match_but_load_independently() -> Non
         == real_config.motion.sequence_blend_radius_mm
     )
     assert (
+        simulation_policy.direct_control_lookahead_mm
+        == real_config.motion.direct_control_lookahead_mm
+    )
+    assert (
         simulation_policy.auto_execute_delay_s
         == real_config.interaction.auto_execute_delay_s
     )

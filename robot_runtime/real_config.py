@@ -120,6 +120,7 @@ class MotionCommandConfig(_StrictModel):
     speed_mm_s: float | None = Field(default=None, gt=0)
     controller_override: float | None = Field(default=None, ge=0.01, le=1.0)
     sequence_blend_radius_mm: float | None = Field(default=None, gt=0)
+    direct_control_lookahead_mm: float | None = Field(default=None, gt=0)
     default_relative_step_mm: float | None = Field(default=None, gt=0)
     default_relative_rotation_deg: float | None = Field(default=None, gt=0)
     default_rotation_joint_index: int | None = Field(default=None, ge=1, le=6)

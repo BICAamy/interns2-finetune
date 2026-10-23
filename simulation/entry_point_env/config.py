@@ -158,6 +158,7 @@ class EntryPointEnvConfig:
     joint_acceleration_deg_s2: float = 30.0
     maximum_rotation_deg: float = 720.0
     sequence_blend_radius_mm: float = 0.0
+    direct_control_lookahead_mm: float = 300.0
     image_shape: tuple[int, int] = (600, 600)
     trajectory_history_limit: int = 2048
     tcp_name: str = "needle_tip"
@@ -179,6 +180,7 @@ class EntryPointEnvConfig:
             "joint_speed_deg_s",
             "joint_acceleration_deg_s2",
             "maximum_rotation_deg",
+            "direct_control_lookahead_mm",
             "ik_orientation_weight_mm_per_rad",
             "ik_position_tolerance_mm",
             "ik_orientation_tolerance_deg",
@@ -295,6 +297,9 @@ class EntryPointEnvConfig:
             maximum_rotation_deg=float(section.get("maximum_rotation_deg", 720.0)),
             sequence_blend_radius_mm=float(
                 section.get("sequence_blend_radius_mm", 0.0)
+            ),
+            direct_control_lookahead_mm=float(
+                section.get("direct_control_lookahead_mm", 300.0)
             ),
             image_shape=(
                 int(image_data.get("height", 600)),

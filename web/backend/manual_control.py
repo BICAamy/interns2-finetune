@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import math
 import secrets
 import time
 from typing import Literal, TYPE_CHECKING
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 LEASE_SECONDS = 2.0
 HOLD_SECONDS = 0.45
 GESTURE_HOLD_SECONDS = 2.0
+MAX_CONTINUOUS_WAYPOINTS = 128
 BUSY = {"parsing", "awaiting_confirmation", "executing", "moving_to_entry",
         "verifying_entry", "moving_relative", "planning", "stopping", "paused"}
 
@@ -146,6 +148,10 @@ class ManualController:
                 'angular_speed': float(real.motion.joint_speed_deg_s),
                 'angular_acceleration': float(real.motion.joint_acceleration_deg_s2),
                 'default_step': float(real.motion.default_relative_step_mm),
+                'continuous_lookahead': float(
+                    real.motion.direct_control_lookahead_mm
+                    or real.limits.max_step_mm
+                ),
             }
         return {
             'translation_step': float(self.policy.max_relative_translation_mm),
@@ -154,6 +160,7 @@ class ManualController:
             'angular_speed': float(self.policy.joint_speed_deg_s),
             'angular_acceleration': float(self.policy.joint_acceleration_deg_s2),
             'default_step': float(self.policy.default_relative_step_mm),
+            'continuous_lookahead': float(self.policy.direct_control_lookahead_mm),
         }
 
     def default_translation_step(self, session_id: str) -> float:
@@ -336,6 +343,8 @@ class ManualController:
         self,
         command: ManualInput,
         mode: RuntimeMode = RuntimeMode.SIMULATION,
+        *,
+        translation_amounts: tuple[float, ...] | None = None,
     ) -> MoveSequenceRequest:
         amount = command.amount
         limits = self._policy_values(mode)
@@ -346,17 +355,107 @@ class ManualController:
         # the same acknowledged stop path rather than shrinking every segment.
         value = command.direction * amount
         if command.kind == "translation":
-            xyz = [0.0, 0.0, 0.0]; xyz[command.axis] = value
-            step = MotionSequenceStep(kind=MotionStepKind.CARTESIAN_RELATIVE, translation_mm=tuple(xyz))
+            steps = []
+            for segment_amount in translation_amounts or (amount,):
+                xyz = [0.0, 0.0, 0.0]
+                xyz[command.axis] = command.direction * segment_amount
+                steps.append(MotionSequenceStep(
+                    kind=MotionStepKind.CARTESIAN_RELATIVE,
+                    translation_mm=tuple(xyz),
+                ))
         elif command.kind == "rotation":
-            step = MotionSequenceStep(kind=MotionStepKind.TCP_ROTATION_RELATIVE,
-                                      rotation_axis=("x", "y", "z")[command.axis], rotation_deg=value)
+            steps = [MotionSequenceStep(
+                kind=MotionStepKind.TCP_ROTATION_RELATIVE,
+                rotation_axis=("x", "y", "z")[command.axis],
+                rotation_deg=value,
+            )]
         else:
-            step = MotionSequenceStep(kind=MotionStepKind.JOINT_RELATIVE,
-                                      joint_index=command.axis+1, rotation_deg=value)
-        return MoveSequenceRequest(command_id=f"manual-{uuid4().hex}", steps=(step,),
+            steps = [MotionSequenceStep(
+                kind=MotionStepKind.JOINT_RELATIVE,
+                joint_index=command.axis+1,
+                rotation_deg=value,
+            )]
+        return MoveSequenceRequest(command_id=f"manual-{uuid4().hex}", steps=tuple(steps),
                                    translation_speed_mm_s=speed, joint_speed_deg_s=angular,
                                    joint_acceleration_deg_s2=limits['angular_acceleration'])
+
+    async def _continuous_translation_amounts(
+        self,
+        lease: Lease,
+        command: ManualInput,
+    ) -> tuple[float, ...] | None:
+        """Build one blended real-robot hold without enlarging its first jog.
+
+        A real MoveSequence proposal has a non-trivial confirmation/completion
+        round trip.  Repeating one short proposal therefore makes a held key or
+        gesture stop at every increment.  Queue collinear increments in one
+        controller sequence instead: the existing gateway gives intermediate
+        points a bounded blend radius, while key-up/gesture-loss still cancels
+        the active sequence through the confirmed stop path.
+
+        The first segment remains exactly the operator-selected increment, and
+        pointer/key release still enters the existing acknowledged stop path.
+        The complete batch is clipped to the configured direct-control
+        look-ahead, max_step_mm, and the Base-axis workspace boundary.
+        """
+
+        if (
+            lease.mode != RuntimeMode.REAL
+            or not command.continuous
+            or command.kind != "translation"
+        ):
+            return None
+        try:
+            view = await asyncio.to_thread(
+                self.runtime.get_robot_telemetry,
+                lease.session_id,
+            )
+            actual = getattr(view, "actual_tcp_robot_base", None)
+            point = actual.get("translation_mm") if isinstance(actual, dict) else None
+            if point is None:
+                tcp = getattr(view, "current_tcp", None)
+                if tcp is not None:
+                    point = (tcp.x, tcp.y, tcp.z)
+            if point is None or len(point) != 3:
+                return None
+
+            real = getattr(self.runtime, "_real_config", None)
+            if real is not None:
+                low = tuple(float(value) for value in real.limits.workspace_low_mm)
+                high = tuple(float(value) for value in real.limits.workspace_high_mm)
+                margin = float(real.arrival.position_tolerance_mm)
+            else:
+                low = self.policy.workspace_low_mm
+                high = self.policy.workspace_high_mm
+                margin = float(self.policy.entry_tolerance_mm)
+            coordinate = float(point[command.axis])
+            available = (
+                high[command.axis] - margin - coordinate
+                if command.direction > 0
+                else coordinate - (low[command.axis] + margin)
+            )
+            maximum = self._policy_values(lease.mode)["translation_step"]
+            lookahead = self._policy_values(lease.mode)["continuous_lookahead"]
+            travel = min(float(maximum), float(lookahead), available)
+            if not math.isfinite(travel) or travel <= margin:
+                return ()
+
+            first = min(float(command.amount), travel)
+            amounts = [first]
+            remaining = travel - first
+            cruise = max(
+                float(command.amount),
+                float(self._policy_values(lease.mode)["default_step"]),
+            )
+            while remaining > margin and len(amounts) < MAX_CONTINUOUS_WAYPOINTS:
+                segment = min(cruise, remaining)
+                amounts.append(segment)
+                remaining -= segment
+            return tuple(amounts)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            # Missing telemetry must not expand a point jog.  Falling back to
+            # one finite increment preserves the previous fail-closed behavior.
+            return None
 
     async def _run(self, lease: Lease) -> None:
         try:
@@ -366,7 +465,17 @@ class ManualController:
                     lease.desired = None; break
                 lease.active = True
                 lease.submitted.clear()
-                request = self._request(command, lease.mode)
+                translation_amounts = await self._continuous_translation_amounts(
+                    lease, command,
+                )
+                if translation_amounts == ():
+                    lease.desired = None
+                    break
+                request = self._request(
+                    command,
+                    lease.mode,
+                    translation_amounts=translation_amounts,
+                )
                 try:
                     record = await lease.transport.submit(request)
                 finally:
