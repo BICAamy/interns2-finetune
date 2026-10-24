@@ -1603,6 +1603,35 @@ footer strong { color: #1d4ed8; }
   object-fit: cover;
   object-position: center;
 }
+.robot-twin-canvas {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #f8fafc;
+}
+.robot-twin-canvas canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  outline: none;
+  cursor: grab;
+  touch-action: none;
+}
+.robot-twin-canvas canvas:active { cursor: grabbing; }
+.robot-twin-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  color: #64748b;
+  background: #f8fafc;
+  font-size: 12px;
+  letter-spacing: .04em;
+  pointer-events: none;
+}
 .robot-workbench .viewer-connections { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; flex-shrink: 0; padding: 15px 2px 0; }
 .robot-workbench .connection { display: inline-flex; align-items: center; margin: 0; color: var(--rw-muted); font-size: 11px; line-height: 1.6; }
 .robot-workbench .camera-hint { font-size: 10px; padding: 7px 9px; }

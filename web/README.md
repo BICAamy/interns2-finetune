@@ -14,14 +14,14 @@
 - 普通语音后端复用文本解析，“停止/急停”精确短语走快速通道；
 - 原始 InternS2 工具参数、规范化命令、坐标、TCP 和时间线；
 - 取消待确认任务、暂停/继续、紧急停止和运动式复位；
-- 同源代理 SOFA MJPEG，浏览器不接触仿真服务地址；
-- 默认 Z-up 正视相机，支持左键旋转、右键平移、滚轮缩放和双击回正；
+- 浏览器使用 Three.js/WebGL 加载仓库内 E05-Pro STL，并由只读关节/TCP 遥测在本地驱动数字孪生；主页面不再传输 MJPEG 帧；
+- 默认 Z-up 正视相机，旋转、平移、缩放和五个预设视角全部在浏览器本地完成，不产生服务器相机请求；
 - 提供正视、左视、右视、俯视、等轴测五个确定性预设视角；
-- 每 100 ms 接收 TCP、入点、误差、进度、关节角、FPS 和当前工具；
+- 最快每 50 ms 接收 TCP、入点、误差、进度、关节角、连杆渲染位姿和当前工具；浏览器按显示器刷新率对实际状态做短时视觉插值；
 - 轨迹在服务端下采样到最多 160 点，网页显示 X–Z 轨迹；
 - 只移动到入点或执行有限相对移动；
 - 只请求不可执行的 Mock 路径预览，**不执行穿刺**；
-- 视频断开只关闭只读代理流，不会使机械臂控制线程崩溃。
+- WebGL 或模型资源加载失败只影响只读画面，不会改变机械臂控制状态。
 
 ## API
 
@@ -43,6 +43,8 @@ GET  /api/sessions/{session_id}/simulation/telemetry
 GET  /api/sessions/{session_id}/simulation/camera
 PUT  /api/sessions/{session_id}/simulation/camera
 GET  /api/sessions/{session_id}/simulation/stream.mjpeg
+# 上述 camera/MJPEG 为旧客户端兼容接口；当前 web/web_inside 主页面不调用
+GET  /robot-assets/e05/{mesh}.STL
 WS   /ws/sessions/{session_id}
 ```
 
@@ -262,15 +264,14 @@ MJPEG 代理、Z-up 轨道相机、五个预设视角、浏览器断开后的上
   不是医疗级校准概率；最终安全边界仍是确定性验证、YAML 限制与控制链路门禁；
 - 第一版不做 VAD 自动开录和流式转写，这两项留到语音指令集实测稳定之后。
 
-## Step 12 数据与断连语义
+## 数字孪生数据与断连语义
 
-- MJPEG 由 `agent-web` 流式转发，不把整帧缓存在会话 JSON 中；
-- 相机请求是有边界的观察操作，经 `agent-web` 代理并在 SOFA worker 线程串行
-  执行；它不进入 InternS2 工具编排，也不能改变机械臂状态；
-- 相机为仿真实例共享视角，当前单医生演示下网页拖动会更新服务器 MJPEG 画面；
-- 页面 WebSocket 在仿真序列变化时推送遥测，空闲和错误时最多每秒一次；
+- `web` 与 `web_inside` 均由浏览器 GPU 渲染；STL 静态资源首次加载后可由浏览器缓存，运行期间不传 JPEG 图片帧；
+- 服务端只根据权威关节反馈生成 Base 下的六个连杆位姿，并通过现有会话 WebSocket 发送数值；这些数据只用于显示，不能回流为控制指令；
+- 页面在相邻实际样本间做很短的视觉插值，以获得约 60 FPS 的画面；安全判断、到达判定和轨迹执行仍只使用服务端/Mac 的真实状态；
+- 相机交互完全在本地，用户拖动和缩放不会经过公网，也不会占用 SOFA worker；
+- 页面 WebSocket 在状态序列变化时最快以 20 Hz 推送遥测，空闲和错误时最多每秒一次；
 - 页面只接收最多 160 个下采样轨迹点，不高频传输完整历史；
-- 浏览器关闭 MJPEG 后，`agent-web` 会关闭上游响应，仿真服务随即注销客户端；
-- `SIMULATION_PAUSE_ON_NO_CLIENTS=1` 时，所有视频/WebSocket 客户端断开会暂停
-  活动轨迹，重新打开页面视频后继续；
+- 旧 camera/MJPEG 路由继续保留供兼容客户端与回归测试使用，但当前页面不会建立该图像流；
+- `SIMULATION_PAUSE_ON_NO_CLIENTS=1` 时，所有视频/WebSocket 客户端断开会暂停活动轨迹，重新打开页面建立 WebSocket 后继续；
 - X11 Forwarding、VNC 和服务器桌面窗口不属于最终访问方案。

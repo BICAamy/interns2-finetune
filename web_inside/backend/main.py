@@ -20,6 +20,7 @@ from .websocket import router as websocket_router
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STATIC_DIR = PROJECT_ROOT / "web" / "frontend" / "dist"
+ROBOT_MODEL_DIR = PROJECT_ROOT / "third_party" / "elfin_model" / "model" / "485" / "elfin5"
 
 
 def create_app(
@@ -76,6 +77,13 @@ def create_app(
     app.include_router(random_commands_router)
     app.include_router(gesture_router)
     app.include_router(websocket_router)
+
+    if ROBOT_MODEL_DIR.is_dir():
+        app.mount(
+            "/robot-assets/e05",
+            StaticFiles(directory=ROBOT_MODEL_DIR),
+            name="e05-browser-model",
+        )
 
     selected_static = Path(static_dir) if static_dir is not None else DEFAULT_STATIC_DIR
     assets_dir = selected_static / "assets"

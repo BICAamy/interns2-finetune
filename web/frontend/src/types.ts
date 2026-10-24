@@ -94,6 +94,11 @@ export interface Point3D {
   source?: string | null;
 }
 
+export interface RobotRenderPose {
+  position_m: [number, number, number];
+  quaternion_xyzw: [number, number, number, number];
+}
+
 export interface SimulationTelemetry {
   schema_version: "1.0";
   type: "telemetry";
@@ -124,6 +129,9 @@ export interface SimulationTelemetry {
   position_error_mm: number | null;
   motion_progress_percent: number | null;
   joint_positions_deg: number[];
+  render_joint_positions_deg: number[];
+  render_link_poses: RobotRenderPose[];
+  render_flange_pose: RobotRenderPose | null;
   trajectory_mm: [number, number, number][];
   trajectory_total_points: number;
   frame_sequence: number;
@@ -146,19 +154,6 @@ export interface SimulationTelemetry {
   error: Record<string, any> | null;
 }
 
-export type CameraPreset = "front" | "left" | "right" | "top" | "isometric";
-
-export interface SimulationCameraState {
-  schema_version: "1.0";
-  preset: CameraPreset | "custom";
-  yaw_deg: number;
-  pitch_deg: number;
-  distance_m: number;
-  target_m: [number, number, number];
-  position_m: [number, number, number];
-  updated_at_ms: number;
-}
-
 export interface TrajectoryClearResult {
   schema_version: "1.0";
   runtime_mode: "simulation" | "real";
@@ -166,23 +161,3 @@ export interface TrajectoryClearResult {
   trajectory_points: number;
   cleared_at_ms: number;
 }
-
-export type CameraControlPayload =
-  | {
-      action: "orbit";
-      yaw_delta_deg: number;
-      pitch_delta_deg: number;
-    }
-  | {
-      action: "zoom";
-      distance_delta_m: number;
-    }
-  | {
-      action: "pan";
-      pan_right_delta_m: number;
-      pan_up_delta_m: number;
-    }
-  | {
-      action: "preset";
-      preset: CameraPreset;
-    };

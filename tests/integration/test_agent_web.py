@@ -744,6 +744,14 @@ def test_telemetry_is_enriched_and_trajectory_is_downsampled():
         assert len(payload["trajectory_mm"]) == 160
         assert payload["trajectory_mm"][0] == [0.0, 0.0, 100.0]
         assert payload["trajectory_mm"][-1] == [299.0, 0.0, 129.9]
+        assert len(payload["render_joint_positions_deg"]) == 6
+        assert len(payload["render_link_poses"]) == 6
+        assert all(len(pose["position_m"]) == 3 for pose in payload["render_link_poses"])
+        assert all(
+            len(pose["quaternion_xyzw"]) == 4
+            for pose in payload["render_link_poses"]
+        )
+        assert payload["render_flange_pose"] is not None
 
         cleared = client.post(
             f"/api/sessions/{session_id}/robot/trajectory/clear"

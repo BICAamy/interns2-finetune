@@ -298,6 +298,9 @@ def test_real_generic_routes_expose_only_actual_state() -> None:
         assert "control_mode" not in payload
         assert payload["sequence"] == 42
         assert payload["joint_positions_deg"][2] == 97.585
+        assert len(payload["render_joint_positions_deg"]) == 6
+        assert len(payload["render_link_poses"]) == 6
+        assert payload["render_flange_pose"] is not None
         assert payload["connections"] == {
             "server": "connected",
             "gateway": "connected",

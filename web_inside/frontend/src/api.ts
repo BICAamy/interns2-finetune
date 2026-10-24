@@ -1,8 +1,6 @@
 import type {
   ASRStatus,
-  CameraControlPayload,
   SessionSnapshot,
-  SimulationCameraState,
   SimulationTelemetry,
   TextCommandPayload,
   TrajectoryClearResult,
@@ -91,29 +89,11 @@ export const api = {
     request<SimulationTelemetry>(
       `/api/sessions/${sessionId}/robot/telemetry`,
     ),
-  camera: (sessionId: string) =>
-    request<SimulationCameraState>(
-      `/api/sessions/${sessionId}/robot/camera`,
-    ),
-  controlCamera: (sessionId: string, payload: CameraControlPayload) =>
-    request<SimulationCameraState>(
-      `/api/sessions/${sessionId}/robot/camera`,
-      {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      },
-    ),
   clearTrajectory: (sessionId: string) =>
     request<TrajectoryClearResult>(
       `/api/sessions/${sessionId}/robot/trajectory/clear`,
       { method: "POST" },
     ),
-  videoUrl: (
-    sessionId: string,
-    attempt = 0,
-    mode: "simulation" | "real" = "simulation",
-  ) =>
-    `/api/sessions/${sessionId}/robot/stream.mjpeg?attempt=${attempt}&mode=${mode}`,
 };
 
 export function openSessionSocket(

@@ -75,6 +75,15 @@ def test_api_path_is_not_swallowed_by_spa(
     assert "INSIDE_FRONTEND" not in response.text
 
 
+def test_browser_robot_geometry_is_served_as_a_static_asset(
+    frontend_roots: tuple[Path, Path],
+) -> None:
+    with TestClient(_app("both", frontend_roots)) as client:
+        response = client.get("/robot-assets/e05/elfin_link1.STL")
+    assert response.status_code == 200
+    assert len(response.content) > 1_000
+
+
 def test_invalid_frontend_variant_is_rejected() -> None:
     with pytest.raises(ValueError, match="INTERNS2_WEB_VARIANT"):
         create_app(object(), frontend_variant="unknown")

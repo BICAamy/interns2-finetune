@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+from collections import deque
 from dataclasses import replace
 from pathlib import Path
 import tempfile
@@ -50,6 +51,7 @@ from agent.runtime import InternS2Agent, ParsedCommandResponse
 from agent.tools.puncture_planner import PlannerAdapterHTTPClient
 from agent.tools.robot import RobotSimulationHTTPController
 from simulation.runtime_config import load_simulation_motion_policy
+from robot_runtime.browser_render_state import e05_render_poses
 
 from .asr import (
     ASRService,
@@ -418,11 +420,15 @@ class WebRuntime:
             }
         self._tasks: set[asyncio.Task[Any]] = set()
         self._motion_origins: dict[str, Point3D] = {}
+        self._real_render_trajectory_mm: deque[tuple[float, float, float]] = deque(
+            maxlen=2048
+        )
+        self._real_render_gateway_session_id: str | None = None
         self._fps_samples: dict[str, tuple[int, float, float]] = {}
         self._real_feedback_unavailable_since: dict[str, float] = {}
         self._telemetry_lock = RLock()
         self._monotonic_clock = monotonic_clock
-        self.telemetry_interval_s = 0.1
+        self.telemetry_interval_s = 0.05
         self.asr = ASRService(
             asr_settings or ASRSettings.from_env(),
             transcriber=speech_transcriber,
@@ -777,6 +783,41 @@ class WebRuntime:
             },
         }
         feedback_issue = self._real_feedback_issue(telemetry)
+        controller_joints = tuple(
+            float(value) for value in (telemetry.joint_positions_deg or ())
+        )
+        render_joints = controller_joints
+        if self._real_config is not None and len(controller_joints) == 6:
+            signs = self._real_config.joint_mapping.sign
+            offsets = self._real_config.joint_mapping.zero_offset_deg
+            if signs is not None and offsets is not None:
+                # Match the existing passive mirror mapping exactly.
+                render_joints = tuple(
+                    float(direction) * (position - float(offset))
+                    for direction, position, offset in zip(
+                        signs,
+                        controller_joints,
+                        offsets,
+                    )
+                )
+        render_links: list[dict[str, tuple[float, ...]]] = []
+        render_flange: dict[str, tuple[float, ...]] | None = None
+        if len(render_joints) == 6:
+            render_links, render_flange = e05_render_poses(render_joints)
+
+        trajectory: list[tuple[float, float, float]] = []
+        if current_tcp is not None:
+            point = tuple(float(value) for value in current_tcp.as_tuple())
+            with self._telemetry_lock:
+                if telemetry.gateway_session_id != self._real_render_gateway_session_id:
+                    self._real_render_trajectory_mm.clear()
+                    self._real_render_gateway_session_id = telemetry.gateway_session_id
+                if (
+                    not self._real_render_trajectory_mm
+                    or self._real_render_trajectory_mm[-1] != point
+                ):
+                    self._real_render_trajectory_mm.append(point)
+                trajectory = list(self._real_render_trajectory_mm)
         return SimulationTelemetryView(
             connected=feedback_issue is None,
             runtime_mode="real",
@@ -792,12 +833,16 @@ class WebRuntime:
             estop=bool(telemetry.physical_estop_active),
             current_tcp=current_tcp,
             actual_tcp_robot_base=(pose.model_dump(mode="json") if pose else None),
-            joint_positions_deg=(
-                [float(value) for value in telemetry.joint_positions_deg]
-                if telemetry.joint_positions_deg is not None
-                else []
+            joint_positions_deg=list(controller_joints),
+            render_joint_positions_deg=list(render_joints),
+            render_link_poses=render_links,
+            render_flange_pose=render_flange,
+            trajectory_mm=_downsample_trajectory(
+                trajectory,
+                _TELEMETRY_TRAJECTORY_LIMIT,
             ),
-            frame_sequence=int(mirror.get("frame_sequence", 0)) if mirror else 0,
+            trajectory_total_points=len(trajectory),
+            frame_sequence=telemetry.sequence,
             fsm_code=telemetry.fsm_code,
             enabled=telemetry.enabled,
             electrified=telemetry.electrified,
@@ -851,6 +896,8 @@ class WebRuntime:
             motion_target = _relative_target(origin, relative)
         progress = _motion_progress(origin, motion_target, current_tcp)
         trajectory = [tuple(float(value) for value in point) for point in telemetry.trajectory_mm]
+        render_joints = tuple(float(value) for value in telemetry.joint_positions_deg)
+        render_links, render_flange = e05_render_poses(render_joints)
         return SimulationTelemetryView(
             connected=True,
             runtime_mode="simulation",
@@ -871,6 +918,9 @@ class WebRuntime:
             position_error_mm=(round(position_error, 4) if position_error is not None else None),
             motion_progress_percent=progress,
             joint_positions_deg=[float(value) for value in telemetry.joint_positions_deg],
+            render_joint_positions_deg=list(render_joints),
+            render_link_poses=render_links,
+            render_flange_pose=render_flange,
             trajectory_mm=_downsample_trajectory(
                 trajectory,
                 _TELEMETRY_TRAJECTORY_LIMIT,
@@ -1004,6 +1054,9 @@ class WebRuntime:
         result = observer.clear_trajectory()
         if result.runtime_mode != mode:
             raise SimulationProxyError("robot-runtime 返回了错误的轨迹模式")
+        if mode == RuntimeMode.REAL:
+            with self._telemetry_lock:
+                self._real_render_trajectory_mm.clear()
         return result
 
     def health(self) -> HealthResponse:

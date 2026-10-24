@@ -22,6 +22,7 @@ from .websocket import router as websocket_router
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEMO_STATIC_DIR = PROJECT_ROOT / "web" / "frontend" / "dist"
 INSIDE_STATIC_DIR = PROJECT_ROOT / "web_inside" / "frontend" / "dist"
+ROBOT_MODEL_DIR = PROJECT_ROOT / "third_party" / "elfin_model" / "model" / "485" / "elfin5"
 DEFAULT_STATIC_DIR = DEMO_STATIC_DIR
 WEB_VARIANTS = frozenset({"web", "web_inside", "both"})
 
@@ -109,6 +110,15 @@ def create_app(
     app.include_router(random_commands_router)
     app.include_router(gesture_router)
     app.include_router(websocket_router)
+
+    # Static geometry is downloaded once by the browser and then rendered by
+    # the user's GPU.  No robot image frames pass through this route.
+    if ROBOT_MODEL_DIR.is_dir():
+        app.mount(
+            "/robot-assets/e05",
+            StaticFiles(directory=ROBOT_MODEL_DIR),
+            name="e05-browser-model",
+        )
 
     demo_root = Path(demo_static_dir) if demo_static_dir is not None else DEMO_STATIC_DIR
     inside_root = (

@@ -154,6 +154,12 @@ class SimulationTelemetryView(WebModel):
     position_error_mm: float | None = Field(default=None, ge=0)
     motion_progress_percent: float | None = Field(default=None, ge=0, le=100)
     joint_positions_deg: list[float] = Field(default_factory=list, max_length=6)
+    render_joint_positions_deg: list[float] = Field(default_factory=list, max_length=6)
+    render_link_poses: list[dict[str, tuple[float, ...]]] = Field(
+        default_factory=list,
+        max_length=6,
+    )
+    render_flange_pose: dict[str, tuple[float, ...]] | None = None
     trajectory_mm: list[tuple[float, float, float]] = Field(default_factory=list)
     trajectory_total_points: int = Field(default=0, ge=0)
     frame_sequence: int = Field(default=0, ge=0)
