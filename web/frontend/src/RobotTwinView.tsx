@@ -129,6 +129,9 @@ export default function RobotTwinView({
       host.appendChild(renderer.domElement);
 
       const controls = new OrbitControls(camera, renderer.domElement);
+      controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
+      controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
+      controls.mouseButtons.RIGHT = null;
       controls.target.copy(CAMERA_TARGET);
       controls.enableDamping = true;
       controls.dampingFactor = 0.1;
@@ -361,7 +364,7 @@ export default function RobotTwinView({
   return (
     <div ref={hostRef} className="robot-twin-canvas" data-mode={runtimeMode}>
       {!loaded && <div className="robot-twin-loading">正在加载本地 E05-Pro 3D 模型…</div>}
-      <div className="camera-hint">左键旋转 · 右键平移 · 滚轮缩放 · 双击复位</div>
+      <div className="camera-hint">左键旋转 · 按住鼠标中键平移 · 滚轮缩放 · 双击视角复位</div>
       <div className="camera-state">{cameraLabel}</div>
       <div className="camera-presets" onPointerDown={(event) => event.stopPropagation()}>
         {PRESET_LABELS.map(([preset, label]) => (
