@@ -26,7 +26,7 @@ class GestureName(str, Enum):
 
 
 class GestureFrameRequest(GestureModel):
-    """One raw, unmirrored browser-camera frame."""
+    """One horizontally mirrored frame, matching the browser camera preview."""
 
     image_data_url: str = Field(min_length=32, max_length=3_000_000)
     captured_at_ms: int = Field(ge=0)

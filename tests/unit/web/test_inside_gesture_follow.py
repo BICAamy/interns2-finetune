@@ -46,14 +46,15 @@ def recognition(
 
 
 class DirectControl:
-    def __init__(self) -> None:
+    def __init__(self, mode: RuntimeMode = RuntimeMode.SIMULATION) -> None:
+        self.mode = mode
         self.inputs = []
         self.acquired = False
         self.lease = None
 
     def status(self, _session_id: str) -> dict:
         return {
-            "mode": "simulation",
+            "mode": self.mode.value,
             "moving": bool(self.inputs and self.inputs[-1].kind is not None),
             "reason": "",
         }
@@ -82,10 +83,10 @@ class DirectControl:
 
 
 class Runtime:
-    def __init__(self) -> None:
+    def __init__(self, mode: RuntimeMode = RuntimeMode.SIMULATION) -> None:
         self.store = SessionStore()
-        self.session = self.store.create(robot_mode=RuntimeMode.SIMULATION)
-        self.manual = DirectControl()
+        self.session = self.store.create(robot_mode=mode)
+        self.manual = DirectControl(mode)
         self.stop_calls = []
 
     def get_session(self, session_id: str):
@@ -172,6 +173,36 @@ def test_direction_change_stops_old_motion_before_starting_new_motion():
         await selected.submit_frame(runtime.session.session_id, frame())
         assert [item.kind for item in runtime.manual.inputs] == ["translation", None, "translation"]
         assert (runtime.manual.inputs[-1].axis, runtime.manual.inputs[-1].direction) == (2, -1)
+
+    asyncio.run(case())
+
+
+@pytest.mark.parametrize("mode", [RuntimeMode.SIMULATION, RuntimeMode.REAL])
+def test_left_right_left_keeps_distinct_directions_and_replaces_previous_gesture(mode):
+    async def case():
+        runtime = Runtime(mode)
+        selected = coordinator(
+            runtime,
+            recognition(GestureName.LEFT),
+            recognition(GestureName.RIGHT),
+            recognition(GestureName.LEFT),
+        )
+        await selected.acquire(runtime.session.session_id)
+        responses = [
+            await selected.submit_frame(runtime.session.session_id, frame())
+            for _ in range(3)
+        ]
+        assert [response.recognition.gesture for response in responses] == [
+            GestureName.LEFT, GestureName.RIGHT, GestureName.LEFT,
+        ]
+        assert [item.kind for item in runtime.manual.inputs] == [
+            "translation", None, "translation", None, "translation",
+        ]
+        movements = [item for item in runtime.manual.inputs if item.kind is not None]
+        assert [(item.axis, item.direction) for item in movements] == [(1, 1), (1, -1), (1, 1)]
+        assert [response.mapped_command["motion_sequence"]["steps"][0]["translation_mm"] for response in responses] == [
+            [0, 15, 0], [0, -15, 0], [0, 15, 0],
+        ]
 
     asyncio.run(case())
 
