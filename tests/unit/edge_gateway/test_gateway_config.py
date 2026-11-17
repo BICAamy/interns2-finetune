@@ -24,9 +24,10 @@ def test_plain_gateway_transport_is_loopback_ssh_tunnel_only(url: str) -> None:
 def test_secret_file_permissions_and_wire_parser_fail_closed(tmp_path) -> None:
     secret = tmp_path / "gateway-auth.local"
     secret.write_bytes(b"x" * 32)
-    os.chmod(secret, 0o644)
-    with pytest.raises(ValueError, match="0600"):
-        load_gateway_secret(secret)
+    if os.name != "nt":
+        os.chmod(secret, 0o644)
+        with pytest.raises(ValueError, match="0600"):
+            load_gateway_secret(secret)
     os.chmod(secret, 0o600)
     assert load_gateway_secret(secret) == b"x" * 32
     with pytest.raises(ValueError, match="duplicate"):

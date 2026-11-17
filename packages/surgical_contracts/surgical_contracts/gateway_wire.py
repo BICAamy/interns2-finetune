@@ -23,6 +23,7 @@ from .robot import LinkState, RobotTelemetry, RuntimeMode
 
 PROTOCOL_VERSION = "huayan-v6-gateway-v2"
 MAX_WIRE_BYTES = 64 * 1024
+_WINDOWS = os.name == "nt"
 
 
 class GatewayHello(ContractModel):
@@ -114,7 +115,10 @@ def load_gateway_secret(path: str | Path) -> bytes:
     if selected.is_symlink() or not selected.is_file():
         raise ValueError("gateway secret must be a regular, non-symlink file")
     metadata = selected.stat()
-    if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
+    # Windows uses filesystem ACLs, not POSIX ownership/mode bits, and has no
+    # os.getuid(). setup_gateway.ps1 restricts the copied key to the current
+    # Windows user. Authentication, file type and length checks apply on both.
+    if not _WINDOWS and (metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o077):
         raise ValueError("gateway secret must be owned by this user with mode 0600")
     if not 32 <= metadata.st_size <= 1024:
         raise ValueError("gateway secret must contain 32..1024 bytes")

@@ -1,0 +1,54 @@
+name: Gateway portability
+on:
+  push:
+    paths:
+      - 'edge_gateway/**'
+      - 'packages/surgical_contracts/**'
+      - 'scripts/edge/**'
+      - 'simulation/entry_point_env/**'
+      - 'configs/simulation.yaml'
+      - 'tests/unit/edge_gateway/test_gateway_portability.py'
+      - '.github/workflows/gateway-portability.yml'
+  pull_request:
+    paths:
+      - 'edge_gateway/**'
+      - 'packages/surgical_contracts/**'
+      - 'scripts/edge/**'
+      - 'tests/unit/edge_gateway/test_gateway_portability.py'
+      - '.github/workflows/gateway-portability.yml'
+jobs:
+  offline-gateway:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r edge_gateway/requirements.txt ./packages/surgical_contracts pytest
+      - name: Journal, package and fake-controller regressions
+        env:
+          PYTHONPATH: .
+        run: python -m pytest tests/unit/edge_gateway/test_gateway_portability.py tests/integration/test_real_motion_fake.py -q
+      - name: Parse native PowerShell entry points
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($path in @('scripts/edge/setup_gateway.ps1','scripts/edge/start_gateway.ps1')) {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $path), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+      - name: Native Windows install and offline startup check
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Dummy CI-only key. --check never opens a robot/server connection.
+          [System.IO.File]::WriteAllText((Join-Path $PWD 'configs/gateway-auth.local'), ('x' * 48))
+          powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/edge/setup_gateway.ps1 -PythonExe (Get-Command python).Source
+          if ($LASTEXITCODE -ne 0) { throw 'Windows setup failed' }
+          powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/edge/start_gateway.ps1 --check
+          if ($LASTEXITCODE -ne 0) { throw 'Windows startup check failed' }

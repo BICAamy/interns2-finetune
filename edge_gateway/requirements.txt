@@ -1,4 +1,7 @@
-# Mac fake-only gateway (install surgical_contracts from packages/surgical_contracts).
+# Local gateway, including calibrated joint FK (no model/CUDA/SOFA runtime).
+# Install surgical_contracts from packages/surgical_contracts as well.
 pydantic>=2.10,<3
 websockets>=14,<15
 PyYAML>=6,<7
+numpy>=1.24,<3
+scipy>=1.10,<2

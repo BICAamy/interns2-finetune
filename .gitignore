@@ -32,6 +32,7 @@ __pycache__/
 .venv/
 venv/
 .venv-xtuner/
+.venv-edge/
 
 
 # ============================================================
@@ -56,6 +57,7 @@ Thumbs.db
 /logs/
 /run/
 /artifacts/real_robot_commissioning/
+/artifacts/gateway/
 *.log
 /ray_tmp/
 /git_review.txt

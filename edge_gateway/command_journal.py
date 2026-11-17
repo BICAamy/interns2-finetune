@@ -7,7 +7,6 @@ Every transition is append-only and fsynced before the caller may continue.
 from __future__ import annotations
 
 import hashlib
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -15,6 +14,7 @@ from threading import RLock
 import time
 
 from .huayan.command_codec import validate_identifier
+from .file_support import lock_exclusive, sync_parent_directory, unlock
 
 _STATES = frozenset({
     "prepared", "send_started", "accepted", "executing", "pausing",
@@ -53,12 +53,12 @@ class CommandJournal:
         lock_path = self.path.with_name(self.path.name + ".lock")
         if lock_path.is_symlink():
             raise JournalError("journal lock may not be a symlink")
-        flags = os.O_CREAT | os.O_RDWR
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         self._lock_fd = os.open(lock_path, flags, 0o600)
         try:
-            fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_exclusive(self._lock_fd)
             self._records = self._load()
         except Exception as exc:
             os.close(self._lock_fd)
@@ -70,9 +70,11 @@ class CommandJournal:
     def close(self) -> None:
         with self._lock:
             if self._lock_fd >= 0:
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-                os.close(self._lock_fd)
-                self._lock_fd = -1
+                try:
+                    unlock(self._lock_fd)
+                finally:
+                    os.close(self._lock_fd)
+                    self._lock_fd = -1
 
     def __enter__(self) -> "CommandJournal":
         return self
@@ -109,7 +111,7 @@ class CommandJournal:
         if self._lock_fd < 0:
             raise JournalError("journal is closed")
         payload = (json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
-        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         fd = os.open(self.path, flags, 0o600)
@@ -120,11 +122,7 @@ class CommandJournal:
             os.fsync(fd)
         finally:
             os.close(fd)
-        directory = os.open(self.path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        sync_parent_directory(self.path)
 
     def unresolved(self) -> tuple[str, ...]:
         with self._lock:
