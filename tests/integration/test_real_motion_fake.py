@@ -903,8 +903,9 @@ def test_116_point_sequence_uses_local_deadline_after_timely_mac_receipt(
             client.close()
 
 
+@pytest.mark.parametrize("poll_interval_s", [0.001, 0.032])
 def test_failed_remote_motion_can_be_followed_by_success_without_restart(
-    tmp_path,
+    tmp_path, poll_interval_s,
 ) -> None:
     with FakeHuayanController(accept_fake_motion=True) as fake:
         client = FakeMotionClient(
@@ -935,8 +936,25 @@ def test_failed_remote_motion_can_be_followed_by_success_without_restart(
                 )
             return telemetry(sequence=feedback_sequence, x=101), "second attempt arrived"
 
+        class ScriptedFeedbackTrial(FakeMotionTrial):
+            def observe(self, sample, **kwargs):
+                # Exercise the timeout and arrival with explicit feedback times.
+                # A 1 ms sleep and journal fsyncs may take over 20 ms on CI;
+                # host scheduling must not turn the successful retry into a timeout.
+                assert self.sent_monotonic_ns is not None
+                elapsed_ms = feedback_calls * 10
+                if current_attempt == 1:
+                    elapsed_ms += short_timing.start_ms
+                return super().observe(
+                    sample,
+                    now_monotonic_ns=(
+                        self.sent_monotonic_ns + elapsed_ms * 1_000_000
+                    ),
+                    **kwargs,
+                )
+
         executor = RemoteMotionExecutor(
-            trial_factory=lambda: FakeMotionTrial(
+            trial_factory=lambda: ScriptedFeedbackTrial(
                 client=client,
                 journal=journal,
                 timing=short_timing,
@@ -946,7 +964,7 @@ def test_failed_remote_motion_can_be_followed_by_success_without_restart(
             snapshot=telemetry,
             readback=readback,
             feedback=feedback,
-            poll_interval_s=0.001,
+            poll_interval_s=poll_interval_s,
         )
         try:
             first = envelope("recover-first")
@@ -957,6 +975,7 @@ def test_failed_remote_motion_can_be_followed_by_success_without_restart(
             assert first_result.status == ToolStatus.FAILED
             assert first_result.error_code == ErrorCode.ROBOT_TIMEOUT
             assert "startup deadline" in (first_result.error_message or "")
+            assert journal.record(first.command_id)["state"] == "stopped"
             assert journal.unresolved() == ()
 
             current_attempt = 2
@@ -966,8 +985,17 @@ def test_failed_remote_motion_can_be_followed_by_success_without_restart(
                 second,
                 command_fingerprint(second),
             )
-            assert second_result.status == ToolStatus.SUCCESS
+            assert second_result.status == ToolStatus.SUCCESS, (
+                second_result.error_code, second_result.error_message,
+            )
+            assert journal.record(second.command_id)["state"] == "succeeded"
             assert journal.unresolved() == ()
+            assert sum(
+                frame.startswith(b"WayPoint,") for frame in fake.received_commands
+            ) == 2
+            assert sum(
+                frame.startswith(b"GrpStop,") for frame in fake.received_commands
+            ) == 1
         finally:
             journal.close()
             client.close()

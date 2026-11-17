@@ -8,6 +8,7 @@ on:
       - 'simulation/entry_point_env/**'
       - 'configs/simulation.yaml'
       - 'tests/unit/edge_gateway/test_gateway_portability.py'
+      - 'tests/integration/test_real_motion_fake.py'
       - '.github/workflows/gateway-portability.yml'
   pull_request:
     paths:
@@ -15,6 +16,7 @@ on:
       - 'packages/surgical_contracts/**'
       - 'scripts/edge/**'
       - 'tests/unit/edge_gateway/test_gateway_portability.py'
+      - 'tests/integration/test_real_motion_fake.py'
       - '.github/workflows/gateway-portability.yml'
 jobs:
   offline-gateway:
